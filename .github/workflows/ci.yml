@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck client & server
+        run: npm run typecheck
+
+      - name: Run cryptographic & API tests
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Verify Docker image build & healthcheck
+        run: |
+          docker build -t privatespace-system:ci .
+          docker run -d --name pss-ci -p 18080:8080 -e ADMIN_PASSWORD=CiTestMasterPass!2026 privatespace-system:ci
+          for i in $(seq 1 15); do
+            if curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"initialized":true'; then
+              echo "Docker container healthy and initialized!"
+              docker rm -f pss-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs pss-ci
+          docker rm -f pss-ci
+          exit 1

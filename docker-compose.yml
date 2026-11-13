@@ -1,0 +1,31 @@
+services:
+  privatespace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: privatespace-system:latest
+    container_name: privatespace
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATA_DIR: /data
+      VAULT_NAME: ${VAULT_NAME:-PrivateSpace}
+      # 可选：首次启动时若设置 ADMIN_PASSWORD（至少 8 位），将自动初始化唯一管理员账户；
+      # 若留空，首次访问网页端时可通过引导界面交互式设置管理员主密码。
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-72}
+      # 若置于 HTTPS 反向代理（Nginx / Caddy / Traefik）之后，建议设为 true
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    volumes:
+      - privatespace_data:/data
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  privatespace_data:
+    driver: local

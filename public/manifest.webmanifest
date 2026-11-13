@@ -1,0 +1,17 @@
+{
+  "name": "PrivateSpace · 私密空间",
+  "short_name": "PrivateSpace",
+  "description": "自部署、端到端存储加密的私密文本记录与多端同步空间",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F8F7F4",
+  "theme_color": "#266454",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
