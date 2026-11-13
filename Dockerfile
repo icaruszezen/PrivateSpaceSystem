@@ -3,7 +3,7 @@
 # ============================================================================
 # Stage 1: Build Frontend (Vite + React) & Backend (TypeScript -> Node 24 ESM)
 # ============================================================================
-FROM node:24-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 

@@ -1,5 +1,7 @@
 # PrivateSpace · 私密空间
 
+[![CI & Docker Build](https://github.com/icaruszezen/PrivateSpaceSystem/actions/workflows/ci.yml/badge.svg)](https://github.com/icaruszezen/PrivateSpaceSystem/actions/workflows/ci.yml)
+
 一个自部署、现代简洁、静态数据全加密的个人私密存储与多端同步空间。
 
 当前版本已完成核心基础底座与第一阶段功能闭环：
@@ -7,13 +9,28 @@
 - **唯一管理员登录**：数据库底层强制单管理员约束（`CHECK id = 1`），无第三方注册入口。支持首次访问交互式初始化，或通过环境变量 `ADMIN_PASSWORD` 无头自动初始化；内置登录防暴力破解限流与内存级临时密钥自动擦除机制。
 - **文本记录空间**：支持 Markdown 与纯文本创作，提供 **编辑 / 分栏 / 预览** 三种视图、自动加密保存、可交互待办复选框、置顶、标签分类、全文瞬时检索、`⌘K` 快捷命令面板、归档收纳、回收站恢复/彻底销毁，以及 **实时 SQLite 密文信封透视面板**。
 - **多端同步底座**：提供版本化 REST API 与单调递增游标增量同步协议（`/api/v1/sync?since_seq=...`），同时支持 `HttpOnly Cookie`（网页端）与 `Bearer Token`（面向后续 Android / iOS 原生客户端），并内置响应式移动端布局与 PWA 清单。
-- **Docker 一键部署**：基于 Node.js 24 原生内置 `node:sqlite` 与 OpenSSL `node:crypto`，无任何 C++ 原生插件编译依赖，跨 `amd64` / `arm64` 架构开箱即用。
+- **Docker 一键部署 & GitHub 自动构建**：每次推送或发布标签均由 GitHub Actions 自动执行全量加密测试，并构建 `linux/amd64` 与 `linux/arm64` 多架构镜像发布至 `ghcr.io/icaruszezen/privatespacesystem`。
 
 ---
 
-## 快速开始（Docker Compose 自部署）
+## 快速开始（Docker 自部署）
 
-### 1. 启动服务
+### 方式一：直接拉取 GitHub 自动构建镜像（推荐）
+
+```bash
+git clone https://github.com/icaruszezen/PrivateSpaceSystem.git
+cd PrivateSpaceSystem
+cp .env.example .env
+docker compose pull && docker compose up -d
+```
+
+也可无需克隆仓库单行启动：
+
+```bash
+docker run -d --name privatespace -p 8080:8080 -v privatespace_data:/data ghcr.io/icaruszezen/privatespacesystem:latest
+```
+
+### 方式二：源码本地构建启动
 
 ```bash
 git clone https://github.com/icaruszezen/PrivateSpaceSystem.git

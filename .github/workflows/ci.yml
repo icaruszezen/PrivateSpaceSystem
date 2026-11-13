@@ -1,14 +1,27 @@
-name: CI
+name: CI & Docker Build
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/icaruszezen/privatespacesystem
 
 jobs:
   verify:
+    name: Typecheck, Crypto Tests & Container Smoke Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -31,18 +44,79 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
-      - name: Verify Docker image build & healthcheck
+      - name: Build & smoke-test Docker container
         run: |
           docker build -t privatespace-system:ci .
-          docker run -d --name pss-ci -p 18080:8080 -e ADMIN_PASSWORD=CiTestMasterPass!2026 privatespace-system:ci
-          for i in $(seq 1 15); do
+          docker run -d --name pss-ci \
+            -p 18080:8080 \
+            -e ADMIN_PASSWORD=CiTestMasterPass!2026 \
+            privatespace-system:ci
+
+          for i in $(seq 1 20); do
             if curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"initialized":true'; then
-              echo "Docker container healthy and initialized!"
+              echo "Container healthcheck & bootstrap verified!"
+              TOKEN=$(curl -sf -X POST http://127.0.0.1:18080/api/v1/auth/login \
+                -H 'Content-Type: application/json' \
+                -d '{"password":"CiTestMasterPass!2026"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
+              curl -sf -X POST http://127.0.0.1:18080/api/v1/notes \
+                -H 'Content-Type: application/json' \
+                -H "Authorization: Bearer $TOKEN" \
+                -d '{"title":"CI Smoke Test","content":"AES-256-GCM verified in container"}' | grep -q '"revision":1'
+              echo "End-to-end encrypted note creation verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi
             sleep 1
           done
+
           docker logs pss-ci
           docker rm -f pss-ci
           exit 1
+
+  docker-publish:
+    name: Multi-Arch Docker Build & Push (GHCR)
+    needs: verify
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU for multi-arch support
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract OCI metadata and image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build and push multi-arch image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

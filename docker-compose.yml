@@ -1,9 +1,9 @@
 services:
   privatespace:
+    image: ghcr.io/icaruszezen/privatespacesystem:latest
     build:
       context: .
       dockerfile: Dockerfile
-    image: privatespace-system:latest
     container_name: privatespace
     restart: unless-stopped
     ports:
