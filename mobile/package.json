@@ -1,0 +1,17 @@
+{
+  "name": "privatespace-mobile",
+  "version": "0.2.0",
+  "private": true,
+  "description": "PrivateSpace Android & iOS Multi-Device Sync Client (React Native / Expo)",
+  "main": "App.tsx",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-native": ">=0.76.0"
+  }
+}

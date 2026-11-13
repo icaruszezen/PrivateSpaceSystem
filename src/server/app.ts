@@ -5,20 +5,26 @@ import { cors } from 'hono/cors';
 import { secureHeaders } from 'hono/secure-headers';
 import type { DatabaseSync } from 'node:sqlite';
 import type { ServerConfig } from './config.js';
+import { EncryptedChunkStore } from './crypto/chunkStore.js';
 import { EphemeralSessionCrypto, LoginRateLimiter } from './crypto/sessionStore.js';
 import { createMasterKeyEnvelope } from './crypto/vaultCrypto.js';
 import { openVaultDatabase } from './db/database.js';
 import { VaultRepository } from './db/repositories.js';
 import { createAuthRoutes } from './routes/auth.js';
 import { createHealthRoutes } from './routes/health.js';
+import { createMediaRoutes } from './routes/media.js';
 import { createNotesRoutes } from './routes/notes.js';
+import { createPasswordsRoutes } from './routes/passwords.js';
 import { createSyncRoutes } from './routes/sync.js';
+import { SyncSseHub } from './sync/sseHub.js';
 
 export interface AppInstance {
   app: Hono;
   db: DatabaseSync;
   repo: VaultRepository;
+  chunkStore: EncryptedChunkStore;
   sessionCrypto: EphemeralSessionCrypto;
+  sseHub: SyncSseHub;
   close: () => void;
 }
 
@@ -38,9 +44,15 @@ const MIME_TYPES: Record<string, string> = {
 
 export function createApp(config: ServerConfig): AppInstance {
   const db = openVaultDatabase(config.dbPath);
+  const chunkStore = new EncryptedChunkStore(config.dataDir);
   const repo = new VaultRepository(db);
   const sessionCrypto = new EphemeralSessionCrypto();
   const rateLimiter = new LoginRateLimiter();
+  const sseHub = new SyncSseHub();
+
+  repo.setSyncNotifier((latestSyncSeq, itemType) => {
+    sseHub.broadcast(latestSyncSeq, itemType);
+  });
 
   // Optional headless bootstrap via ADMIN_PASSWORD environment variable (e.g., Docker Compose)
   if (config.adminBootstrapPassword && !repo.getAdminConfig()) {
@@ -74,8 +86,9 @@ export function createApp(config: ServerConfig): AppInstance {
       cors({
         origin: config.corsOrigins,
         credentials: true,
-        allowHeaders: ['Content-Type', 'Authorization'],
-        allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowHeaders: ['Content-Type', 'Authorization', 'Range'],
+        exposeHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
+        allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       }),
     );
   }
@@ -105,7 +118,9 @@ export function createApp(config: ServerConfig): AppInstance {
   app.route('/api/v1/health', createHealthRoutes(repo));
   app.route('/api/v1/auth', createAuthRoutes(repo, sessionCrypto, rateLimiter, config));
   app.route('/api/v1/notes', createNotesRoutes(repo, sessionCrypto));
-  app.route('/api/v1/sync', createSyncRoutes(repo, sessionCrypto));
+  app.route('/api/v1/passwords', createPasswordsRoutes(repo, sessionCrypto));
+  app.route('/api/v1/media', createMediaRoutes(repo, sessionCrypto, chunkStore));
+  app.route('/api/v1/sync', createSyncRoutes(repo, sessionCrypto, sseHub));
 
   // Unmatched API 404
   app.all('/api/*', (c) =>
@@ -128,7 +143,6 @@ export function createApp(config: ServerConfig): AppInstance {
       const relativePath = reqPath === '/' ? 'index.html' : reqPath.replace(/^\/+/, '');
       const resolvedPath = path.resolve(clientDistDir, relativePath);
 
-      // Guard against directory traversal
       if (resolvedPath.startsWith(clientDistDir) && fs.existsSync(resolvedPath)) {
         const stat = fs.statSync(resolvedPath);
         if (stat.isFile()) {
@@ -148,7 +162,6 @@ export function createApp(config: ServerConfig): AppInstance {
         }
       }
 
-      // SPA fallback to index.html
       const indexHtmlPath = path.join(clientDistDir, 'index.html');
       if (fs.existsSync(indexHtmlPath)) {
         const html = fs.readFileSync(indexHtmlPath);
@@ -169,7 +182,9 @@ export function createApp(config: ServerConfig): AppInstance {
     app,
     db,
     repo,
+    chunkStore,
     sessionCrypto,
+    sseHub,
     close: () => {
       db.close();
     },

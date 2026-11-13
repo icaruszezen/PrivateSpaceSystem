@@ -6,6 +6,7 @@ export const ENCRYPTION_SPEC: EncryptionSpecInfo = {
   keyWrap: 'AES-256-GCM Envelope (DEK + KEK)',
   itemKdf: 'HKDF-SHA256',
   passwordKdf: 'scrypt (N=32768, r=8, p=1)',
+  mediaStreamCipher: 'PSENC001 64KiB Chunked AES-256-GCM',
   aadBound: true,
 };
 
@@ -152,13 +153,15 @@ export function unlockMasterKeyEnvelope(
   }
 }
 
-export function buildItemHkdfInfo(itemId: string, itemType: VaultItemType): string {
+export type VaultCipherDomain = VaultItemType | 'album' | 'upload';
+
+export function buildItemHkdfInfo(itemId: string, itemType: VaultCipherDomain): string {
   return `privatespace:item:v1:${itemType}:${itemId}`;
 }
 
 export function buildItemAad(
   itemId: string,
-  itemType: VaultItemType,
+  itemType: VaultCipherDomain,
   revision: number,
   cipherVersion = CIPHER_VERSION,
 ): string {
@@ -174,7 +177,7 @@ function deriveItemKey(
   dek: Buffer,
   itemSalt: Buffer,
   itemId: string,
-  itemType: VaultItemType,
+  itemType: VaultCipherDomain,
 ): Buffer {
   const info = Buffer.from(buildItemHkdfInfo(itemId, itemType), 'utf8');
   const raw = crypto.hkdfSync('sha256', dek, itemSalt, info, 32);
@@ -182,13 +185,13 @@ function deriveItemKey(
 }
 
 /**
- * Encrypts a vault item payload (note title, content, excerpt, tags, format)
+ * Encrypts a vault item payload (note, password, media metadata, album, or upload session)
  * using HKDF-derived per-item key + AES-256-GCM + AAD metadata binding.
  */
 export function encryptVaultPayload<T>(
   dek: Buffer,
   itemId: string,
-  itemType: VaultItemType,
+  itemType: VaultCipherDomain,
   revision: number,
   payload: T,
 ): EncryptedItemEnvelope {
@@ -224,7 +227,7 @@ export function encryptVaultPayload<T>(
 export function decryptVaultPayload<T = NoteDecryptedPayload>(
   dek: Buffer,
   itemId: string,
-  itemType: VaultItemType,
+  itemType: VaultCipherDomain,
   revision: number,
   envelope: {
     cipherVersion: number;

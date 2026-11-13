@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { KeyRound, Laptop, ShieldCheck, Smartphone, Trash2, X } from 'lucide-react';
+import { Copy, KeyRound, Laptop, ShieldCheck, Smartphone, Trash2, X } from 'lucide-react';
 import type {
   CipherEnvelopeInspection,
   SessionInfo,
@@ -17,7 +17,7 @@ export type SecurityTab = 'cipher' | 'password' | 'sessions';
 interface SecurityModalProps {
   open: boolean;
   initialTab: SecurityTab;
-  inspectNoteId: string | null;
+  inspectItemId: string | null;
   vaultName: string;
   onClose: () => void;
   onVaultNameUpdated: (newName: string) => void;
@@ -27,7 +27,7 @@ interface SecurityModalProps {
 export const SecurityModal: React.FC<SecurityModalProps> = ({
   open,
   initialTab,
-  inspectNoteId,
+  inspectItemId,
   vaultName,
   onClose,
   onVaultNameUpdated,
@@ -76,8 +76,8 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
         setSummary(sec);
         setSessions(sess.sessions);
 
-        if (inspectNoteId) {
-          const envRes = await api.inspectNoteCipher(inspectNoteId).catch(() => null);
+        if (inspectItemId) {
+          const envRes = await api.inspectItemCipher(inspectItemId).catch(() => null);
           if (!cancelled) {
             setEnvelope(envRes?.envelope ?? null);
           }
@@ -93,7 +93,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [open, inspectNoteId]);
+  }, [open, inspectItemId]);
 
   useEffect(() => {
     if (!open) return;
@@ -107,6 +107,8 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   if (!open) return null;
 
   const strength = evaluatePasswordStrength(newPassword);
+  const serverEndpoint =
+    typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8080';
 
   async function handleSaveVaultName(e: React.FormEvent) {
     e.preventDefault();
@@ -164,6 +166,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
     >
       <div
         className="modal-dialog"
+        style={{ maxWidth: 660 }}
         role="dialog"
         aria-modal="true"
         aria-labelledby="security-modal-title"
@@ -172,7 +175,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
           <div className="modal-title-wrap">
             <ShieldCheck size={19} style={{ color: 'var(--accent)' }} />
             <h2 id="security-modal-title" className="modal-title">
-              安全中心与加密存储验证
+              安全中心、加密透视与多端同步 (Web · Android · iOS)
             </h2>
           </div>
           <button
@@ -198,6 +201,17 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <span>密文存储透视</span>
           </button>
           <button
+            id="sec-tab-sessions"
+            type="button"
+            role="tab"
+            aria-selected={tab === 'sessions'}
+            className={`modal-tab ${tab === 'sessions' ? 'is-active' : ''}`}
+            onClick={() => setTab('sessions')}
+          >
+            <Laptop size={14} />
+            <span>多端同步与设备 ({sessions.length})</span>
+          </button>
+          <button
             id="sec-tab-password"
             type="button"
             role="tab"
@@ -208,17 +222,6 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <KeyRound size={14} />
             <span>管理员密码与设置</span>
           </button>
-          <button
-            id="sec-tab-sessions"
-            type="button"
-            role="tab"
-            aria-selected={tab === 'sessions'}
-            className={`modal-tab ${tab === 'sessions' ? 'is-active' : ''}`}
-            onClick={() => setTab('sessions')}
-          >
-            <Laptop size={14} />
-            <span>多端会话 ({sessions.length})</span>
-          </button>
         </div>
 
         <div className="modal-body">
@@ -226,8 +229,8 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <>
               <div className="sec-stat-grid">
                 <div className="sec-stat-card">
-                  <div className="sec-stat-label">加密套件</div>
-                  <div className="sec-stat-value">AES-256-GCM</div>
+                  <div className="sec-stat-label">加密套件 / 媒体分块</div>
+                  <div className="sec-stat-value">AES-256-GCM · PSENC001</div>
                 </div>
                 <div className="sec-stat-card">
                   <div className="sec-stat-label">主密钥指纹 (HMAC)</div>
@@ -236,10 +239,10 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                   </div>
                 </div>
                 <div className="sec-stat-card">
-                  <div className="sec-stat-label">加密记录 / 密文体积</div>
-                  <div className="sec-stat-value">
+                  <div className="sec-stat-label">总密文占用 / 同步游标</div>
+                  <div className="sec-stat-value mono">
                     {summary
-                      ? `${summary.totalNotes} 篇 · ${formatBytes(summary.totalEncryptedBytes)}`
+                      ? `${formatBytes(summary.totalEncryptedBytes)} · #${summary.latestSyncSeq}`
                       : loading
                         ? '读取中...'
                         : '0 B'}
@@ -247,10 +250,37 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                 </div>
               </div>
 
+              {summary && (
+                <div className="pss-breakdown-grid">
+                  <div className="pss-breakdown-card">
+                    <span>私密密码</span>
+                    <strong>{summary.activePasswords} 条</strong>
+                    <small className="mono">{formatBytes(summary.passwordsEncryptedBytes)}</small>
+                  </div>
+                  <div className="pss-breakdown-card">
+                    <span>加密图片</span>
+                    <strong>{summary.activeImages} 张</strong>
+                    <small className="mono">{formatBytes(summary.imagesEncryptedBytes)}</small>
+                  </div>
+                  <div className="pss-breakdown-card">
+                    <span>流式视频</span>
+                    <strong>{summary.activeVideos} 部</strong>
+                    <small className="mono">{formatBytes(summary.videosEncryptedBytes)}</small>
+                  </div>
+                  <div className="pss-breakdown-card">
+                    <span>加密文本</span>
+                    <strong>{summary.activeNotes} 篇</strong>
+                    <small className="mono">{formatBytes(summary.notesEncryptedBytes)}</small>
+                  </div>
+                </div>
+              )}
+
               {envelope ? (
                 <div className="cipher-inspector-box">
                   <div className="cipher-inspector-head">
-                    <span>当前选中记录 · SQLite 真实存储信封</span>
+                    <span>
+                      当前检视记录 ({envelope.itemType.toUpperCase()}) · 底层加密信封
+                    </span>
                     <span className="mono" style={{ color: 'var(--accent)' }}>
                       Rev v{envelope.revision} · Sync #{envelope.syncSeq}
                     </span>
@@ -273,23 +303,43 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                       <span className="cipher-kv-val">{envelope.aadJson}</span>
                     </div>
                     <div className="cipher-kv-row">
-                      <span className="cipher-kv-key">记录随机盐 (128b)</span>
-                      <span className="cipher-kv-val">{envelope.saltHex}</span>
-                    </div>
-                    <div className="cipher-kv-row">
-                      <span className="cipher-kv-key">GCM Nonce (96b)</span>
-                      <span className="cipher-kv-val">{envelope.nonceHex}</span>
+                      <span className="cipher-kv-key">记录随机盐 / Nonce</span>
+                      <span className="cipher-kv-val">
+                        {envelope.saltHex.slice(0, 16)}… / {envelope.nonceHex}
+                      </span>
                     </div>
                     <div className="cipher-kv-row">
                       <span className="cipher-kv-key">GCM 认证标签 (128b)</span>
                       <span className="cipher-kv-val">{envelope.authTagHex}</span>
                     </div>
                     <div className="cipher-kv-row">
-                      <span className="cipher-kv-key">加密保护字段</span>
+                      <span className="cipher-kv-key">零明文保护字段</span>
                       <span className="cipher-kv-val">
-                        {envelope.sqliteColumnsEncrypted.join(', ')}（SQLite 零明文留存）
+                        {envelope.sqliteColumnsEncrypted.join(', ')}
                       </span>
                     </div>
+
+                    {envelope.chunkStore && (
+                      <>
+                        <div className="cipher-kv-row">
+                          <span className="cipher-kv-key">.psenc 分块格式</span>
+                          <span className="cipher-kv-val">
+                            {envelope.chunkStore.formatMagic} · {envelope.chunkStore.chunkCount} ×{' '}
+                            {Math.round(envelope.chunkStore.chunkPlainBytes / 1024)} KiB
+                          </span>
+                        </div>
+                        <div className="cipher-kv-row">
+                          <span className="cipher-kv-key">FEK 信封上下文</span>
+                          <span className="cipher-kv-val">{envelope.chunkStore.fekWrapInfo}</span>
+                        </div>
+                        <div className="cipher-kv-row">
+                          <span className="cipher-kv-key">SHA-256 原始指纹</span>
+                          <span className="cipher-kv-val">
+                            {envelope.chunkStore.sha256Hex}
+                          </span>
+                        </div>
+                      </>
+                    )}
 
                     <div>
                       <div
@@ -310,11 +360,72 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                 <div className="auth-notice">
                   <ShieldCheck size={16} />
                   <span>
-                    在编辑器中打开任意文本记录后，此处将实时读取并展示该记录在 SQLite
-                    数据库中的原始 AES-256-GCM 密文摘要、随机盐、Nonce 与认证标签。
+                    在密码库、加密图库、视频影院或文本编辑器中点击「AES-256-GCM」徽章，即可在此实时检视对应的 SQLite 密文信封与 .psenc 分块元数据。
                   </span>
                 </div>
               )}
+            </>
+          )}
+
+          {tab === 'sessions' && (
+            <>
+              <div className="pss-endpoint-box">
+                <div>
+                  <div className="pss-field-caption">
+                    Android / iOS 客户端接入服务器地址 (Server Endpoint)
+                  </div>
+                  <div className="mono" style={{ fontSize: '0.88rem', fontWeight: 600 }}>
+                    {serverEndpoint}
+                  </div>
+                  <div style={{ fontSize: '0.76rem', color: 'var(--text-tertiary)', marginTop: 3 }}>
+                    通过 <code className="mono">/api/v1/sync?since_seq={summary?.latestSyncSeq ?? 0}</code>{' '}
+                    增量同步密码、图片、视频与文本，并由 SSE 实时推送变更游标。
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  style={{ height: 32, flexShrink: 0 }}
+                  onClick={() => {
+                    void navigator.clipboard.writeText(serverEndpoint);
+                    onNotify('自部署服务地址已复制');
+                  }}
+                >
+                  <Copy size={13} />
+                  <span>复制地址</span>
+                </button>
+              </div>
+
+              <div className="session-list">
+                {sessions.map((s) => (
+                  <div key={s.id} className="session-row">
+                    <div className="session-meta">
+                      <div className="session-device">
+                        <Smartphone size={14} style={{ color: 'var(--accent)' }} />
+                        <span>{s.deviceName}</span>
+                        <span className="tag-chip-mini mono">{s.platform.toUpperCase()}</span>
+                        {s.current && <span className="current-session-pill">当前设备</span>}
+                      </div>
+                      <div className="session-sub">
+                        IP: {s.ipAddress} · 最近活跃: {formatFullDateTime(s.lastActiveAt)} · 过期:{' '}
+                        {formatFullDateTime(s.expiresAt)}
+                      </div>
+                    </div>
+
+                    {!s.current && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        style={{ height: 30, padding: '0 10px', fontSize: '0.78rem' }}
+                        onClick={() => void handleRevokeSession(s.id)}
+                      >
+                        <Trash2 size={13} />
+                        <span>吊销授权</span>
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
             </>
           )}
 
@@ -353,8 +464,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                 <div className="auth-notice">
                   <KeyRound size={16} />
                   <span>
-                    本系统仅存在唯一管理员账户。采用信封加密机制，修改管理员密码仅重新包裹
-                    256 位空间主密钥（DEK），所有历史加密记录自动无缝衔接。
+                    采用信封加密机制，修改管理员主密码仅重新包裹 256 位空间主密钥（DEK），所有已存储的密码、.psenc 图片与高清视频无需重加密即可无缝访问。
                   </span>
                 </div>
 
@@ -437,49 +547,6 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                   {pwdSubmitting ? '正在重新封装主密钥...' : '轮换管理员密码'}
                 </button>
               </form>
-            </>
-          )}
-
-          {tab === 'sessions' && (
-            <>
-              <div className="auth-notice">
-                <Smartphone size={16} />
-                <span>
-                  支持网页端、Android 与 iOS 客户端通过{' '}
-                  <code className="mono">/api/v1/sync?since_seq=...</code>{' '}
-                  游标协议增量同步加密记录。下方列出当前处于解锁有效期的全部设备会话。
-                </span>
-              </div>
-
-              <div className="session-list">
-                {sessions.map((s) => (
-                  <div key={s.id} className="session-row">
-                    <div className="session-meta">
-                      <div className="session-device">
-                        <span>{s.deviceName}</span>
-                        <span className="tag-chip-mini mono">{s.platform.toUpperCase()}</span>
-                        {s.current && <span className="current-session-pill">当前设备</span>}
-                      </div>
-                      <div className="session-sub">
-                        IP: {s.ipAddress} · 最近活跃: {formatFullDateTime(s.lastActiveAt)} · 过期:{' '}
-                        {formatFullDateTime(s.expiresAt)}
-                      </div>
-                    </div>
-
-                    {!s.current && (
-                      <button
-                        type="button"
-                        className="btn btn-danger"
-                        style={{ height: 30, padding: '0 10px', fontSize: '0.78rem' }}
-                        onClick={() => void handleRevokeSession(s.id)}
-                      >
-                        <Trash2 size={13} />
-                        <span>吊销</span>
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
             </>
           )}
         </div>

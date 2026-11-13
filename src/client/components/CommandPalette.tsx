@@ -1,14 +1,30 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { FilePlus2, FileText, Lock, Moon, Search, ShieldCheck, Sun } from 'lucide-react';
-import type { NoteItem } from '@shared/types';
-import { formatShortDate } from '../utils/format';
+import {
+  FilePlus2,
+  FileText,
+  Film,
+  Image as ImageIcon,
+  KeyRound,
+  Lock,
+  Moon,
+  Search,
+  ShieldCheck,
+  Sun,
+} from 'lucide-react';
+import type { MediaItem, NoteItem, PasswordItem } from '@shared/types';
+import { formatBytes, formatShortDate } from '../utils/format';
+import type { WorkspaceSection } from './Sidebar';
 
 interface CommandPaletteProps {
   open: boolean;
   notes: NoteItem[];
+  passwords: PasswordItem[];
+  mediaItems: MediaItem[];
   theme: 'light' | 'dark';
   onClose: () => void;
+  onSelectSection: (sec: WorkspaceSection) => void;
   onSelectNote: (id: string) => void;
+  onSelectPassword: (id: string) => void;
   onCreateNote: () => void;
   onToggleTheme: () => void;
   onOpenSecurity: () => void;
@@ -26,9 +42,13 @@ interface PaletteEntry {
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
   open,
   notes,
+  passwords,
+  mediaItems,
   theme,
   onClose,
+  onSelectSection,
   onSelectNote,
+  onSelectPassword,
   onCreateNote,
   onToggleTheme,
   onOpenSecurity,
@@ -49,6 +69,36 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
     const quickCommands: PaletteEntry[] = [
       {
+        id: 'cmd-sec-passwords',
+        label: '前往私密密码库 (TOTP / 强密码审计)',
+        sub: '空间切换',
+        icon: <KeyRound size={15} />,
+        run: () => {
+          onSelectSection('passwords');
+          onClose();
+        },
+      },
+      {
+        id: 'cmd-sec-images',
+        label: '前往私密加密图库 (.psenc 分块原图)',
+        sub: '空间切换',
+        icon: <ImageIcon size={15} />,
+        run: () => {
+          onSelectSection('images');
+          onClose();
+        },
+      },
+      {
+        id: 'cmd-sec-videos',
+        label: '前往私密视频影院 (HTTP 206 流式播放)',
+        sub: '空间切换',
+        icon: <Film size={15} />,
+        run: () => {
+          onSelectSection('videos');
+          onClose();
+        },
+      },
+      {
         id: 'cmd-new',
         label: '新建私密文本记录',
         sub: '快捷键 ⌘N',
@@ -60,7 +110,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       },
       {
         id: 'cmd-security',
-        label: '打开安全中心与密文存储透视',
+        label: '打开安全中心、多端会话与密文透视',
         sub: 'AES-256-GCM',
         icon: <ShieldCheck size={15} />,
         run: () => {
@@ -96,37 +146,88 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         )
       : quickCommands;
 
-    const activeNotes = notes.filter((n) => !n.isTrashed);
-    const matchedNotes = (
-      q
-        ? activeNotes.filter(
-            (n) =>
-              n.title.toLowerCase().includes(q) ||
-              n.content.toLowerCase().includes(q) ||
-              n.tags.some((t) => t.toLowerCase().includes(q)),
-          )
-        : activeNotes.slice(0, 8)
-    ).map<PaletteEntry>((n) => ({
-      id: `note-${n.id}`,
-      label: n.title || '无标题记录',
-      sub: formatShortDate(n.updatedAt),
-      icon: <FileText size={15} />,
-      run: () => {
-        onSelectNote(n.id);
-        onClose();
-      },
-    }));
+    const matchedPasswords = passwords
+      .filter(
+        (p) =>
+          !p.isTrashed &&
+          (q
+            ? p.title.toLowerCase().includes(q) ||
+              p.username.toLowerCase().includes(q) ||
+              p.url.toLowerCase().includes(q)
+            : true),
+      )
+      .slice(0, q ? 8 : 4)
+      .map<PaletteEntry>((p) => ({
+        id: `pwd-${p.id}`,
+        label: p.title,
+        sub: `密码 · ${p.username || p.url || 'AES-256-GCM'}`,
+        icon: <KeyRound size={15} />,
+        run: () => {
+          onSelectSection('passwords');
+          onSelectPassword(p.id);
+          onClose();
+        },
+      }));
 
-    return [...matchedNotes, ...filteredCommands];
+    const matchedMedia = mediaItems
+      .filter(
+        (m) =>
+          !m.isTrashed &&
+          (q
+            ? m.title.toLowerCase().includes(q) ||
+              m.originalFilename.toLowerCase().includes(q) ||
+              m.tags.some((t) => t.toLowerCase().includes(q))
+            : false),
+      )
+      .slice(0, 6)
+      .map<PaletteEntry>((m) => ({
+        id: `media-${m.id}`,
+        label: m.title,
+        sub: `${m.itemType === 'video' ? '视频' : '图片'} · ${formatBytes(m.byteSize)}`,
+        icon: m.itemType === 'video' ? <Film size={15} /> : <ImageIcon size={15} />,
+        run: () => {
+          onSelectSection(m.itemType === 'video' ? 'videos' : 'images');
+          onClose();
+        },
+      }));
+
+    const matchedNotes = notes
+      .filter(
+        (n) =>
+          !n.isTrashed &&
+          (q
+            ? n.title.toLowerCase().includes(q) ||
+              n.content.toLowerCase().includes(q) ||
+              n.tags.some((t) => t.toLowerCase().includes(q))
+            : true),
+      )
+      .slice(0, q ? 8 : 4)
+      .map<PaletteEntry>((n) => ({
+        id: `note-${n.id}`,
+        label: n.title || '无标题记录',
+        sub: `文本 · ${formatShortDate(n.updatedAt)}`,
+        icon: <FileText size={15} />,
+        run: () => {
+          onSelectSection('notes');
+          onSelectNote(n.id);
+          onClose();
+        },
+      }));
+
+    return [...matchedPasswords, ...matchedMedia, ...matchedNotes, ...filteredCommands];
   }, [
     query,
     notes,
+    passwords,
+    mediaItems,
     theme,
+    onSelectSection,
+    onSelectNote,
+    onSelectPassword,
     onCreateNote,
     onOpenSecurity,
     onToggleTheme,
     onLockVault,
-    onSelectNote,
     onClose,
   ]);
 
@@ -149,7 +250,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           <input
             type="text"
             className="palette-input"
-            placeholder="搜索文本记录标题、正文或执行快捷操作..."
+            placeholder="全局搜索密码、图片、视频、文本或执行指令..."
             value={query}
             autoFocus
             onChange={(e) => setQuery(e.target.value)}

@@ -29,7 +29,10 @@ ENV NODE_ENV=production \
     DATA_DIR=/data \
     SESSION_TTL_HOURS=72
 
-RUN mkdir -p /data && chown -R node:node /data /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /data && chown -R node:node /data /app
 
 COPY --chown=node:node --from=builder /app/package.json ./package.json
 COPY --chown=node:node --from=builder /app/node_modules ./node_modules
