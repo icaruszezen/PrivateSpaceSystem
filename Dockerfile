@@ -13,6 +13,7 @@ RUN npm ci
 COPY tsconfig.json tsconfig.server.json vite.config.ts ./
 COPY public ./public
 COPY src ./src
+COPY mobile ./mobile
 
 RUN npm run build && npm prune --omit=dev
 

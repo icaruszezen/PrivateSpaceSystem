@@ -1,0 +1,344 @@
+:root {
+  --ios-studio-bg: #efede7;
+  --ios-studio-card: #ffffff;
+  --ios-studio-border: #dcd8ce;
+  --ios-studio-text: #182024;
+  --ios-studio-muted: #5a6469;
+  --ios-studio-accent: #266454;
+  --ios-studio-accent-soft: rgba(38, 100, 84, 0.11);
+}
+
+[data-ios-theme='dark'] {
+  --ios-studio-bg: #0c1012;
+  --ios-studio-card: #161c1f;
+  --ios-studio-border: #263035;
+  --ios-studio-text: #ebe8e0;
+  --ios-studio-muted: #96a1a6;
+  --ios-studio-accent: #4cb997;
+  --ios-studio-accent-soft: rgba(76, 185, 151, 0.15);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#ios-root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Hiragino Sans GB',
+    'Noto Sans SC', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background: var(--ios-studio-bg);
+  color: var(--ios-studio-text);
+  overflow: hidden;
+}
+
+@keyframes pssSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rn-scroll-view::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.rn-scroll-view::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 135, 0.28);
+  border-radius: 999px;
+}
+
+.rn-touchable {
+  transition: transform 110ms ease, opacity 120ms ease;
+}
+
+.rn-touchable:active {
+  transform: scale(0.985);
+}
+
+/* Native Fullscreen Mode (Real iPhone Safari / PWA / Mobile Viewport) */
+.ios-native-fullscreen {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Desktop Studio Showcase Layout */
+.ios-studio-layout {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(300px, 390px) minmax(420px, 1fr);
+  gap: 28px;
+  padding: 24px 36px;
+  align-items: center;
+  max-width: 1380px;
+  margin: 0 auto;
+}
+
+.ios-studio-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ios-studio-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: flex-start;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--ios-studio-accent);
+  background: var(--ios-studio-accent-soft);
+}
+
+.ios-studio-title {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.18;
+  color: var(--ios-studio-text);
+}
+
+.ios-studio-desc {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ios-studio-muted);
+}
+
+.ios-studio-panel {
+  background: var(--ios-studio-card);
+  border: 1px solid var(--ios-studio-border);
+  border-radius: 16px;
+  padding: 15px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ios-studio-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ios-studio-text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ios-device-Seg {
+  display: flex;
+  gap: 6px;
+}
+
+.ios-device-btn {
+  flex: 1;
+  border: 1px solid var(--ios-studio-border);
+  background: transparent;
+  color: var(--ios-studio-muted);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 140ms ease;
+}
+
+.ios-device-btn.is-active {
+  background: var(--ios-studio-accent);
+  border-color: var(--ios-studio-accent);
+  color: #ffffff;
+}
+
+[data-ios-theme='dark'] .ios-device-btn.is-active {
+  color: #101715;
+}
+
+.ios-arch-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--ios-studio-muted);
+  line-height: 1.48;
+}
+
+.ios-arch-list code {
+  font-family: 'SFMono-Regular', 'JetBrains Mono', monospace;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--ios-studio-accent-soft);
+  color: var(--ios-studio-accent);
+}
+
+.ios-studio-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ios-studio-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  padding: 8px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--ios-studio-border);
+  background: var(--ios-studio-card);
+  color: var(--ios-studio-text);
+}
+
+/* Titanium iPhone 16 Pro / iPad Mini Stage */
+.ios-stage-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 0;
+}
+
+.ios-bezel-frame {
+  position: relative;
+  width: 402px;
+  height: min(852px, calc(100vh - 44px));
+  border-radius: 50px;
+  padding: 11px;
+  background: linear-gradient(145deg, #3b4245 0%, #1d2224 48%, #2e3538 100%);
+  box-shadow:
+    0 26px 64px rgba(10, 15, 17, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.14) inset;
+  display: flex;
+  flex-direction: column;
+  transition: width 220ms ease, height 220ms ease, border-radius 220ms ease;
+}
+
+.ios-bezel-frame.is-ipad {
+  width: min(680px, 100%);
+  height: min(860px, calc(100vh - 44px));
+  border-radius: 36px;
+}
+
+.ios-screen-inner {
+  flex: 1;
+  width: 100%;
+  border-radius: 40px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: #f6f4ef;
+}
+
+.ios-bezel-frame.is-ipad .ios-screen-inner {
+  border-radius: 26px;
+}
+
+[data-ios-theme='dark'] .ios-screen-inner {
+  background: #131719;
+}
+
+/* iOS Status Bar + Dynamic Island */
+.ios-statusbar {
+  height: 44px;
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 700;
+  flex-shrink: 0;
+  position: relative;
+  background: #ffffff;
+  color: #1a2125;
+}
+
+[data-ios-theme='dark'] .ios-statusbar {
+  background: #1d2326;
+  color: #ebe8e0;
+}
+
+.ios-dynamic-island {
+  position: absolute;
+  left: 50%;
+  top: 9px;
+  transform: translateX(-50%);
+  width: 108px;
+  height: 26px;
+  border-radius: 999px;
+  background: #0a0c0d;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 9px;
+}
+
+.ios-island-lens {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #2a5c50 0%, #0d1517 70%);
+}
+
+.ios-app-viewport {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.ios-home-indicator-bar {
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.94);
+}
+
+[data-ios-theme='dark'] .ios-home-indicator-bar {
+  background: rgba(23, 28, 30, 0.94);
+}
+
+.ios-home-pill {
+  width: 124px;
+  height: 4.5px;
+  border-radius: 999px;
+  background: rgba(26, 33, 37, 0.28);
+}
+
+[data-ios-theme='dark'] .ios-home-pill {
+  background: rgba(235, 232, 224, 0.3);
+}
+
+@media (max-width: 920px) {
+  .ios-studio-layout {
+    grid-template-columns: 1fr;
+    padding: 12px;
+  }
+  .ios-studio-sidebar {
+    display: none;
+  }
+}

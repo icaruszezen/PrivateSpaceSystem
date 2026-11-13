@@ -35,13 +35,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck client & server
+      - name: Typecheck client, server & mobile SDK
         run: npm run typecheck
 
-      - name: Run cryptographic & API tests
+      - name: Run cryptographic, API & iOS mobile tests
         run: npm test
 
-      - name: Build production bundle
+      - name: Build production bundle (Web + /ios MPA + Server)
         run: npm run build
 
       - name: Build & smoke-test Docker container
@@ -55,9 +55,11 @@ jobs:
           for i in $(seq 1 20); do
             if curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"initialized":true'; then
               echo "Container healthcheck & bootstrap verified!"
+              curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
+              curl -sf http://127.0.0.1:18080/ios | grep -q 'ios-root'
               TOKEN=$(curl -sf -X POST http://127.0.0.1:18080/api/v1/auth/login \
                 -H 'Content-Type: application/json' \
-                -d '{"password":"CiTestMasterPass!2026"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
+                -d '{"password":"CiTestMasterPass!2026","platform":"ios","deviceName":"CI iPhone"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
               curl -sf -X POST http://127.0.0.1:18080/api/v1/notes \
                 -H 'Content-Type: application/json' \
                 -H "Authorization: Bearer $TOKEN" \
@@ -68,7 +70,7 @@ jobs:
                 -d '{"title":"CI Vault Entry","username":"ops@example.com","password":"Str0ng#Vault!Password99","totpSecret":"JBSWY3DPEHPK3PXP"}' | grep -q '"revision":1'
               curl -sf "http://127.0.0.1:18080/api/v1/sync?since_seq=0" \
                 -H "Authorization: Bearer $TOKEN" | grep -q '"passwords":\['
-              echo "End-to-end encrypted notes, passwords, and delta sync verified inside Docker container!"
+              echo "End-to-end encrypted notes, passwords, /ios app, AASA, and delta sync verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi
@@ -79,9 +81,61 @@ jobs:
           docker rm -f pss-ci
           exit 1
 
+  ios-verify:
+    name: Native iOS SwiftKit XCTest & Xcode Simulator Build
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24 for live E2E backend
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install & build PrivateSpace backend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run SwiftPM PrivateSpaceKitTests against live PrivateSpace server
+        run: |
+          mkdir -p /tmp/pss-ios-ci-data
+          PORT=18080 DATA_DIR=/tmp/pss-ios-ci-data node dist/server/server/index.js > /tmp/pss-ios-ci-server.log 2>&1 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:18080/api/v1/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+          PRIVATESPACE_TEST_SERVER_URL=http://127.0.0.1:18080 swift test --package-path ios
+
+      - name: Generate Xcode project & build PrivateSpaceIOS + AutoFill Extension
+        working-directory: ios
+        run: |
+          command -v xcodegen >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          xcodegen generate
+          xcodebuild \
+            -project PrivateSpaceIOS.xcodeproj \
+            -scheme PrivateSpaceIOS \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
   docker-publish:
     name: Multi-Arch Docker Build & Push (GHCR)
-    needs: verify
+    needs: [verify, ios-verify]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

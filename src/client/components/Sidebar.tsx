@@ -332,6 +332,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </span>
               <span className="nav-count mono">#{latestSyncSeq}</span>
             </button>
+
+            <a
+              id="nav-ios-client"
+              href="/ios"
+              className="nav-item"
+              style={{ textDecoration: 'none' }}
+              onClick={onCloseMobile}
+            >
+              <span className="nav-item-left">
+                <Smartphone size={15} />
+                <span className="nav-item-label">iOS 移动加密空间</span>
+              </span>
+              <span className="nav-count mono">iOS</span>
+            </a>
           </div>
         </div>
 
