@@ -62,7 +62,13 @@ jobs:
                 -H 'Content-Type: application/json' \
                 -H "Authorization: Bearer $TOKEN" \
                 -d '{"title":"CI Smoke Test","content":"AES-256-GCM verified in container"}' | grep -q '"revision":1'
-              echo "End-to-end encrypted note creation verified inside Docker container!"
+              curl -sf -X POST http://127.0.0.1:18080/api/v1/passwords \
+                -H 'Content-Type: application/json' \
+                -H "Authorization: Bearer $TOKEN" \
+                -d '{"title":"CI Vault Entry","username":"ops@example.com","password":"Str0ng#Vault!Password99","totpSecret":"JBSWY3DPEHPK3PXP"}' | grep -q '"revision":1'
+              curl -sf "http://127.0.0.1:18080/api/v1/sync?since_seq=0" \
+                -H "Authorization: Bearer $TOKEN" | grep -q '"passwords":\['
+              echo "End-to-end encrypted notes, passwords, and delta sync verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi

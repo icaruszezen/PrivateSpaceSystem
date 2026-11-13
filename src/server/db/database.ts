@@ -58,8 +58,9 @@ function runMigrations(db: DatabaseSync): void {
 
     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 
-    -- Unified encrypted vault items table
-    -- Sensitive fields (title, content, excerpt, tags, format, wordCount) exist ONLY inside AES-256-GCM ciphertext
+    -- Unified encrypted vault items table ('note' | 'password' | 'image' | 'video')
+    -- Sensitive fields (titles, passwords, TOTP secrets, filenames, tags, media metadata)
+    -- exist ONLY inside AES-256-GCM ciphertext
     CREATE TABLE IF NOT EXISTS vault_items (
       id TEXT PRIMARY KEY,
       item_type TEXT NOT NULL DEFAULT 'note',
@@ -83,6 +84,65 @@ function runMigrations(db: DatabaseSync): void {
       ON vault_items(item_type, is_trashed, is_pinned DESC, updated_at DESC);
     CREATE INDEX IF NOT EXISTS idx_vault_items_sync_seq
       ON vault_items(sync_seq);
+
+    -- Encrypted chunked media blob key envelopes (.psenc files on disk)
+    -- Contains zero cleartext filenames, titles, dimensions, or user tags
+    CREATE TABLE IF NOT EXISTS media_blobs (
+      item_id TEXT PRIMARY KEY REFERENCES vault_items(id) ON DELETE CASCADE,
+      blob_id TEXT NOT NULL,
+      fek_salt BLOB NOT NULL,
+      fek_nonce BLOB NOT NULL,
+      fek_tag BLOB NOT NULL,
+      wrapped_fek BLOB NOT NULL,
+      base_nonce BLOB NOT NULL,
+      chunk_size INTEGER NOT NULL,
+      chunk_count INTEGER NOT NULL,
+      plain_size INTEGER NOT NULL,
+      encrypted_size INTEGER NOT NULL,
+      sha256_hex TEXT NOT NULL,
+      thumb_blob_id TEXT,
+      thumb_fek_salt BLOB,
+      thumb_fek_nonce BLOB,
+      thumb_fek_tag BLOB,
+      thumb_wrapped_fek BLOB,
+      thumb_base_nonce BLOB,
+      thumb_chunk_size INTEGER,
+      thumb_chunk_count INTEGER,
+      thumb_plain_size INTEGER,
+      thumb_encrypted_size INTEGER
+    );
+
+    -- Encrypted albums / collections for images and videos
+    CREATE TABLE IF NOT EXISTS media_albums (
+      id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 1,
+      sync_seq INTEGER NOT NULL,
+      cipher_version INTEGER NOT NULL DEFAULT 1,
+      item_salt BLOB NOT NULL,
+      nonce BLOB NOT NULL,
+      auth_tag BLOB NOT NULL,
+      ciphertext BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_media_albums_sync_seq ON media_albums(sync_seq);
+
+    -- Resumable chunked upload sessions for large 4K/1080p videos & high-res photos
+    CREATE TABLE IF NOT EXISTS upload_sessions (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      chunk_bytes INTEGER NOT NULL,
+      total_bytes INTEGER NOT NULL,
+      total_chunks INTEGER NOT NULL,
+      received_chunks_json TEXT NOT NULL DEFAULT '[]',
+      meta_salt BLOB NOT NULL,
+      meta_nonce BLOB NOT NULL,
+      meta_tag BLOB NOT NULL,
+      meta_ciphertext BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
 
     -- Tombstone log so mobile/web clients doing incremental delta sync know which items were permanently shredded
     CREATE TABLE IF NOT EXISTS sync_tombstones (

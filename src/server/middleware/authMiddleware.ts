@@ -15,14 +15,19 @@ export interface AuthEnv {
   };
 }
 
-export function extractRawToken(c: Context): string | null {
+export function extractRawToken(c: Context, allowQueryToken = false): string | null {
   const authHeader = c.req.header('Authorization');
   if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
     const token = authHeader.slice(7).trim();
     if (token) return token;
   }
   const cookieToken = getCookie(c, SESSION_COOKIE_NAME);
-  return cookieToken || null;
+  if (cookieToken) return cookieToken;
+  if (allowQueryToken) {
+    const qToken = c.req.query('token')?.trim();
+    if (qToken) return qToken;
+  }
+  return null;
 }
 
 export function detectDeviceLabel(c: Context, explicitDeviceName?: string): {
@@ -66,8 +71,9 @@ export function resolveOptionalSession(
   c: Context,
   repo: VaultRepository,
   sessionCrypto: EphemeralSessionCrypto,
+  allowQueryToken = false,
 ): { dek: Buffer; sessionInfo: SessionInfo } | null {
-  const rawToken = extractRawToken(c);
+  const rawToken = extractRawToken(c, allowQueryToken);
   const parsed = sessionCrypto.parseToken(rawToken);
   if (!parsed) {
     return null;

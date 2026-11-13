@@ -1,7 +1,7 @@
 {
   "name": "PrivateSpace · 私密空间",
   "short_name": "PrivateSpace",
-  "description": "自部署、端到端存储加密的私密文本记录与多端同步空间",
+  "description": "自部署、端到端静态加密的私密文本、密码、图片、视频存储与多端同步空间",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#F8F7F4",
