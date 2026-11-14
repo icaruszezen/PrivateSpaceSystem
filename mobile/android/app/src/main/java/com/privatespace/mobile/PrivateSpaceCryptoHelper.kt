@@ -185,6 +185,7 @@ object PrivateSpaceCryptoHelper {
             ?.trim()
             ?.removePrefix("v")
             ?.removePrefix("V")
+            ?.replace("..", "_")
             ?.replace(Regex("[^A-Za-z0-9._-]"), "_")
             ?.take(32)
             ?.takeIf { it.isNotEmpty() }
