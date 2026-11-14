@@ -178,25 +178,28 @@ export function createMediaRoutes(
     });
   });
 
-  // GET /api/v1/media/:id/stream - HTTP 206 Partial Content random-access chunk decryption
-  router.get('/:id/stream', (c) => {
+  // GET|HEAD /api/v1/media/:id/stream - HTTP 206 Partial Content random-access chunk decryption
+  router.on(['GET', 'HEAD'], '/:id/stream', (c) => {
     const resolved = resolveOptionalSession(c, repo, sessionCrypto, true);
     if (!resolved) {
       return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权访问加密流' } }, 401);
     }
 
     const id = c.req.param('id');
+    const isHead = c.req.method === 'HEAD';
     let media: MediaItem | null = null;
     let fek: Buffer | null = null;
-    let blobs = repo.getMediaBlobs(id);
+    const blobs = repo.getMediaBlobs(id);
 
     try {
       media = repo.getMediaById(resolved.dek, id);
       if (!media || !blobs) {
         return c.json({ error: { code: 'NOT_FOUND', message: '未找到该加密媒体' } }, 404);
       }
-      // Unwrap 32-byte FEK synchronously while DEK is active
-      fek = chunkStore.unwrapFek(resolved.dek, blobs.main);
+      if (!isHead) {
+        // Unwrap 32-byte FEK synchronously while DEK is active
+        fek = chunkStore.unwrapFek(resolved.dek, blobs.main);
+      }
     } finally {
       resolved.dek.fill(0);
     }
@@ -205,10 +208,43 @@ export function createMediaRoutes(
     const mimeType = media.mimeType || 'application/octet-stream';
     const rangeHeader = c.req.header('range') || c.req.header('Range');
 
+    if (isHead) {
+      if (rangeHeader) {
+        const parsed = parseByteRange(rangeHeader, totalSize);
+        if (!parsed) {
+          return new Response(null, {
+            status: 416,
+            headers: {
+              'Content-Range': `bytes */${totalSize}`,
+            },
+          });
+        }
+        const contentLength = parsed.end - parsed.start + 1;
+        return new Response(null, {
+          status: 206,
+          headers: {
+            'Content-Type': mimeType,
+            'Accept-Ranges': 'bytes',
+            'Content-Range': `bytes ${parsed.start}-${parsed.end}/${totalSize}`,
+            'Content-Length': String(contentLength),
+          },
+        });
+      }
+
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(totalSize),
+        },
+      });
+    }
+
     if (rangeHeader) {
       const parsed = parseByteRange(rangeHeader, totalSize);
       if (!parsed) {
-        fek.fill(0);
+        fek!.fill(0);
         return new Response(null, {
           status: 416,
           headers: {
@@ -219,7 +255,12 @@ export function createMediaRoutes(
 
       const { start, end } = parsed;
       const contentLength = end - start + 1;
-      const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(fek, blobs.main, start, end);
+      const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(
+        fek!,
+        blobs.main,
+        start,
+        end,
+      );
       const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
 
       return new Response(webStream, {
@@ -234,7 +275,7 @@ export function createMediaRoutes(
     }
 
     const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(
-      fek,
+      fek!,
       blobs.main,
       0,
       Math.max(0, totalSize - 1),

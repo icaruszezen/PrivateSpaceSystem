@@ -1,0 +1,19 @@
+{
+  "name": "PrivateSpace iOS · 私密空间",
+  "short_name": "私密空间 iOS",
+  "description": "PrivateSpace iOS 18 全加密密码库 (2FA)、原图相册、HTTP 206 流式影院与 Markdown 笔记客户端",
+  "start_url": "/ios",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F6F4EF",
+  "theme_color": "#266454",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

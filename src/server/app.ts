@@ -98,7 +98,7 @@ export function createApp(config: ServerConfig): AppInstance {
       credentials: true,
       allowHeaders: ['Content-Type', 'Authorization', 'Range', 'Accept'],
       exposeHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
-      allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
   );
 
@@ -120,6 +120,36 @@ export function createApp(config: ServerConfig): AppInstance {
         },
       },
       500,
+    );
+  });
+
+  // Apple Associated Domains (iOS Password AutoFill webcredentials & Universal Links)
+  app.get('/.well-known/apple-app-site-association', (c) => {
+    const appId = config.appleAppId;
+    const autofillId = `${appId}.autofill`;
+    return c.json(
+      {
+        applinks: {
+          apps: [],
+          details: [
+            {
+              appIDs: [appId],
+              components: [
+                { '/': '/ios*' },
+                { '/': '/*' },
+              ],
+            },
+          ],
+        },
+        webcredentials: {
+          apps: [appId, autofillId],
+        },
+      },
+      200,
+      {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'public, max-age=3600',
+      },
     );
   });
 
@@ -194,6 +224,20 @@ export function createApp(config: ServerConfig): AppInstance {
   if (fs.existsSync(clientDistDir)) {
     app.get('*', (c) => {
       const reqPath = decodeURIComponent(c.req.path);
+      if (reqPath === '/ios' || reqPath.startsWith('/ios/')) {
+        const iosHtmlPath = path.join(clientDistDir, 'ios.html');
+        if (fs.existsSync(iosHtmlPath)) {
+          const html = fs.readFileSync(iosHtmlPath);
+          return new Response(html, {
+            status: 200,
+            headers: {
+              'Content-Type': 'text/html; charset=utf-8',
+              'Cache-Control': 'no-cache',
+            },
+          });
+        }
+      }
+
       const relativePath = reqPath === '/' ? 'index.html' : reqPath.replace(/^\/+/, '');
       const resolvedPath = path.resolve(clientDistDir, relativePath);
 

@@ -16,8 +16,10 @@
     "esModuleInterop": true,
     "baseUrl": ".",
     "paths": {
-      "@shared/*": ["src/shared/*"]
+      "@shared/*": ["src/shared/*"],
+      "@mobile/*": ["mobile/*"],
+      "react-native": ["mobile/src/rnWebRuntime.tsx"]
     }
   },
-  "include": ["src/client", "src/shared", "vite.config.ts"]
+  "include": ["src/client", "src/shared", "mobile", "vite.config.ts"]
 }

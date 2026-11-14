@@ -1,14 +1,22 @@
 {
   "name": "privatespace-mobile",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "PrivateSpace Android Native Client (Capacitor 6 + Kotlin Keystore/Biometric/FLAG_SECURE + Offline Delta Sync)",
+  "description": "PrivateSpace Android (Capacitor 6 + Kotlin Keystore/Biometric/FLAG_SECURE) & iOS Multi-Device Encrypted Sync Client",
+  "main": "App.tsx",
   "scripts": {
     "dev": "vite --config ../vite.mobile.config.ts",
     "build": "vite build --config ../vite.mobile.config.ts",
     "sync": "npm --prefix .. run android:sync",
     "apk": "npm --prefix .. run android:apk",
     "test:android": "npm --prefix .. run android:test",
+    "start": "expo start",
+    "ios": "expo run:ios",
+    "android": "npm --prefix .. run android:apk",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-native": ">=0.76.0"
   }
 }

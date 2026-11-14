@@ -1,0 +1,29 @@
+{
+  "expo": {
+    "name": "PrivateSpace",
+    "slug": "privatespace-mobile",
+    "version": "0.3.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#F6F4EF",
+    "primaryColor": "#266454",
+    "ios": {
+      "bundleIdentifier": "io.privatespace.ios",
+      "buildNumber": "3",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSFaceIDUsageDescription": "使用面容 ID 快速解锁您的 PrivateSpace 本地加密保险箱与自动填充凭据。",
+        "NSPhotoLibraryUsageDescription": "选择照片或视频以通过 PSENC001 分块 AES-256-GCM 加密上传至您的自部署空间。",
+        "NSPhotoLibraryAddUsageDescription": "保存已解密的私密相册照片或视频至系统相册。"
+      },
+      "entitlements": {
+        "com.apple.developer.authentication-services.autofill-credential-provider": true,
+        "com.apple.security.application-groups": ["group.io.privatespace.ios"]
+      }
+    },
+    "android": {
+      "package": "io.privatespace.android"
+    }
+  }
+}
