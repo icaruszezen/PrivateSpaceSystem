@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PrivateSpace · 私密空间</string>
+    <string name="title_activity_main">PrivateSpace · 私密空间</string>
+    <string name="package_name">com.privatespace.mobile</string>
+    <string name="custom_url_scheme">privatespace</string>
+</resources>

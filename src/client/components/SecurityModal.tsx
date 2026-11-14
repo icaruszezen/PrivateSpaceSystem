@@ -378,22 +378,40 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                     {serverEndpoint}
                   </div>
                   <div style={{ fontSize: '0.76rem', color: 'var(--text-tertiary)', marginTop: 3 }}>
-                    通过 <code className="mono">/api/v1/sync?since_seq={summary?.latestSyncSeq ?? 0}</code>{' '}
-                    增量同步密码、图片、视频与文本，并由 SSE 实时推送变更游标。
+                    支持在 Android 手机端粘贴配对码自动填入服务器地址，通过{' '}
+                    <code className="mono">/api/v1/sync?since_seq={summary?.latestSyncSeq ?? 0}</code>{' '}
+                    与 SSE 实时增量同步密码、相册、视频与文本。
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  style={{ height: 32, flexShrink: 0 }}
-                  onClick={() => {
-                    void navigator.clipboard.writeText(serverEndpoint);
-                    onNotify('自部署服务地址已复制');
-                  }}
-                >
-                  <Copy size={13} />
-                  <span>复制地址</span>
-                </button>
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ height: 32 }}
+                    onClick={() => {
+                      const pairUri = `privatespace://pair?server=${encodeURIComponent(
+                        serverEndpoint,
+                      )}&vault=${encodeURIComponent(vaultName)}`;
+                      void navigator.clipboard.writeText(pairUri);
+                      onNotify('安卓手机端一键配对码已复制');
+                    }}
+                  >
+                    <Smartphone size={13} />
+                    <span>复制配对码</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ height: 32 }}
+                    onClick={() => {
+                      void navigator.clipboard.writeText(serverEndpoint);
+                      onNotify('自部署服务地址已复制');
+                    }}
+                  >
+                    <Copy size={13} />
+                    <span>复制地址</span>
+                  </button>
+                </div>
               </div>
 
               <div className="session-list">

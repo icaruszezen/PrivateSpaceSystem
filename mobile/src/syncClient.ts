@@ -56,17 +56,62 @@ export interface MobileVaultSnapshot {
   outbox?: MobileOutboxOperation[];
 }
 
+export type PendingVaultMutation =
+  | {
+      id: string;
+      createdAt: string;
+      kind: 'create_note';
+      itemId: string;
+      payload: CreateNoteRequest;
+    }
+  | {
+      id: string;
+      createdAt: string;
+      kind: 'update_note';
+      itemId: string;
+      payload: UpdateNoteRequest;
+    }
+  | {
+      id: string;
+      createdAt: string;
+      kind: 'create_password';
+      itemId: string;
+      payload: CreatePasswordRequest;
+    }
+  | {
+      id: string;
+      createdAt: string;
+      kind: 'update_password';
+      itemId: string;
+      payload: UpdatePasswordRequest;
+    };
+
 export interface VaultPersistenceAdapter {
   loadSnapshot(): Promise<MobileVaultSnapshot | null>;
   saveSnapshot(snapshot: MobileVaultSnapshot): Promise<void>;
   loadSessionToken(): Promise<string | null>;
   saveSessionToken(token: string | null): Promise<void>;
+  loadPendingMutations?(): Promise<PendingVaultMutation[]>;
+  savePendingMutations?(mutations: PendingVaultMutation[]): Promise<void>;
   clearAll?(): Promise<void>;
+}
+
+export function createEmptySnapshot(): MobileVaultSnapshot {
+  return {
+    lastSyncSeq: 0,
+    syncedAt: null,
+    notes: {},
+    passwords: {},
+    media: {},
+    albums: {},
+    outbox: [],
+  };
 }
 
 export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
   private snapshot: MobileVaultSnapshot | null = null;
   private token: string | null = null;
+  private mutations: PendingVaultMutation[] = [];
 
   async loadSnapshot(): Promise<MobileVaultSnapshot | null> {
     return this.snapshot ? structuredClone(this.snapshot) : null;
@@ -84,9 +129,18 @@ export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
     this.token = token;
   }
 
+  async loadPendingMutations(): Promise<PendingVaultMutation[]> {
+    return structuredClone(this.mutations);
+  }
+
+  async savePendingMutations(mutations: PendingVaultMutation[]): Promise<void> {
+    this.mutations = structuredClone(mutations);
+  }
+
   async clearAll(): Promise<void> {
     this.snapshot = null;
     this.token = null;
+    this.mutations = [];
   }
 }
 
@@ -231,12 +285,214 @@ export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
   }
 }
 
-export interface MobileClientOptions {
-  baseUrl: string;
-  platform: MobilePlatform;
-  deviceName: string;
-  persistence?: VaultPersistenceAdapter;
-  fetchImpl?: typeof fetch;
+/**
+ * Persistent IndexedDB adapter for Android WebView & PWA offline cache,
+ * scoped by normalized server URL so switching self-hosted servers never mixes vaults.
+ */
+export class IndexedDbVaultPersistence implements VaultPersistenceAdapter {
+  private readonly namespace: string;
+  private readonly dbName = 'privatespace_android_vault_v1';
+  private readonly storeName = 'kv';
+  private fallback = new InMemoryVaultPersistence();
+
+  constructor(serverScope = 'default') {
+    this.namespace = serverScope.replace(/[^a-zA-Z0-9._-]/g, '_');
+  }
+
+  private openDb(): Promise<IDBDatabase | null> {
+    if (typeof indexedDB === 'undefined') {
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      try {
+        const req = indexedDB.open(this.dbName, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains(this.storeName)) {
+            db.createObjectStore(this.storeName);
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  private async getVal<T>(key: string): Promise<T | null> {
+    const db = await this.openDb();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(this.storeName, 'readonly');
+        const store = tx.objectStore(this.storeName);
+        const req = store.get(`${this.namespace}:${key}`);
+        req.onsuccess = () => {
+          db.close();
+          resolve((req.result as T | undefined) ?? null);
+        };
+        req.onerror = () => {
+          db.close();
+          resolve(null);
+        };
+      } catch {
+        db.close();
+        resolve(null);
+      }
+    });
+  }
+
+  private async setVal<T>(key: string, value: T | null): Promise<boolean> {
+    const db = await this.openDb();
+    if (!db) return false;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(this.storeName, 'readwrite');
+        const store = tx.objectStore(this.storeName);
+        const fullKey = `${this.namespace}:${key}`;
+        if (value === null) {
+          store.delete(fullKey);
+        } else {
+          store.put(value, fullKey);
+        }
+        tx.oncomplete = () => {
+          db.close();
+          resolve(true);
+        };
+        tx.onerror = () => {
+          db.close();
+          resolve(false);
+        };
+      } catch {
+        db.close();
+        resolve(false);
+      }
+    });
+  }
+
+  async loadSnapshot(): Promise<MobileVaultSnapshot | null> {
+    const idb = await this.getVal<MobileVaultSnapshot>('snapshot');
+    if (idb) return idb;
+    return this.fallback.loadSnapshot();
+  }
+
+  async saveSnapshot(snapshot: MobileVaultSnapshot): Promise<void> {
+    const ok = await this.setVal('snapshot', snapshot);
+    if (!ok) {
+      await this.fallback.saveSnapshot(snapshot);
+    }
+  }
+
+  async loadSessionToken(): Promise<string | null> {
+    const idb = await this.getVal<string>('session_token');
+    if (idb) return idb;
+    return this.fallback.loadSessionToken();
+  }
+
+  async saveSessionToken(token: string | null): Promise<void> {
+    const ok = await this.setVal('session_token', token);
+    if (!ok) {
+      await this.fallback.saveSessionToken(token);
+    }
+  }
+
+  async loadPendingMutations(): Promise<PendingVaultMutation[]> {
+    const idb = await this.getVal<PendingVaultMutation[]>('pending_mutations');
+    if (idb) return idb;
+    return this.fallback.loadPendingMutations();
+  }
+
+  async savePendingMutations(mutations: PendingVaultMutation[]): Promise<void> {
+    const ok = await this.setVal('pending_mutations', mutations);
+    if (!ok) {
+      await this.fallback.savePendingMutations(mutations);
+    }
+  }
+
+  async clearAll(): Promise<void> {
+    await Promise.all([
+      this.setVal('snapshot', null),
+      this.setVal('session_token', null),
+      this.setVal('pending_mutations', null),
+      this.fallback.clearAll(),
+    ]);
+  }
+}
+
+export function normalizeServerUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed.replace(/\/mobile$/i, '').replace(/\/+$/, '');
+  }
+  const isLocalOrPrivate =
+    /^(localhost|127\.|10\.|192\.168\.|100\.|172\.(1[6-9]|2\d|3[0-1])\.)/i.test(trimmed) ||
+    /:\d+$/.test(trimmed) ||
+    trimmed.endsWith('.local') ||
+    trimmed.endsWith('.internal');
+  const scheme = isLocalOrPrivate ? 'http://' : 'https://';
+  return `${scheme}${trimmed}`.replace(/\/+$/, '');
+}
+
+export function formatPairingUri(serverUrl: string, vaultName?: string): string {
+  const cleanUrl = normalizeServerUrl(serverUrl);
+  const params = new URLSearchParams({ server: cleanUrl });
+  if (vaultName?.trim()) {
+    params.set('vault', vaultName.trim());
+  }
+  return `privatespace://pair?${params.toString()}`;
+}
+
+export function parsePairingInput(
+  raw: string,
+): { serverUrl: string; vaultName?: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.toLowerCase().startsWith('privatespace://')) {
+    try {
+      const url = new URL(trimmed);
+      const srv = url.searchParams.get('server') || url.searchParams.get('url') || '';
+      const normalized = normalizeServerUrl(srv);
+      if (!normalized) return null;
+      const vault = url.searchParams.get('vault') || url.searchParams.get('name') || undefined;
+      return { serverUrl: normalized, vaultName: vault };
+    } catch {
+      return null;
+    }
+  }
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        server?: string;
+        serverUrl?: string;
+        url?: string;
+        vault?: string;
+        vaultName?: string;
+      };
+      const srv = parsed.server || parsed.serverUrl || parsed.url || '';
+      const normalized = normalizeServerUrl(srv);
+      if (!normalized) return null;
+      return {
+        serverUrl: normalized,
+        vaultName: parsed.vault || parsed.vaultName,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const normalized = normalizeServerUrl(trimmed);
+  if (!normalized) return null;
+  try {
+    const parsedUrl = new URL(normalized);
+    if (!parsedUrl.hostname) return null;
+    return { serverUrl: normalized };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -312,19 +568,54 @@ export function parseMobilePasswordCsv(csvText: string): ImportPasswordEntryInpu
   return entries;
 }
 
+export class MobileApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly isNetworkError: boolean;
+
+  constructor(message: string, status = 0, code = 'NETWORK_ERROR', isNetworkError = false) {
+    super(message);
+    this.name = 'MobileApiError';
+    this.status = status;
+    this.code = code;
+    this.isNetworkError = isNetworkError;
+  }
+}
+
+export interface MobileClientOptions {
+  baseUrl: string;
+  platform: MobilePlatform;
+  deviceName: string;
+  persistence?: VaultPersistenceAdapter;
+  fetchImpl?: typeof fetch;
+  onUnauthorized?: () => void;
+}
+
+function generateClientUuid(): string {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 /**
- * Cross-platform Sync & Encrypted Media SDK for PrivateSpace iOS & Android clients.
- * Supports Bearer session tokens, first-time admin setup, monotonic cursor delta sync (`since_seq`),
- * SSE real-time stream subscription, offline mutation outbox queue, RFC 6238 TOTP generation,
- * CSPRNG password generation & security health audit, resumable chunked video/image uploads,
- * and authenticated HTTP 206 Range URLs for iOS AVPlayer & Android Media3 ExoPlayer.
+ * Cross-platform Sync & Encrypted Media SDK for PrivateSpace Android & iOS clients.
+ * Supports Bearer session tokens, initial server setup, monotonic cursor delta sync (`since_seq`),
+ * offline mutation outbox queue, SSE live cursor notifications, offline-capable RFC 6238 TOTP,
+ * resumable chunked video/image uploads, and authenticated HTTP 206 Range URLs.
  */
 export class PrivateSpaceMobileClient {
   private baseUrl: string;
   private readonly platform: MobilePlatform;
-  private readonly deviceName: string;
+  private deviceName: string;
   private readonly persistence: VaultPersistenceAdapter;
   private readonly fetchFn: typeof fetch;
+  private readonly onUnauthorized?: () => void;
   private token: string | null = null;
 
   constructor(options: MobileClientOptions) {
@@ -333,19 +624,41 @@ export class PrivateSpaceMobileClient {
     this.deviceName = options.deviceName;
     this.persistence = options.persistence ?? new InMemoryVaultPersistence();
     this.fetchFn = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
-  }
-
-  setBaseUrl(nextBaseUrl: string): void {
-    this.baseUrl = nextBaseUrl.replace(/\/+$/, '');
+    this.onUnauthorized = options.onUnauthorized;
   }
 
   getBaseUrl(): string {
     return this.baseUrl;
   }
 
+  setBaseUrl(url: string): void {
+    const trimmed = url.trim().replace(/\/+$/, '');
+    this.baseUrl = /^https?:\/\//i.test(trimmed) ? trimmed : normalizeServerUrl(trimmed);
+  }
+
+  setDeviceName(name: string): void {
+    if (name.trim()) {
+      this.deviceName = name.trim();
+    }
+  }
+
+  getDeviceName(): string {
+    return this.deviceName;
+  }
+
+  private buildUrl(path: string): string {
+    if (!this.baseUrl) return path;
+    return `${this.baseUrl}${path}`;
+  }
+
   async restoreSession(): Promise<string | null> {
     this.token = await this.persistence.loadSessionToken();
     return this.token;
+  }
+
+  async setSessionToken(token: string | null): Promise<void> {
+    this.token = token;
+    await this.persistence.saveSessionToken(token);
   }
 
   getToken(): string | null {
@@ -356,14 +669,33 @@ export class PrivateSpaceMobileClient {
     return this.persistence.loadSnapshot();
   }
 
-  private buildUrl(path: string): string {
-    return `${this.baseUrl}${path}`;
+  async getCachedSnapshot(): Promise<MobileVaultSnapshot | null> {
+    return this.persistence.loadSnapshot();
   }
 
-  private async requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async getPendingMutations(): Promise<PendingVaultMutation[]> {
+    if (!this.persistence.loadPendingMutations) return [];
+    return this.persistence.loadPendingMutations();
+  }
+
+  async clearLocalVaultCache(): Promise<void> {
+    this.token = null;
+    if (this.persistence.clearAll) {
+      await this.persistence.clearAll();
+    } else {
+      await this.persistence.saveSessionToken(null);
+      await this.persistence.saveSnapshot(createEmptySnapshot());
+    }
+  }
+
+  private async requestJson<T>(
+    path: string,
+    init: RequestInit = {},
+    suppressUnauthorizedCallback = false,
+  ): Promise<T> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/0.3 (${this.deviceName})`,
+      'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/1.0 (${this.deviceName})`,
       ...((init.headers as Record<string, string>) || {}),
     };
     if (this.token) {
@@ -373,50 +705,80 @@ export class PrivateSpaceMobileClient {
       headers['Content-Type'] = 'application/json';
     }
 
-    const res = await this.fetchFn(this.buildUrl(path), {
-      ...init,
-      headers,
-    });
+    let res: Response;
+    try {
+      res = await this.fetchFn(this.buildUrl(path), {
+        ...init,
+        headers,
+      });
+    } catch (err) {
+      throw new MobileApiError(
+        err instanceof Error ? `无法连接服务器 (${err.message})` : '网络连接不可用',
+        0,
+        'NETWORK_ERROR',
+        true,
+      );
+    }
+
     if (!res.ok) {
       const errBody = await res.json().catch(() => ({}));
+      const code =
+        typeof errBody?.error === 'object' && errBody?.error?.code
+          ? String(errBody.error.code)
+          : `HTTP_${res.status}`;
       const msg =
         typeof errBody?.error === 'string'
           ? errBody.error
           : errBody?.error?.message || `HTTP ${res.status}`;
-      throw new Error(msg);
+
+      if (res.status === 401 && !suppressUnauthorizedCallback) {
+        this.onUnauthorized?.();
+      }
+      throw new MobileApiError(msg, res.status, code, false);
     }
+
     return (await res.json()) as T;
   }
 
-  // ==================== Auth, Setup, Sessions & Security ====================
+  // ==================== 1. Server Probe, Setup & Auth ====================
 
   async getAuthStatus(): Promise<AuthStatusResponse> {
-    return this.requestJson<AuthStatusResponse>('/api/v1/auth/status');
+    return this.requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
   }
 
-  async setupAdmin(input: Omit<SetupRequest, 'platform' | 'deviceName'>): Promise<AuthSessionResponse> {
-    const auth = await this.requestJson<AuthSessionResponse>('/api/v1/auth/setup', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...input,
-        deviceName: this.deviceName,
-        platform: this.platform,
-      }),
-    });
+  async setupAdmin(
+    input: Omit<SetupRequest, 'platform' | 'deviceName'>,
+  ): Promise<AuthSessionResponse> {
+    const auth = await this.requestJson<AuthSessionResponse>(
+      '/api/v1/auth/setup',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          ...input,
+          deviceName: this.deviceName,
+          platform: this.platform,
+        }),
+      },
+      true,
+    );
     this.token = auth.token;
     await this.persistence.saveSessionToken(auth.token);
     return auth;
   }
 
   async login(password: string): Promise<AuthSessionResponse> {
-    const auth = await this.requestJson<AuthSessionResponse>('/api/v1/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({
-        password,
-        deviceName: this.deviceName,
-        platform: this.platform,
-      }),
-    });
+    const auth = await this.requestJson<AuthSessionResponse>(
+      '/api/v1/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          password,
+          deviceName: this.deviceName,
+          platform: this.platform,
+        }),
+      },
+      true,
+    );
     this.token = auth.token;
     await this.persistence.saveSessionToken(auth.token);
     return auth;
@@ -424,7 +786,7 @@ export class PrivateSpaceMobileClient {
 
   async logout(wipeLocalCache = false): Promise<void> {
     try {
-      await this.requestJson('/api/v1/auth/logout', { method: 'POST' });
+      await this.requestJson('/api/v1/auth/logout', { method: 'POST' }, true);
     } finally {
       this.token = null;
       if (wipeLocalCache && this.persistence.clearAll) {
@@ -438,10 +800,20 @@ export class PrivateSpaceMobileClient {
   async changePassword(
     input: ChangePasswordRequest,
   ): Promise<{ ok: boolean; keyFingerprint: string; passwordUpdatedAt: string }> {
-    return this.requestJson('/api/v1/auth/change-password', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
+    return this.requestJson(
+      '/api/v1/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+      true,
+    );
+  }
+
+  async changeMasterPassword(
+    input: ChangePasswordRequest,
+  ): Promise<{ ok: boolean; keyFingerprint: string; passwordUpdatedAt: string }> {
+    return this.changePassword(input);
   }
 
   async updateVaultName(vaultName: string): Promise<{ vaultName: string }> {
@@ -460,29 +832,28 @@ export class PrivateSpaceMobileClient {
     return res.sessions;
   }
 
-  async revokeSession(sessionId: string): Promise<void> {
-    await this.requestJson(`/api/v1/auth/sessions/${encodeURIComponent(sessionId)}`, {
+  async revokeSession(sessionId: string): Promise<{ ok: boolean }> {
+    return this.requestJson(`/api/v1/auth/sessions/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
     });
   }
 
-  // ==================== Monotonic Cursor Sync, Outbox & SSE ====================
-
-  private createEmptySnapshot(): MobileVaultSnapshot {
-    return {
-      lastSyncSeq: 0,
-      syncedAt: null,
-      notes: {},
-      passwords: {},
-      media: {},
-      albums: {},
-      outbox: [],
-    };
+  async inspectCipher(itemId: string): Promise<CipherEnvelopeInspection> {
+    const res = await this.requestJson<{ envelope: CipherEnvelopeInspection }>(
+      `/api/v1/sync/cipher/${encodeURIComponent(itemId)}`,
+    );
+    return res.envelope;
   }
 
+  async inspectItemCipher(itemId: string): Promise<CipherEnvelopeInspection> {
+    return this.inspectCipher(itemId);
+  }
+
+  // ==================== 2. Offline Mutation Queue, Outbox & Delta Sync ====================
+
   async enqueueOfflineNote(input: CreateNoteRequest): Promise<NoteItem> {
-    const snap = (await this.persistence.loadSnapshot()) ?? this.createEmptySnapshot();
-    const id = input.id ?? crypto.randomUUID();
+    const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+    const id = input.id ?? generateClientUuid();
     const now = new Date().toISOString();
     const content = input.content ?? '';
     const optimistic: NoteItem = {
@@ -508,7 +879,7 @@ export class PrivateSpaceMobileClient {
     snap.outbox = [
       ...(snap.outbox ?? []),
       {
-        id: crypto.randomUUID(),
+        id: generateClientUuid(),
         kind: 'createNote',
         payload: { ...input, id },
         queuedAt: now,
@@ -554,13 +925,75 @@ export class PrivateSpaceMobileClient {
     return flushed;
   }
 
+  private async enqueueMutation(mutation: PendingVaultMutation): Promise<void> {
+    if (!this.persistence.loadPendingMutations || !this.persistence.savePendingMutations) {
+      return;
+    }
+    const list = await this.persistence.loadPendingMutations();
+    list.push(mutation);
+    await this.persistence.savePendingMutations(list);
+  }
+
+  async flushPendingMutations(): Promise<{ flushed: number; remaining: number }> {
+    if (!this.persistence.loadPendingMutations || !this.persistence.savePendingMutations) {
+      return { flushed: 0, remaining: 0 };
+    }
+    const queue = await this.persistence.loadPendingMutations();
+    if (queue.length === 0) {
+      return { flushed: 0, remaining: 0 };
+    }
+
+    const remaining: PendingVaultMutation[] = [];
+    let flushed = 0;
+
+    for (let i = 0; i < queue.length; i++) {
+      const m = queue[i];
+      try {
+        if (m.kind === 'create_note') {
+          await this.requestJson('/api/v1/notes', {
+            method: 'POST',
+            body: JSON.stringify(m.payload),
+          });
+        } else if (m.kind === 'update_note') {
+          await this.requestJson(`/api/v1/notes/${encodeURIComponent(m.itemId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(m.payload),
+          });
+        } else if (m.kind === 'create_password') {
+          await this.requestJson('/api/v1/passwords', {
+            method: 'POST',
+            body: JSON.stringify(m.payload),
+          });
+        } else if (m.kind === 'update_password') {
+          await this.requestJson(`/api/v1/passwords/${encodeURIComponent(m.itemId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(m.payload),
+          });
+        }
+        flushed += 1;
+      } catch (err) {
+        if (err instanceof MobileApiError && (err.status === 409 || err.status === 404)) {
+          flushed += 1;
+          continue;
+        }
+        remaining.push(...queue.slice(i));
+        break;
+      }
+    }
+
+    await this.persistence.savePendingMutations(remaining);
+    return { flushed, remaining: remaining.length };
+  }
+
   /**
    * Pulls incremental changes since the locally persisted `lastSyncSeq` cursor
    * and atomically updates local notes, passwords, images, videos, albums, and tombstones.
    */
   async syncDelta(): Promise<{ snapshot: MobileVaultSnapshot; delta: SyncPullResponse }> {
     await this.flushOutbox();
-    const existing = (await this.persistence.loadSnapshot()) ?? this.createEmptySnapshot();
+    await this.flushPendingMutations();
+
+    const existing = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
 
     const delta = await this.requestJson<SyncPullResponse>(
       `/api/v1/sync?since_seq=${existing.lastSyncSeq}`,
@@ -608,7 +1041,7 @@ export class PrivateSpaceMobileClient {
         const data = JSON.parse((ev as MessageEvent).data) as { latestSyncSeq: number };
         handlers.onConnected?.(data.latestSyncSeq);
       } catch {
-        // ignore
+        handlers.onConnected?.(0);
       }
     });
 
@@ -617,7 +1050,7 @@ export class PrivateSpaceMobileClient {
         const data = JSON.parse((ev as MessageEvent).data) as { latestSyncSeq: number };
         handlers.onCursorChange?.(data.latestSyncSeq);
       } catch {
-        // ignore
+        // ignore malformed event
       }
     });
 
@@ -628,21 +1061,92 @@ export class PrivateSpaceMobileClient {
     return () => es.close();
   }
 
-  async inspectCipher(itemId: string): Promise<CipherEnvelopeInspection> {
-    const res = await this.requestJson<{ envelope: CipherEnvelopeInspection }>(
-      `/api/v1/sync/cipher/${encodeURIComponent(itemId)}`,
-    );
-    return res.envelope;
+  connectSyncStream(callbacks: {
+    onConnected?: (latestSyncSeq: number) => void;
+    onCursorChange?: (latestSyncSeq: number) => void;
+    onDisconnected?: () => void;
+  }): () => void {
+    if (!this.token) {
+      return () => undefined;
+    }
+    return this.subscribeSyncStream({
+      onConnected: callbacks.onConnected,
+      onCursorChange: callbacks.onCursorChange,
+      onError: callbacks.onDisconnected,
+    });
   }
 
-  // ==================== 1. Encrypted Text Notes ====================
+  private async upsertSnapshotItem(
+    updater: (snap: MobileVaultSnapshot) => void,
+  ): Promise<MobileVaultSnapshot> {
+    const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+    updater(snap);
+    await this.persistence.saveSnapshot(snap);
+    return snap;
+  }
+
+  // ==================== 3. Encrypted Notes CRUD ====================
 
   async createNote(input: CreateNoteRequest): Promise<NoteItem> {
     const res = await this.requestJson<{ note: NoteItem }>('/api/v1/notes', {
       method: 'POST',
       body: JSON.stringify(input),
     });
+    await this.upsertSnapshotItem((snap) => {
+      snap.notes[res.note.id] = res.note;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.note.syncSeq);
+    });
     return res.note;
+  }
+
+  async createNoteWithOffline(
+    input: CreateNoteRequest,
+    opts?: { allowOfflineQueue?: boolean },
+  ): Promise<{ note: NoteItem; queuedOffline: boolean }> {
+    const clientId = input.id ?? generateClientUuid();
+    const reqPayload: CreateNoteRequest = { ...input, id: clientId };
+
+    try {
+      const note = await this.createNote(reqPayload);
+      return { note, queuedOffline: false };
+    } catch (err) {
+      if (opts?.allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
+        const now = new Date().toISOString();
+        const content = reqPayload.content ?? '';
+        const plain = content.replace(/[#>*_`~\-\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+        const optimistic: NoteItem = {
+          id: clientId,
+          itemType: 'note',
+          title: reqPayload.title ?? '',
+          content,
+          excerpt: plain.slice(0, 140),
+          tags: reqPayload.tags ?? [],
+          format: reqPayload.format ?? 'markdown',
+          wordCount: content.trim() ? content.trim().length : 0,
+          isPinned: Boolean(reqPayload.isPinned),
+          isArchived: false,
+          isTrashed: false,
+          revision: 1,
+          syncSeq: 0,
+          byteSize: new TextEncoder().encode(content).byteLength,
+          createdAt: now,
+          updatedAt: now,
+          trashedAt: null,
+        };
+        await this.upsertSnapshotItem((snap) => {
+          snap.notes[optimistic.id] = optimistic;
+        });
+        await this.enqueueMutation({
+          id: generateClientUuid(),
+          createdAt: now,
+          kind: 'create_note',
+          itemId: clientId,
+          payload: reqPayload,
+        });
+        return { note: optimistic, queuedOffline: true };
+      }
+      throw err;
+    }
   }
 
   async updateNote(id: string, input: UpdateNoteRequest): Promise<NoteItem> {
@@ -653,12 +1157,71 @@ export class PrivateSpaceMobileClient {
         body: JSON.stringify(input),
       },
     );
+    await this.upsertSnapshotItem((snap) => {
+      snap.notes[res.note.id] = res.note;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.note.syncSeq);
+    });
     return res.note;
+  }
+
+  async updateNoteWithOffline(
+    id: string,
+    input: UpdateNoteRequest,
+    opts?: { allowOfflineQueue?: boolean },
+  ): Promise<{ note: NoteItem; queuedOffline: boolean }> {
+    try {
+      const note = await this.updateNote(id, input);
+      return { note, queuedOffline: false };
+    } catch (err) {
+      if (opts?.allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
+        const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+        const current = snap.notes[id];
+        if (current) {
+          const now = new Date().toISOString();
+          const nextContent = input.content ?? current.content;
+          const plain = nextContent.replace(/[#>*_`~\-\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+          const updated: NoteItem = {
+            ...current,
+            title: input.title ?? current.title,
+            content: nextContent,
+            excerpt: plain.slice(0, 140),
+            tags: input.tags ?? current.tags,
+            format: input.format ?? current.format,
+            wordCount: nextContent.trim() ? nextContent.trim().length : 0,
+            isPinned: input.isPinned ?? current.isPinned,
+            isArchived: input.isArchived ?? current.isArchived,
+            isTrashed: input.isTrashed ?? current.isTrashed,
+            trashedAt:
+              input.isTrashed === true
+                ? now
+                : input.isTrashed === false
+                  ? null
+                  : current.trashedAt,
+            updatedAt: now,
+          };
+          snap.notes[id] = updated;
+          await this.persistence.saveSnapshot(snap);
+          const { expectedRevision: _omitRev, ...offlinePatch } = input;
+          await this.enqueueMutation({
+            id: generateClientUuid(),
+            createdAt: now,
+            kind: 'update_note',
+            itemId: id,
+            payload: offlinePatch,
+          });
+          return { note: updated, queuedOffline: true };
+        }
+      }
+      throw err;
+    }
   }
 
   async deleteNotePermanently(id: string): Promise<void> {
     await this.requestJson(`/api/v1/notes/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+    await this.upsertSnapshotItem((snap) => {
+      delete snap.notes[id];
     });
   }
 
@@ -667,28 +1230,78 @@ export class PrivateSpaceMobileClient {
       '/api/v1/notes/trash',
       { method: 'DELETE' },
     );
+    await this.upsertSnapshotItem((snap) => {
+      for (const [id, note] of Object.entries(snap.notes)) {
+        if (note.isTrashed) delete snap.notes[id];
+      }
+    });
     return res.purgedCount;
   }
 
-  // ==================== 2. Encrypted Passwords, TOTP & Audit ====================
+  // ==================== 4. Encrypted Passwords, TOTP, Generator & Audit ====================
 
   async createPassword(input: CreatePasswordRequest): Promise<PasswordItem> {
     const res = await this.requestJson<{ password: PasswordItem }>('/api/v1/passwords', {
       method: 'POST',
       body: JSON.stringify(input),
     });
+    await this.upsertSnapshotItem((snap) => {
+      snap.passwords[res.password.id] = res.password;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.password.syncSeq);
+    });
     return res.password;
   }
 
-  async importPasswords(entries: ImportPasswordEntryInput[]): Promise<PasswordItem[]> {
-    const res = await this.requestJson<{ imported: PasswordItem[]; count: number }>(
-      '/api/v1/passwords/import',
-      {
-        method: 'POST',
-        body: JSON.stringify({ entries }),
-      },
-    );
-    return res.imported;
+  async createPasswordWithOffline(
+    input: CreatePasswordRequest,
+    opts?: { allowOfflineQueue?: boolean },
+  ): Promise<{ password: PasswordItem; queuedOffline: boolean }> {
+    const clientId = input.id ?? generateClientUuid();
+    const reqPayload: CreatePasswordRequest = { ...input, id: clientId };
+    try {
+      const pw = await this.createPassword(reqPayload);
+      return { password: pw, queuedOffline: false };
+    } catch (err) {
+      if (opts?.allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
+        const now = new Date().toISOString();
+        const optimistic: PasswordItem = {
+          id: clientId,
+          itemType: 'password',
+          title: reqPayload.title,
+          username: reqPayload.username ?? '',
+          password: reqPayload.password,
+          url: reqPayload.url ?? '',
+          totpSecret: reqPayload.totpSecret ?? '',
+          category: reqPayload.category ?? 'login',
+          notes: reqPayload.notes ?? '',
+          tags: reqPayload.tags ?? [],
+          customFields: reqPayload.customFields ?? [],
+          history: [],
+          passwordChangedAt: now,
+          isPinned: Boolean(reqPayload.isPinned),
+          isArchived: false,
+          isTrashed: false,
+          revision: 1,
+          syncSeq: 0,
+          byteSize: 256,
+          createdAt: now,
+          updatedAt: now,
+          trashedAt: null,
+        };
+        await this.upsertSnapshotItem((snap) => {
+          snap.passwords[optimistic.id] = optimistic;
+        });
+        await this.enqueueMutation({
+          id: generateClientUuid(),
+          createdAt: now,
+          kind: 'create_password',
+          itemId: clientId,
+          payload: reqPayload,
+        });
+        return { password: optimistic, queuedOffline: true };
+      }
+      throw err;
+    }
   }
 
   async updatePassword(id: string, input: UpdatePasswordRequest): Promise<PasswordItem> {
@@ -699,12 +1312,80 @@ export class PrivateSpaceMobileClient {
         body: JSON.stringify(input),
       },
     );
+    await this.upsertSnapshotItem((snap) => {
+      snap.passwords[res.password.id] = res.password;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.password.syncSeq);
+    });
     return res.password;
+  }
+
+  async updatePasswordWithOffline(
+    id: string,
+    input: UpdatePasswordRequest,
+    opts?: { allowOfflineQueue?: boolean },
+  ): Promise<{ password: PasswordItem; queuedOffline: boolean }> {
+    try {
+      const pw = await this.updatePassword(id, input);
+      return { password: pw, queuedOffline: false };
+    } catch (err) {
+      if (opts?.allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
+        const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+        const current = snap.passwords[id];
+        if (current) {
+          const now = new Date().toISOString();
+          const passwordChanged =
+            input.password !== undefined && input.password !== current.password;
+          const nextHistory =
+            passwordChanged && current.password
+              ? [{ password: current.password, changedAt: now }, ...current.history].slice(0, 15)
+              : current.history;
+          const updated: PasswordItem = {
+            ...current,
+            title: input.title ?? current.title,
+            username: input.username ?? current.username,
+            password: input.password ?? current.password,
+            url: input.url ?? current.url,
+            totpSecret: input.totpSecret ?? current.totpSecret,
+            category: input.category ?? current.category,
+            notes: input.notes ?? current.notes,
+            tags: input.tags ?? current.tags,
+            customFields: input.customFields ?? current.customFields,
+            history: nextHistory,
+            passwordChangedAt: passwordChanged ? now : current.passwordChangedAt,
+            isPinned: input.isPinned ?? current.isPinned,
+            isArchived: input.isArchived ?? current.isArchived,
+            isTrashed: input.isTrashed ?? current.isTrashed,
+            trashedAt:
+              input.isTrashed === true
+                ? now
+                : input.isTrashed === false
+                  ? null
+                  : current.trashedAt,
+            updatedAt: now,
+          };
+          snap.passwords[id] = updated;
+          await this.persistence.saveSnapshot(snap);
+          const { expectedRevision: _omitRev, ...offlinePatch } = input;
+          await this.enqueueMutation({
+            id: generateClientUuid(),
+            createdAt: now,
+            kind: 'update_password',
+            itemId: id,
+            payload: offlinePatch,
+          });
+          return { password: updated, queuedOffline: true };
+        }
+      }
+      throw err;
+    }
   }
 
   async deletePasswordPermanently(id: string): Promise<void> {
     await this.requestJson(`/api/v1/passwords/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+    await this.upsertSnapshotItem((snap) => {
+      delete snap.passwords[id];
     });
   }
 
@@ -713,7 +1394,29 @@ export class PrivateSpaceMobileClient {
       '/api/v1/passwords/trash',
       { method: 'DELETE' },
     );
+    await this.upsertSnapshotItem((snap) => {
+      for (const [id, pw] of Object.entries(snap.passwords)) {
+        if (pw.isTrashed) delete snap.passwords[id];
+      }
+    });
     return res.purgedCount;
+  }
+
+  async importPasswords(entries: ImportPasswordEntryInput[]): Promise<PasswordItem[]> {
+    const res = await this.requestJson<{ imported: PasswordItem[]; count: number }>(
+      '/api/v1/passwords/import',
+      {
+        method: 'POST',
+        body: JSON.stringify({ entries }),
+      },
+    );
+    await this.upsertSnapshotItem((snap) => {
+      for (const pw of res.imported) {
+        snap.passwords[pw.id] = pw;
+        snap.lastSyncSeq = Math.max(snap.lastSyncSeq, pw.syncSeq);
+      }
+    });
+    return res.imported;
   }
 
   computeTotp(secretOrUri: string, timestampMs = Date.now()): TotpTokenSnapshot | null {
@@ -736,10 +1439,11 @@ export class PrivateSpaceMobileClient {
 
   generatePassphrase(
     opts?: Partial<PassphraseGeneratorOptions>,
-  ): { password: string; entropy: PasswordEntropyReport } {
+  ): { password: string; passphrase: string; entropy: PasswordEntropyReport } {
     const password = generateMemorablePassphrase(opts);
     return {
       password,
+      passphrase: password,
       entropy: evaluatePasswordEntropy(password),
     };
   }
@@ -748,16 +1452,24 @@ export class PrivateSpaceMobileClient {
     return evaluatePasswordEntropy(password);
   }
 
-  auditVaultHealth(passwords: PasswordItem[]): VaultPasswordAuditReport {
-    return auditPasswordVault(passwords);
+  auditVaultHealth(passwords: PasswordItem[], nowMs = Date.now()): VaultPasswordAuditReport {
+    return auditPasswordVault(passwords, nowMs);
   }
 
-  // ==================== 3. Encrypted Media, Albums & Resumable Upload ====================
+  auditVaultPasswords(items: PasswordItem[], nowMs = Date.now()): VaultPasswordAuditReport {
+    return auditPasswordVault(items, nowMs);
+  }
+
+  // ==================== 5. Encrypted Photos, Streaming Videos & Albums ====================
 
   async createAlbum(input: CreateAlbumRequest): Promise<MediaAlbum> {
     const res = await this.requestJson<{ album: MediaAlbum }>('/api/v1/media/albums', {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+    await this.upsertSnapshotItem((snap) => {
+      snap.albums[res.album.id] = res.album;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.album.syncSeq);
     });
     return res.album;
   }
@@ -765,6 +1477,12 @@ export class PrivateSpaceMobileClient {
   async deleteAlbum(id: string): Promise<void> {
     await this.requestJson(`/api/v1/media/albums/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+    await this.upsertSnapshotItem((snap) => {
+      delete snap.albums[id];
+      for (const m of Object.values(snap.media)) {
+        if (m.albumId === id) m.albumId = null;
+      }
     });
   }
 
@@ -776,12 +1494,19 @@ export class PrivateSpaceMobileClient {
         body: JSON.stringify(input),
       },
     );
+    await this.upsertSnapshotItem((snap) => {
+      snap.media[res.media.id] = res.media;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.media.syncSeq);
+    });
     return res.media;
   }
 
   async deleteMediaPermanently(id: string): Promise<void> {
     await this.requestJson(`/api/v1/media/${encodeURIComponent(id)}`, {
       method: 'DELETE',
+    });
+    await this.upsertSnapshotItem((snap) => {
+      delete snap.media[id];
     });
   }
 
@@ -791,20 +1516,30 @@ export class PrivateSpaceMobileClient {
       `/api/v1/media/trash${q}`,
       { method: 'DELETE' },
     );
+    await this.upsertSnapshotItem((snap) => {
+      for (const [id, m] of Object.entries(snap.media)) {
+        if (m.isTrashed && (!kind || m.itemType === kind)) {
+          delete snap.media[id];
+        }
+      }
+    });
     return res.purgedCount;
   }
 
   /**
    * Resumable chunked upload for photos & large 4K videos on mobile networks.
+   * Supports both `bytes: Uint8Array` (SDK/Node) and `file: Blob | File` (Android WebView zero-RAM-copy slicing).
    * Queries already-received chunks when resuming an interrupted uploadId.
    */
   async uploadMediaResumable(params: {
-    bytes: Uint8Array;
+    bytes?: Uint8Array;
+    file?: Blob;
     filename: string;
     mimeType: string;
     kind?: MediaKind;
     title?: string;
     description?: string;
+    takenAt?: string;
     sha256Hex?: string;
     albumId?: string | null;
     tags?: string[];
@@ -812,9 +1547,19 @@ export class PrivateSpaceMobileClient {
     chunkBytes?: number;
     onProgress?: (uploadedBytes: number, totalBytes: number) => void;
   }): Promise<MediaItem> {
+    const totalLength = params.bytes
+      ? params.bytes.byteLength
+      : params.file
+        ? params.file.size
+        : 0;
+
+    if (totalLength <= 0) {
+      throw new Error('待上传文件字节数为空');
+    }
+
     let chunkBytes = params.chunkBytes ?? 512 * 1024;
     let uploadId = params.existingUploadId;
-    let totalChunks = Math.max(1, Math.ceil(params.bytes.byteLength / chunkBytes));
+    let totalChunks = Math.max(1, Math.ceil(totalLength / chunkBytes));
     const completedSet = new Set<number>();
 
     if (uploadId) {
@@ -831,12 +1576,13 @@ export class PrivateSpaceMobileClient {
           method: 'POST',
           body: JSON.stringify({
             filename: params.filename,
-            mimeType: params.mimeType,
+            mimeType: params.mimeType || 'application/octet-stream',
             kind: params.kind,
+            totalBytes: totalLength,
+            chunkBytes,
             title: params.title,
             description: params.description,
-            totalBytes: params.bytes.byteLength,
-            chunkBytes,
+            takenAt: params.takenAt,
             sha256: params.sha256Hex,
             albumId: params.albumId ?? null,
             tags: params.tags ?? [],
@@ -851,8 +1597,10 @@ export class PrivateSpaceMobileClient {
     for (let i = 0; i < totalChunks; i += 1) {
       if (completedSet.has(i)) continue;
       const start = i * chunkBytes;
-      const end = Math.min(params.bytes.byteLength, start + chunkBytes);
-      const slice = params.bytes.subarray(start, end);
+      const end = Math.min(totalLength, start + chunkBytes);
+      const bodyPayload: BodyInit = params.bytes
+        ? (params.bytes.subarray(start, end) as unknown as BodyInit)
+        : (params.file!.slice(start, end) as BodyInit);
 
       const headers: Record<string, string> = {
         'Content-Type': 'application/octet-stream',
@@ -861,23 +1609,27 @@ export class PrivateSpaceMobileClient {
 
       let attempt = 0;
       while (true) {
-        const chunkRes = await this.fetchFn(
-          this.buildUrl(`/api/v1/media/uploads/${encodeURIComponent(uploadId)}/chunks/${i}`),
-          {
-            method: 'PUT',
-            headers,
-            body: slice as unknown as BodyInit,
-          },
-        );
-        if (chunkRes.ok) break;
-        attempt += 1;
-        if (attempt >= 3) {
-          throw new Error(`Chunk ${i} upload failed with HTTP ${chunkRes.status}`);
+        try {
+          const chunkRes = await this.fetchFn(
+            this.buildUrl(`/api/v1/media/uploads/${encodeURIComponent(uploadId)}/chunks/${i}`),
+            {
+              method: 'PUT',
+              headers,
+              body: bodyPayload,
+            },
+          );
+          if (!chunkRes.ok) {
+            throw new Error(`Chunk ${i} upload failed with HTTP ${chunkRes.status}`);
+          }
+          break;
+        } catch (err) {
+          attempt += 1;
+          if (attempt >= 3) throw err;
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
         }
-        await new Promise((r) => setTimeout(r, 250 * attempt));
       }
 
-      params.onProgress?.(end, params.bytes.byteLength);
+      params.onProgress?.(end, totalLength);
     }
 
     const done = await this.requestJson<{ media: MediaItem }>(
@@ -886,6 +1638,12 @@ export class PrivateSpaceMobileClient {
         method: 'POST',
       },
     );
+
+    await this.upsertSnapshotItem((snap) => {
+      snap.media[done.media.id] = done.media;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, done.media.syncSeq);
+    });
+
     return done.media;
   }
 

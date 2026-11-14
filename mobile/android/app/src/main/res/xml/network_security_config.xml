@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!--
+      Self-hosted PrivateSpace vaults routinely run on private LAN IPs (192.168.x.x / 10.x.x.x),
+      Tailscale/WireGuard meshes (100.x.y.z), or homelab reverse proxies signed by a user-installed
+      private Root CA (mkcert / Caddy internal CA). Trust both system and user CAs, and allow LAN HTTP.
+    -->
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

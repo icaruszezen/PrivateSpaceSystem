@@ -1,4 +1,4 @@
-name: CI & Docker Build
+name: CI, Android APK, iOS & Docker Build
 
 on:
   push:
@@ -35,13 +35,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck client, server & mobile SDK
+      - name: Typecheck Web, Server, Android & iOS clients
         run: npm run typecheck
 
-      - name: Run cryptographic, API & iOS mobile tests
+      - name: Run cryptographic, API, Android & iOS SDK tests
         run: npm test
 
-      - name: Build production bundle (Web + /ios MPA + Server)
+      - name: Build production bundles (Web + /ios MPA + /mobile Android + Server)
         run: npm run build
 
       - name: Build & smoke-test Docker container
@@ -57,9 +57,10 @@ jobs:
               echo "Container healthcheck & bootstrap verified!"
               curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
               curl -sf http://127.0.0.1:18080/ios | grep -q 'ios-root'
+              curl -sf http://127.0.0.1:18080/mobile/ | grep -q 'PrivateSpace'
               TOKEN=$(curl -sf -X POST http://127.0.0.1:18080/api/v1/auth/login \
                 -H 'Content-Type: application/json' \
-                -d '{"password":"CiTestMasterPass!2026","platform":"ios","deviceName":"CI iPhone"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
+                -d '{"password":"CiTestMasterPass!2026","platform":"android","deviceName":"CI Android"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
               curl -sf -X POST http://127.0.0.1:18080/api/v1/notes \
                 -H 'Content-Type: application/json' \
                 -H "Authorization: Bearer $TOKEN" \
@@ -70,7 +71,7 @@ jobs:
                 -d '{"title":"CI Vault Entry","username":"ops@example.com","password":"Str0ng#Vault!Password99","totpSecret":"JBSWY3DPEHPK3PXP"}' | grep -q '"revision":1'
               curl -sf "http://127.0.0.1:18080/api/v1/sync?since_seq=0" \
                 -H "Authorization: Bearer $TOKEN" | grep -q '"passwords":\['
-              echo "End-to-end encrypted notes, passwords, /ios app, AASA, and delta sync verified inside Docker container!"
+              echo "End-to-end encrypted notes, passwords, /mobile Android route, /ios app, AASA, and delta sync verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi
@@ -80,6 +81,47 @@ jobs:
           docker logs pss-ci
           docker rm -f pss-ci
           exit 1
+
+  android-apk:
+    name: Build Android APK & Kotlin Unit Tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Setup Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Sync Capacitor Android & run Kotlin JUnit tests
+        run: npm run android:test
+
+      - name: Assemble Android Debug APK
+        run: cd mobile/android && ./gradlew --no-daemon assembleDebug
+
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivateSpace-Android-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
 
   ios-verify:
     name: Native iOS SwiftKit XCTest & Xcode Simulator Build
@@ -135,7 +177,7 @@ jobs:
 
   docker-publish:
     name: Multi-Arch Docker Build & Push (GHCR)
-    needs: [verify, ios-verify]
+    needs: [verify, android-apk, ios-verify]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:

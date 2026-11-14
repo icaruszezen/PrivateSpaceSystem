@@ -10,9 +10,14 @@
   "scripts": {
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
+    "dev:mobile": "vite --config vite.mobile.config.ts",
     "build:client": "vite build",
+    "build:mobile": "vite build --config vite.mobile.config.ts",
     "build:server": "tsc -p tsconfig.server.json",
-    "build": "npm run build:client && npm run build:server",
+    "build": "npm run build:client && npm run build:mobile && npm run build:server",
+    "android:sync": "npm run build:mobile && cap sync android",
+    "android:test": "npm run android:sync && cd mobile/android && ./gradlew testDebugUnitTest",
+    "android:apk": "npm run android:sync && cd mobile/android && ./gradlew assembleDebug",
     "start": "node dist/server/server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p mobile/tsconfig.json --noEmit",
     "test": "vitest run"
@@ -27,6 +32,9 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@capacitor/android": "^6.2.3",
+    "@capacitor/cli": "^6.2.3",
+    "@capacitor/core": "^6.2.3",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.10",

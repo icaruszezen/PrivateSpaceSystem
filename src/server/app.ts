@@ -40,7 +40,15 @@ const MIME_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
+  '.apk': 'application/vnd.android.package-archive',
 };
+
+const DEFAULT_MOBILE_ORIGINS = [
+  'https://localhost',
+  'http://localhost',
+  'capacitor://localhost',
+  'ionic://localhost',
+];
 
 export function createApp(config: ServerConfig): AppInstance {
   const db = openVaultDatabase(config.dbPath);
@@ -79,19 +87,20 @@ export function createApp(config: ServerConfig): AppInstance {
     }),
   );
 
-  // Optional CORS for mobile/external WebView origins
-  if (config.corsOrigins.length > 0) {
-    app.use(
-      '/api/*',
-      cors({
-        origin: config.corsOrigins,
-        credentials: true,
-        allowHeaders: ['Content-Type', 'Authorization', 'Range'],
-        exposeHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
-        allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      }),
-    );
-  }
+  // CORS for Capacitor Android/iOS native WebView origins + optional custom origins
+  const allowedCorsOrigins = Array.from(
+    new Set([...DEFAULT_MOBILE_ORIGINS, ...config.corsOrigins]),
+  );
+  app.use(
+    '/api/*',
+    cors({
+      origin: allowedCorsOrigins,
+      credentials: true,
+      allowHeaders: ['Content-Type', 'Authorization', 'Range', 'Accept'],
+      exposeHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
+      allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    }),
+  );
 
   // Prevent caching of decrypted API responses
   app.use('/api/*', async (c, next) => {
@@ -164,6 +173,51 @@ export function createApp(config: ServerConfig): AppInstance {
       404,
     ),
   );
+
+  // Serve built Android / Mobile companion bundle under /mobile
+  const mobileDistDir = path.resolve(process.cwd(), 'dist/mobile');
+  app.get('/mobile', (c) => c.redirect('/mobile/', 302));
+  app.get('/mobile/*', (c) => {
+    if (!fs.existsSync(mobileDistDir)) {
+      return c.text('Mobile bundle not built yet. Run npm run build:mobile.', 404);
+    }
+    const reqPath = decodeURIComponent(c.req.path);
+    const subPath = reqPath.replace(/^\/mobile\/?/, '') || 'index.html';
+    const resolvedPath = path.resolve(mobileDistDir, subPath);
+
+    if (resolvedPath.startsWith(mobileDistDir) && fs.existsSync(resolvedPath)) {
+      const stat = fs.statSync(resolvedPath);
+      if (stat.isFile()) {
+        const ext = path.extname(resolvedPath).toLowerCase();
+        const mime = MIME_TYPES[ext] || 'application/octet-stream';
+        const cacheHeader = resolvedPath.includes(`${path.sep}assets${path.sep}`)
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache';
+        const body = fs.readFileSync(resolvedPath);
+        return new Response(body, {
+          status: 200,
+          headers: {
+            'Content-Type': mime,
+            'Cache-Control': cacheHeader,
+          },
+        });
+      }
+    }
+
+    const mobileIndex = path.join(mobileDistDir, 'index.html');
+    if (fs.existsSync(mobileIndex)) {
+      const html = fs.readFileSync(mobileIndex);
+      return new Response(html, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+        },
+      });
+    }
+
+    return c.text('Not Found', 404);
+  });
 
   // Serve built frontend static assets in production
   const clientDistDir = path.resolve(process.cwd(), 'dist/client');
