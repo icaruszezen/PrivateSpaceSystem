@@ -1,51 +1,47 @@
 import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type {
+  CipherEnvelopeDto,
   CipherEnvelopeInspection,
-  CreateAlbumRequest,
-  CreateNoteRequest,
-  CreatePasswordRequest,
-  ImportPasswordEntryInput,
-  MediaAlbum,
-  MediaAlbumDecryptedPayload,
-  MediaDecryptedPayload,
-  MediaItem,
+  CreateEncryptedAlbumRequest,
+  CreateEncryptedItemRequest,
+  E2EEKdfParams,
+  EncryptedAlbumRecordDto,
+  EncryptedBlobKeyMetaDto,
+  EncryptedResumableUploadInitRequest,
+  EncryptedSyncPullResponse,
+  EncryptedVaultRecordDto,
+  MediaBlobKeyBundleDto,
   MediaKind,
-  NoteDecryptedPayload,
-  NoteFormat,
-  NoteItem,
-  PasswordCategory,
-  PasswordCustomField,
-  PasswordDecryptedPayload,
-  PasswordItem,
-  ResumableUploadInitRequest,
   SessionInfo,
-  SyncPullResponse,
-  UpdateMediaRequest,
-  UpdateNoteRequest,
-  UpdatePasswordRequest,
+  UpdateEncryptedItemRequest,
   VaultItemType,
   VaultSecuritySummary,
-  VaultSyncItem,
+  WrappedDekDto,
 } from '../../shared/types.js';
 import {
   buildBlobKekInfo,
+  DEFAULT_MEDIA_CHUNK_SIZE,
   type EncryptedChunkStore,
   type StoredEncryptedBlobMeta,
 } from '../crypto/chunkStore.js';
 import {
   buildItemAad,
   buildItemHkdfInfo,
-  decryptVaultPayload,
+  CryptoValidationError,
   ENCRYPTION_SPEC,
-  encryptVaultPayload,
-  summarizeNoteText,
-  type WrappedMasterKeyEnvelope,
+  parseAndValidateCipherEnvelope,
+  serializeCipherEnvelope,
+  type ValidatedBlobKeyMeta,
+  type ZeroKnowledgeAdminEnvelope,
 } from '../crypto/vaultCrypto.js';
 
 export interface AdminConfigRow {
   vaultName: string;
-  envelope: WrappedMasterKeyEnvelope;
+  envelope: ZeroKnowledgeAdminEnvelope;
+  kdfSaltBase64: string;
+  kdfParams: E2EEKdfParams;
+  wrappedDekDto: WrappedDekDto;
   syncSeq: number;
   createdAt: string;
   passwordUpdatedAt: string;
@@ -57,9 +53,6 @@ export interface StoredSessionRow {
   deviceName: string;
   platform: 'web' | 'ios' | 'android' | 'api';
   ipAddress: string;
-  wrappedDekIv: Buffer;
-  wrappedDekTag: Buffer;
-  wrappedDekCiphertext: Buffer;
   createdAt: string;
   lastActiveAt: string;
   expiresAt: string;
@@ -114,23 +107,15 @@ export interface StoredMediaBlobs {
   thumbnail: StoredEncryptedBlobMeta | null;
 }
 
-export interface DecryptedUploadSession {
+export interface StoredEncryptedUploadSession {
   id: string;
   kind: MediaKind;
-  chunkBytes: number;
-  totalBytes: number;
-  totalChunks: number;
+  partPlainBytes: number;
+  totalPlainBytes: number;
+  totalEncryptedBytes: number;
+  totalParts: number;
   receivedChunks: number[];
-  meta: {
-    filename: string;
-    mimeType: string;
-    title: string;
-    albumId: string | null;
-    tags: string[];
-    description: string;
-    sha256?: string;
-    takenAt?: string;
-  };
+  metaEnvelope: CipherEnvelopeDto;
   createdAt: string;
   expiresAt: string;
 }
@@ -149,16 +134,87 @@ export class NotFoundError extends Error {
   }
 }
 
-const VALID_PASSWORD_CATEGORIES = new Set<PasswordCategory>([
-  'login',
-  'finance',
-  'work',
-  'dev',
-  'social',
-  'server',
-  'other',
-]);
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function assertValidUuid(id: unknown, label: string): string {
+  const clean = typeof id === 'string' ? id.trim() : '';
+  if (!UUID_REGEX.test(clean)) {
+    throw new CryptoValidationError(`${label} 必须为合法的客户端生成 UUID（用于 HKDF/AAD 绑定）`);
+  }
+  return clean.toLowerCase();
+}
+
+function serializeBlobMetaToDto(meta: StoredEncryptedBlobMeta): EncryptedBlobKeyMetaDto {
+  return {
+    blobId: meta.blobId,
+    fekSalt: meta.fekSalt.toString('base64'),
+    fekNonce: meta.fekNonce.toString('base64'),
+    fekTag: meta.fekTag.toString('base64'),
+    wrappedFek: meta.wrappedFek.toString('base64'),
+    baseNonce: meta.baseNonce.toString('base64'),
+    chunkSize: meta.chunkSize,
+    chunkCount: meta.chunkCount,
+    plainSize: meta.plainSize,
+    encryptedSize: meta.encryptedSize,
+    sha256: meta.sha256,
+  };
+}
+
+function parseRawMediaBlobRow(row: RawMediaBlobRow): StoredMediaBlobs {
+  const main: StoredEncryptedBlobMeta = {
+    blobId: row.blob_id,
+    fekSalt: Buffer.from(row.fek_salt),
+    fekNonce: Buffer.from(row.fek_nonce),
+    fekTag: Buffer.from(row.fek_tag),
+    wrappedFek: Buffer.from(row.wrapped_fek),
+    baseNonce: Buffer.from(row.base_nonce),
+    chunkSize: Number(row.chunk_size),
+    chunkCount: Number(row.chunk_count),
+    plainSize: Number(row.plain_size),
+    encryptedSize: Number(row.encrypted_size),
+    sha256: row.sha256_hex,
+  };
+
+  let thumbnail: StoredEncryptedBlobMeta | null = null;
+  if (
+    row.thumb_blob_id &&
+    row.thumb_fek_salt &&
+    row.thumb_fek_nonce &&
+    row.thumb_fek_tag &&
+    row.thumb_wrapped_fek &&
+    row.thumb_base_nonce
+  ) {
+    thumbnail = {
+      blobId: row.thumb_blob_id,
+      fekSalt: Buffer.from(row.thumb_fek_salt),
+      fekNonce: Buffer.from(row.thumb_fek_nonce),
+      fekTag: Buffer.from(row.thumb_fek_tag),
+      wrappedFek: Buffer.from(row.thumb_wrapped_fek),
+      baseNonce: Buffer.from(row.thumb_base_nonce),
+      chunkSize: Number(row.thumb_chunk_size || DEFAULT_MEDIA_CHUNK_SIZE),
+      chunkCount: Number(row.thumb_chunk_count || 1),
+      plainSize: Number(row.thumb_plain_size || 0),
+      encryptedSize: Number(row.thumb_encrypted_size || 0),
+      sha256: '',
+    };
+  }
+
+  return { main, thumbnail };
+}
+
+function serializeMediaBlobBundle(blobs: StoredMediaBlobs): MediaBlobKeyBundleDto {
+  return {
+    main: serializeBlobMetaToDto(blobs.main),
+    thumbnail: blobs.thumbnail ? serializeBlobMetaToDto(blobs.thumbnail) : null,
+  };
+}
+
+/**
+ * Zero-Knowledge Blind VaultRepository.
+ *
+ * Stores, versions, and synchronizes opaque AES-256-GCM ciphertext envelopes.
+ * Notice that NO method in this class accepts or accesses a `DEK` or `KEK`.
+ */
 export class VaultRepository {
   private onSyncNotify?: (latestSyncSeq: number, itemType: string) => void;
 
@@ -174,12 +230,12 @@ export class VaultRepository {
     }
   }
 
-  // ==================== Admin Single-User Config ====================
+  // ==================== Admin Single-User Zero-Knowledge Config ====================
 
   getAdminConfig(): AdminConfigRow | null {
     const row = this.db
       .prepare(
-        `SELECT vault_name, kdf_salt, kdf_params, auth_verifier,
+        `SELECT vault_name, kdf_salt, kdf_params, verifier_salt, auth_verifier,
                 wrapped_dek_iv, wrapped_dek_tag, wrapped_dek_ciphertext,
                 key_fingerprint, sync_seq, created_at, password_updated_at
          FROM admin_config WHERE id = 1`,
@@ -190,16 +246,32 @@ export class VaultRepository {
       return null;
     }
 
+    const kdfSalt = Buffer.from(row.kdf_salt as Uint8Array);
+    const kdfParamsJson = String(row.kdf_params);
+    const verifierSalt = Buffer.from(row.verifier_salt as Uint8Array);
+    const authVerifier = Buffer.from(row.auth_verifier as Uint8Array);
+    const wrappedDekIv = Buffer.from(row.wrapped_dek_iv as Uint8Array);
+    const wrappedDekTag = Buffer.from(row.wrapped_dek_tag as Uint8Array);
+    const wrappedDekCiphertext = Buffer.from(row.wrapped_dek_ciphertext as Uint8Array);
+
     return {
       vaultName: String(row.vault_name),
       envelope: {
-        kdfSalt: Buffer.from(row.kdf_salt as Uint8Array),
-        kdfParamsJson: String(row.kdf_params),
-        authVerifier: Buffer.from(row.auth_verifier as Uint8Array),
-        wrappedDekIv: Buffer.from(row.wrapped_dek_iv as Uint8Array),
-        wrappedDekTag: Buffer.from(row.wrapped_dek_tag as Uint8Array),
-        wrappedDekCiphertext: Buffer.from(row.wrapped_dek_ciphertext as Uint8Array),
+        kdfSalt,
+        kdfParamsJson,
+        verifierSalt,
+        authVerifier,
+        wrappedDekIv,
+        wrappedDekTag,
+        wrappedDekCiphertext,
         keyFingerprint: String(row.key_fingerprint),
+      },
+      kdfSaltBase64: kdfSalt.toString('base64'),
+      kdfParams: JSON.parse(kdfParamsJson) as E2EEKdfParams,
+      wrappedDekDto: {
+        iv: wrappedDekIv.toString('base64'),
+        tag: wrappedDekTag.toString('base64'),
+        ciphertext: wrappedDekCiphertext.toString('base64'),
       },
       syncSeq: Number(row.sync_seq),
       createdAt: String(row.created_at),
@@ -207,7 +279,7 @@ export class VaultRepository {
     };
   }
 
-  initializeAdmin(vaultName: string, envelope: WrappedMasterKeyEnvelope): AdminConfigRow {
+  initializeAdmin(vaultName: string, envelope: ZeroKnowledgeAdminEnvelope): AdminConfigRow {
     const existing = this.getAdminConfig();
     if (existing) {
       throw new ConflictError('管理员账户已完成初始化，系统仅允许唯一管理员');
@@ -219,15 +291,16 @@ export class VaultRepository {
     this.db
       .prepare(
         `INSERT INTO admin_config (
-          id, vault_name, kdf_salt, kdf_params, auth_verifier,
+          id, vault_name, kdf_salt, kdf_params, verifier_salt, auth_verifier,
           wrapped_dek_iv, wrapped_dek_tag, wrapped_dek_ciphertext,
           key_fingerprint, sync_seq, created_at, password_updated_at
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       )
       .run(
         cleanName,
         envelope.kdfSalt,
         envelope.kdfParamsJson,
+        envelope.verifierSalt,
         envelope.authVerifier,
         envelope.wrappedDekIv,
         envelope.wrappedDekTag,
@@ -240,13 +313,14 @@ export class VaultRepository {
     return this.getAdminConfig()!;
   }
 
-  updateAdminEnvelope(envelope: WrappedMasterKeyEnvelope): void {
+  updateAdminEnvelope(envelope: ZeroKnowledgeAdminEnvelope): void {
     const now = new Date().toISOString();
     this.db
       .prepare(
         `UPDATE admin_config
          SET kdf_salt = ?,
              kdf_params = ?,
+             verifier_salt = ?,
              auth_verifier = ?,
              wrapped_dek_iv = ?,
              wrapped_dek_tag = ?,
@@ -258,6 +332,7 @@ export class VaultRepository {
       .run(
         envelope.kdfSalt,
         envelope.kdfParamsJson,
+        envelope.verifierSalt,
         envelope.authVerifier,
         envelope.wrappedDekIv,
         envelope.wrappedDekTag,
@@ -281,7 +356,7 @@ export class VaultRepository {
     return Number(row.sync_seq);
   }
 
-  // ==================== Multi-Device Session Management ====================
+  // ==================== Multi-Device Blind Session Management ====================
 
   createSession(params: {
     id: string;
@@ -289,7 +364,6 @@ export class VaultRepository {
     deviceName: string;
     platform: 'web' | 'ios' | 'android' | 'api';
     ipAddress: string;
-    wrappedDek: { iv: Buffer; tag: Buffer; ciphertext: Buffer };
     ttlHours: number;
   }): SessionInfo {
     this.pruneExpiredSessions();
@@ -301,9 +375,8 @@ export class VaultRepository {
       .prepare(
         `INSERT INTO sessions (
           id, token_hash, device_name, platform, ip_address,
-          wrapped_dek_iv, wrapped_dek_tag, wrapped_dek_ciphertext,
           created_at, last_active_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         params.id,
@@ -311,9 +384,6 @@ export class VaultRepository {
         params.deviceName.slice(0, 80),
         params.platform,
         params.ipAddress.slice(0, 64),
-        params.wrappedDek.iv,
-        params.wrappedDek.tag,
-        params.wrappedDek.ciphertext,
         createdAt,
         createdAt,
         expiresAt,
@@ -335,7 +405,6 @@ export class VaultRepository {
     const row = this.db
       .prepare(
         `SELECT id, token_hash, device_name, platform, ip_address,
-                wrapped_dek_iv, wrapped_dek_tag, wrapped_dek_ciphertext,
                 created_at, last_active_at, expires_at
          FROM sessions WHERE id = ?`,
       )
@@ -357,9 +426,6 @@ export class VaultRepository {
       deviceName: String(row.device_name),
       platform: (row.platform as StoredSessionRow['platform']) || 'web',
       ipAddress: String(row.ip_address),
-      wrappedDekIv: Buffer.from(row.wrapped_dek_iv as Uint8Array),
-      wrappedDekTag: Buffer.from(row.wrapped_dek_tag as Uint8Array),
-      wrappedDekCiphertext: Buffer.from(row.wrapped_dek_ciphertext as Uint8Array),
       createdAt: String(row.created_at),
       lastActiveAt: String(row.last_active_at),
       expiresAt,
@@ -410,32 +476,15 @@ export class VaultRepository {
     this.db.prepare(`DELETE FROM sessions WHERE expires_at <= ?`).run(now);
   }
 
-  // ==================== 1. Encrypted Text Notes ====================
+  // ==================== Opaque Encrypted Notes & Passwords ====================
 
-  private hydrateNoteRow(dek: Buffer, row: RawVaultItemRow): NoteItem {
-    const payload = decryptVaultPayload<NoteDecryptedPayload>(
-      dek,
-      row.id,
-      'note',
-      Number(row.revision),
-      {
-        cipherVersion: Number(row.cipher_version),
-        itemSalt: Buffer.from(row.item_salt),
-        nonce: Buffer.from(row.nonce),
-        authTag: Buffer.from(row.auth_tag),
-        ciphertext: Buffer.from(row.ciphertext),
-      },
-    );
-
-    return {
+  private serializeVaultRow(
+    row: RawVaultItemRow,
+    blobRow?: RawMediaBlobRow,
+  ): EncryptedVaultRecordDto {
+    const dto: EncryptedVaultRecordDto = {
       id: row.id,
-      itemType: 'note',
-      title: payload.title,
-      content: payload.content,
-      excerpt: payload.excerpt,
-      tags: Array.isArray(payload.tags) ? payload.tags : [],
-      format: payload.format || 'markdown',
-      wordCount: Number(payload.wordCount || 0),
+      itemType: row.item_type,
       isPinned: Boolean(row.is_pinned),
       isArchived: Boolean(row.is_archived),
       isTrashed: Boolean(row.is_trashed),
@@ -445,14 +494,27 @@ export class VaultRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       trashedAt: row.trashed_at,
+      envelope: serializeCipherEnvelope({
+        cipherVersion: row.cipher_version,
+        itemSalt: row.item_salt,
+        nonce: row.nonce,
+        authTag: row.auth_tag,
+        ciphertext: row.ciphertext,
+      }),
     };
+
+    if (blobRow) {
+      dto.mediaBlobs = serializeMediaBlobBundle(parseRawMediaBlobRow(blobRow));
+    }
+
+    return dto;
   }
 
-  listNotes(
-    dek: Buffer,
+  listEncryptedItems(
+    itemType: 'note' | 'password',
     options: { includeTrashed?: boolean; onlyTrashed?: boolean; onlyArchived?: boolean } = {},
-  ): NoteItem[] {
-    let whereClause = `WHERE item_type = 'note'`;
+  ): EncryptedVaultRecordDto[] {
+    let whereClause = `WHERE item_type = ?`;
     if (options.onlyTrashed) {
       whereClause += ` AND is_trashed = 1`;
     } else if (!options.includeTrashed) {
@@ -471,347 +533,47 @@ export class VaultRepository {
          ${whereClause}
          ORDER BY is_pinned DESC, updated_at DESC`,
       )
-      .all() as unknown as RawVaultItemRow[];
+      .all(itemType) as unknown as RawVaultItemRow[];
 
-    return rows.map((row) => this.hydrateNoteRow(dek, row));
+    return rows.map((row) => this.serializeVaultRow(row));
   }
 
-  getNoteById(dek: Buffer, id: string): NoteItem | null {
+  getEncryptedItemById(
+    id: string,
+    itemType: 'note' | 'password',
+  ): EncryptedVaultRecordDto | null {
     const row = this.db
       .prepare(
         `SELECT id, item_type, is_pinned, is_archived, is_trashed,
                 revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
                 ciphertext, byte_size, created_at, updated_at, trashed_at
-         FROM vault_items WHERE id = ? AND item_type = 'note'`,
+         FROM vault_items WHERE id = ? AND item_type = ?`,
       )
-      .get(id) as unknown as RawVaultItemRow | undefined;
-
-    if (!row) {
-      return null;
-    }
-    return this.hydrateNoteRow(dek, row);
-  }
-
-  createNote(dek: Buffer, input: CreateNoteRequest): NoteItem {
-    const id = input.id && /^[0-9a-f-]{36}$/i.test(input.id) ? input.id : crypto.randomUUID();
-    const rawTitle = input.title ?? '';
-    const rawContent = input.content ?? '';
-    const format: NoteFormat = input.format === 'plain' ? 'plain' : 'markdown';
-    const tags = normalizeTags(input.tags ?? []);
-    const isPinned = input.isPinned ? 1 : 0;
-    const revision = 1;
-
-    const { cleanTitle, excerpt, wordCount } = summarizeNoteText(rawTitle, rawContent);
-    const payload: NoteDecryptedPayload = {
-      title: cleanTitle,
-      content: rawContent,
-      excerpt,
-      tags,
-      format,
-      wordCount,
-    };
-
-    const encrypted = encryptVaultPayload(dek, id, 'note', revision, payload);
-    const now = new Date().toISOString();
-    let syncSeq = 0;
-
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const existing = this.db.prepare(`SELECT id FROM vault_items WHERE id = ?`).get(id);
-      if (existing) {
-        throw new ConflictError('记录 ID 已存在');
-      }
-      syncSeq = this.nextSyncSeq();
-      this.db
-        .prepare(
-          `INSERT INTO vault_items (
-            id, item_type, is_pinned, is_archived, is_trashed,
-            revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
-            ciphertext, byte_size, created_at, updated_at, trashed_at
-          ) VALUES (?, 'note', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-        )
-        .run(
-          id,
-          isPinned,
-          revision,
-          syncSeq,
-          encrypted.cipherVersion,
-          encrypted.itemSalt,
-          encrypted.nonce,
-          encrypted.authTag,
-          encrypted.ciphertext,
-          encrypted.byteSize,
-          now,
-          now,
-        );
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
-
-    this.emitSync(syncSeq, 'note');
-    return this.getNoteById(dek, id)!;
-  }
-
-  updateNote(dek: Buffer, id: string, input: UpdateNoteRequest): NoteItem {
-    const current = this.getNoteById(dek, id);
-    if (!current) {
-      throw new NotFoundError('未找到该文本记录');
-    }
-
-    if (
-      typeof input.expectedRevision === 'number' &&
-      input.expectedRevision !== current.revision
-    ) {
-      throw new ConflictError(
-        `记录版本冲突（当前版本 v${current.revision}，提交版本 v${input.expectedRevision}）`,
-      );
-    }
-
-    const nextTitleRaw = input.title !== undefined ? input.title : current.title;
-    const nextContent = input.content !== undefined ? input.content : current.content;
-    const nextFormat: NoteFormat = input.format !== undefined ? input.format : current.format;
-    const nextTags = input.tags !== undefined ? normalizeTags(input.tags) : current.tags;
-    const nextPinned = input.isPinned !== undefined ? input.isPinned : current.isPinned;
-    const nextArchived = input.isArchived !== undefined ? input.isArchived : current.isArchived;
-    const nextTrashed = input.isTrashed !== undefined ? input.isTrashed : current.isTrashed;
-
-    const nextRevision = current.revision + 1;
-    const { cleanTitle, excerpt, wordCount } = summarizeNoteText(nextTitleRaw, nextContent);
-
-    const payload: NoteDecryptedPayload = {
-      title: cleanTitle,
-      content: nextContent,
-      excerpt,
-      tags: nextTags,
-      format: nextFormat,
-      wordCount,
-    };
-
-    const encrypted = encryptVaultPayload(dek, id, 'note', nextRevision, payload);
-    const now = new Date().toISOString();
-    const trashedAt = nextTrashed ? current.trashedAt || now : null;
-    let syncSeq = 0;
-
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      syncSeq = this.nextSyncSeq();
-      this.db
-        .prepare(
-          `UPDATE vault_items
-           SET is_pinned = ?,
-               is_archived = ?,
-               is_trashed = ?,
-               revision = ?,
-               sync_seq = ?,
-               cipher_version = ?,
-               item_salt = ?,
-               nonce = ?,
-               auth_tag = ?,
-               ciphertext = ?,
-               byte_size = ?,
-               updated_at = ?,
-               trashed_at = ?
-           WHERE id = ? AND item_type = 'note'`,
-        )
-        .run(
-          nextPinned ? 1 : 0,
-          nextArchived ? 1 : 0,
-          nextTrashed ? 1 : 0,
-          nextRevision,
-          syncSeq,
-          encrypted.cipherVersion,
-          encrypted.itemSalt,
-          encrypted.nonce,
-          encrypted.authTag,
-          encrypted.ciphertext,
-          encrypted.byteSize,
-          now,
-          trashedAt,
-          id,
-        );
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
-
-    this.emitSync(syncSeq, 'note');
-    return this.getNoteById(dek, id)!;
-  }
-
-  permanentlyDeleteNote(id: string): void {
-    let syncSeq = 0;
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const existing = this.db
-        .prepare(`SELECT id FROM vault_items WHERE id = ? AND item_type = 'note'`)
-        .get(id) as { id: string } | undefined;
-      if (!existing) {
-        throw new NotFoundError('未找到该文本记录');
-      }
-
-      syncSeq = this.nextSyncSeq();
-      const now = new Date().toISOString();
-
-      this.db.prepare(`DELETE FROM vault_items WHERE id = ?`).run(id);
-      this.db
-        .prepare(
-          `INSERT OR REPLACE INTO sync_tombstones (id, item_type, sync_seq, deleted_at)
-           VALUES (?, 'note', ?, ?)`,
-        )
-        .run(id, syncSeq, now);
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
-    this.emitSync(syncSeq, 'note');
-  }
-
-  emptyTrash(): number {
-    const rows = this.db
-      .prepare(`SELECT id FROM vault_items WHERE item_type = 'note' AND is_trashed = 1`)
-      .all() as Array<{ id: string }>;
-    if (rows.length === 0) {
-      return 0;
-    }
-
-    let lastSeq = 0;
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const now = new Date().toISOString();
-      for (const row of rows) {
-        lastSeq = this.nextSyncSeq();
-        this.db.prepare(`DELETE FROM vault_items WHERE id = ?`).run(row.id);
-        this.db
-          .prepare(
-            `INSERT OR REPLACE INTO sync_tombstones (id, item_type, sync_seq, deleted_at)
-             VALUES (?, 'note', ?, ?)`,
-          )
-          .run(row.id, lastSeq, now);
-      }
-      this.db.exec('COMMIT');
-    } catch (err) {
-      this.db.exec('ROLLBACK');
-      throw err;
-    }
-    this.emitSync(lastSeq, 'note');
-    return rows.length;
-  }
-
-  // ==================== 2. Encrypted Passwords & TOTP ====================
-
-  private hydratePasswordRow(dek: Buffer, row: RawVaultItemRow): PasswordItem {
-    const payload = decryptVaultPayload<PasswordDecryptedPayload>(
-      dek,
-      row.id,
-      'password',
-      Number(row.revision),
-      {
-        cipherVersion: Number(row.cipher_version),
-        itemSalt: Buffer.from(row.item_salt),
-        nonce: Buffer.from(row.nonce),
-        authTag: Buffer.from(row.auth_tag),
-        ciphertext: Buffer.from(row.ciphertext),
-      },
-    );
-
-    return {
-      id: row.id,
-      itemType: 'password',
-      title: payload.title || '未命名账号',
-      username: payload.username || '',
-      password: payload.password || '',
-      url: payload.url || '',
-      totpSecret: payload.totpSecret || '',
-      category: VALID_PASSWORD_CATEGORIES.has(payload.category) ? payload.category : 'login',
-      notes: payload.notes || '',
-      tags: Array.isArray(payload.tags) ? payload.tags : [],
-      customFields: Array.isArray(payload.customFields) ? payload.customFields : [],
-      history: Array.isArray(payload.history) ? payload.history : [],
-      passwordChangedAt: payload.passwordChangedAt || row.updated_at,
-      isPinned: Boolean(row.is_pinned),
-      isArchived: Boolean(row.is_archived),
-      isTrashed: Boolean(row.is_trashed),
-      revision: Number(row.revision),
-      syncSeq: Number(row.sync_seq),
-      byteSize: Number(row.byte_size),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      trashedAt: row.trashed_at,
-    };
-  }
-
-  listPasswords(
-    dek: Buffer,
-    options: { includeTrashed?: boolean; onlyTrashed?: boolean } = {},
-  ): PasswordItem[] {
-    let whereClause = `WHERE item_type = 'password'`;
-    if (options.onlyTrashed) {
-      whereClause += ` AND is_trashed = 1`;
-    } else if (!options.includeTrashed) {
-      whereClause += ` AND is_trashed = 0`;
-    }
-
-    const rows = this.db
-      .prepare(
-        `SELECT id, item_type, is_pinned, is_archived, is_trashed,
-                revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
-                ciphertext, byte_size, created_at, updated_at, trashed_at
-         FROM vault_items
-         ${whereClause}
-         ORDER BY is_pinned DESC, updated_at DESC`,
-      )
-      .all() as unknown as RawVaultItemRow[];
-
-    return rows.map((row) => this.hydratePasswordRow(dek, row));
-  }
-
-  getPasswordById(dek: Buffer, id: string): PasswordItem | null {
-    const row = this.db
-      .prepare(
-        `SELECT id, item_type, is_pinned, is_archived, is_trashed,
-                revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
-                ciphertext, byte_size, created_at, updated_at, trashed_at
-         FROM vault_items WHERE id = ? AND item_type = 'password'`,
-      )
-      .get(id) as unknown as RawVaultItemRow | undefined;
+      .get(id, itemType) as unknown as RawVaultItemRow | undefined;
 
     if (!row) return null;
-    return this.hydratePasswordRow(dek, row);
+    return this.serializeVaultRow(row);
   }
 
-  createPassword(dek: Buffer, input: CreatePasswordRequest): PasswordItem {
-    const id = input.id && /^[0-9a-f-]{36}$/i.test(input.id) ? input.id : crypto.randomUUID();
+  createEncryptedItem(
+    itemType: 'note' | 'password',
+    input: CreateEncryptedItemRequest,
+  ): EncryptedVaultRecordDto {
+    const id = assertValidUuid(input.id, 'id');
+    const revision = Number(input.revision ?? 1);
+    if (revision !== 1) {
+      throw new CryptoValidationError('新建密文条目的初始 revision 必须为 1');
+    }
+
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
     const now = new Date().toISOString();
-    const category: PasswordCategory =
-      input.category && VALID_PASSWORD_CATEGORIES.has(input.category) ? input.category : 'login';
-
-    const payload: PasswordDecryptedPayload = {
-      title: (input.title ?? '').trim().slice(0, 120) || '未命名账号',
-      username: (input.username ?? '').trim().slice(0, 200),
-      password: input.password ?? '',
-      url: (input.url ?? '').trim().slice(0, 500),
-      totpSecret: (input.totpSecret ?? '').trim().slice(0, 300),
-      category,
-      notes: (input.notes ?? '').slice(0, 8000),
-      tags: normalizeTags(input.tags ?? []),
-      customFields: sanitizeCustomFields(input.customFields ?? []),
-      history: [],
-      passwordChangedAt: now,
-    };
-
-    const revision = 1;
-    const encrypted = encryptVaultPayload(dek, id, 'password', revision, payload);
     let syncSeq = 0;
 
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const existing = this.db.prepare(`SELECT id FROM vault_items WHERE id = ?`).get(id);
       if (existing) {
-        throw new ConflictError('密码条目 ID 已存在');
+        throw new ConflictError('条目 ID 已存在');
       }
       syncSeq = this.nextSyncSeq();
       this.db
@@ -820,10 +582,11 @@ export class VaultRepository {
             id, item_type, is_pinned, is_archived, is_trashed,
             revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
             ciphertext, byte_size, created_at, updated_at, trashed_at
-          ) VALUES (?, 'password', ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          ) VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
         )
         .run(
           id,
+          itemType,
           input.isPinned ? 1 : 0,
           revision,
           syncSeq,
@@ -842,34 +605,29 @@ export class VaultRepository {
       throw err;
     }
 
-    this.emitSync(syncSeq, 'password');
-    return this.getPasswordById(dek, id)!;
+    this.emitSync(syncSeq, itemType);
+    return this.getEncryptedItemById(id, itemType)!;
   }
 
-  importPasswords(dek: Buffer, entries: ImportPasswordEntryInput[]): PasswordItem[] {
-    const created: PasswordItem[] = [];
-    for (const entry of entries.slice(0, 500)) {
-      if (!entry.title?.trim() && !entry.password) continue;
-      created.push(
-        this.createPassword(dek, {
-          title: entry.title || entry.url || '导入账号',
-          username: entry.username,
-          password: entry.password || '',
-          url: entry.url,
-          totpSecret: entry.totpSecret,
-          category: entry.category,
-          notes: entry.notes,
-          tags: entry.tags,
-        }),
-      );
+  batchCreateEncryptedItems(
+    itemType: 'password',
+    inputs: CreateEncryptedItemRequest[],
+  ): EncryptedVaultRecordDto[] {
+    const created: EncryptedVaultRecordDto[] = [];
+    for (const entry of inputs.slice(0, 500)) {
+      created.push(this.createEncryptedItem(itemType, entry));
     }
     return created;
   }
 
-  updatePassword(dek: Buffer, id: string, input: UpdatePasswordRequest): PasswordItem {
-    const current = this.getPasswordById(dek, id);
+  updateEncryptedItem(
+    itemType: 'note' | 'password',
+    id: string,
+    input: UpdateEncryptedItemRequest,
+  ): EncryptedVaultRecordDto {
+    const current = this.getEncryptedItemById(id, itemType);
     if (!current) {
-      throw new NotFoundError('未找到该密码条目');
+      throw new NotFoundError(itemType === 'note' ? '未找到该文本记录' : '未找到该密码条目');
     }
 
     if (
@@ -877,54 +635,23 @@ export class VaultRepository {
       input.expectedRevision !== current.revision
     ) {
       throw new ConflictError(
-        `密码条目版本冲突（当前版本 v${current.revision}，提交版本 v${input.expectedRevision}）`,
+        `记录版本冲突（当前版本 v${current.revision}，提交版本 v${input.expectedRevision}）`,
       );
     }
 
-    const now = new Date().toISOString();
-    const nextPassword = input.password !== undefined ? input.password : current.password;
-    const passwordChanged = nextPassword !== current.password;
-    const nextHistory =
-      passwordChanged && current.password
-        ? [{ password: current.password, changedAt: current.passwordChangedAt || current.updatedAt }, ...current.history].slice(0, 15)
-        : current.history;
+    const nextRevision = current.revision + 1;
+    if (Number(input.revision) !== nextRevision) {
+      throw new ConflictError(
+        `客户端 AAD 绑定版本号不匹配（期望 revision=${nextRevision}，提交 ${String(input.revision)}）`,
+      );
+    }
 
-    const nextCategory: PasswordCategory =
-      input.category && VALID_PASSWORD_CATEGORIES.has(input.category)
-        ? input.category
-        : current.category;
-
-    const payload: PasswordDecryptedPayload = {
-      title:
-        input.title !== undefined
-          ? input.title.trim().slice(0, 120) || '未命名账号'
-          : current.title,
-      username:
-        input.username !== undefined ? input.username.trim().slice(0, 200) : current.username,
-      password: nextPassword,
-      url: input.url !== undefined ? input.url.trim().slice(0, 500) : current.url,
-      totpSecret:
-        input.totpSecret !== undefined
-          ? input.totpSecret.trim().slice(0, 300)
-          : current.totpSecret,
-      category: nextCategory,
-      notes: input.notes !== undefined ? input.notes.slice(0, 8000) : current.notes,
-      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
-      customFields:
-        input.customFields !== undefined
-          ? sanitizeCustomFields(input.customFields)
-          : current.customFields,
-      history: nextHistory,
-      passwordChangedAt: passwordChanged ? now : current.passwordChangedAt,
-    };
-
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
     const nextPinned = input.isPinned !== undefined ? input.isPinned : current.isPinned;
     const nextArchived = input.isArchived !== undefined ? input.isArchived : current.isArchived;
     const nextTrashed = input.isTrashed !== undefined ? input.isTrashed : current.isTrashed;
-    const nextRevision = current.revision + 1;
+    const now = new Date().toISOString();
     const trashedAt = nextTrashed ? current.trashedAt || now : null;
-
-    const encrypted = encryptVaultPayload(dek, id, 'password', nextRevision, payload);
     let syncSeq = 0;
 
     this.db.exec('BEGIN IMMEDIATE');
@@ -946,7 +673,7 @@ export class VaultRepository {
                byte_size = ?,
                updated_at = ?,
                trashed_at = ?
-           WHERE id = ? AND item_type = 'password'`,
+           WHERE id = ? AND item_type = ?`,
         )
         .run(
           nextPinned ? 1 : 0,
@@ -963,6 +690,7 @@ export class VaultRepository {
           now,
           trashedAt,
           id,
+          itemType,
         );
       this.db.exec('COMMIT');
     } catch (err) {
@@ -970,19 +698,19 @@ export class VaultRepository {
       throw err;
     }
 
-    this.emitSync(syncSeq, 'password');
-    return this.getPasswordById(dek, id)!;
+    this.emitSync(syncSeq, itemType);
+    return this.getEncryptedItemById(id, itemType)!;
   }
 
-  permanentlyDeletePassword(id: string): void {
+  permanentlyDeleteItem(itemType: 'note' | 'password', id: string): void {
     let syncSeq = 0;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const existing = this.db
-        .prepare(`SELECT id FROM vault_items WHERE id = ? AND item_type = 'password'`)
-        .get(id);
+        .prepare(`SELECT id FROM vault_items WHERE id = ? AND item_type = ?`)
+        .get(id, itemType);
       if (!existing) {
-        throw new NotFoundError('未找到该密码条目');
+        throw new NotFoundError(itemType === 'note' ? '未找到该文本记录' : '未找到该密码条目');
       }
 
       syncSeq = this.nextSyncSeq();
@@ -991,21 +719,21 @@ export class VaultRepository {
       this.db
         .prepare(
           `INSERT OR REPLACE INTO sync_tombstones (id, item_type, sync_seq, deleted_at)
-           VALUES (?, 'password', ?, ?)`,
+           VALUES (?, ?, ?, ?)`,
         )
-        .run(id, syncSeq, now);
+        .run(id, itemType, syncSeq, now);
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
-    this.emitSync(syncSeq, 'password');
+    this.emitSync(syncSeq, itemType);
   }
 
-  emptyPasswordTrash(): number {
+  emptyTrashByType(itemType: 'note' | 'password'): number {
     const rows = this.db
-      .prepare(`SELECT id FROM vault_items WHERE item_type = 'password' AND is_trashed = 1`)
-      .all() as Array<{ id: string }>;
+      .prepare(`SELECT id FROM vault_items WHERE item_type = ? AND is_trashed = 1`)
+      .all(itemType) as Array<{ id: string }>;
     if (rows.length === 0) return 0;
 
     let lastSeq = 0;
@@ -1018,79 +746,24 @@ export class VaultRepository {
         this.db
           .prepare(
             `INSERT OR REPLACE INTO sync_tombstones (id, item_type, sync_seq, deleted_at)
-             VALUES (?, 'password', ?, ?)`,
+             VALUES (?, ?, ?, ?)`,
           )
-          .run(row.id, lastSeq, now);
+          .run(row.id, itemType, lastSeq, now);
       }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
-    this.emitSync(lastSeq, 'password');
+    this.emitSync(lastSeq, itemType);
     return rows.length;
   }
 
-  // ==================== 3. Encrypted Images, Videos & Albums ====================
+  // ==================== Opaque Encrypted Media & Albums ====================
 
-  private hydrateMediaRow(
-    dek: Buffer,
-    row: RawVaultItemRow,
-    blobRow: RawMediaBlobRow | undefined,
-  ): MediaItem {
-    const kind = row.item_type === 'video' ? 'video' : 'image';
-    const payload = decryptVaultPayload<MediaDecryptedPayload>(
-      dek,
-      row.id,
-      kind,
-      Number(row.revision),
-      {
-        cipherVersion: Number(row.cipher_version),
-        itemSalt: Buffer.from(row.item_salt),
-        nonce: Buffer.from(row.nonce),
-        authTag: Buffer.from(row.auth_tag),
-        ciphertext: Buffer.from(row.ciphertext),
-      },
-    );
-
-    return {
-      id: row.id,
-      itemType: kind,
-      title: payload.title || payload.originalFilename || '未命名媒体',
-      originalFilename: payload.originalFilename || '',
-      mimeType: payload.mimeType || (kind === 'video' ? 'video/mp4' : 'image/jpeg'),
-      albumId: payload.albumId ?? null,
-      tags: Array.isArray(payload.tags) ? payload.tags : [],
-      description: payload.description || '',
-      width: Number(payload.width || 0),
-      height: Number(payload.height || 0),
-      durationMs: payload.durationMs ?? null,
-      videoCodec: payload.videoCodec ?? null,
-      audioCodec: payload.audioCodec ?? null,
-      bitrate: payload.bitrate ?? null,
-      sha256: payload.sha256 || blobRow?.sha256_hex || '',
-      thumbnailMimeType: payload.thumbnailMimeType ?? null,
-      takenAt: payload.takenAt || row.created_at,
-      isPinned: Boolean(row.is_pinned),
-      isArchived: Boolean(row.is_archived),
-      isTrashed: Boolean(row.is_trashed),
-      revision: Number(row.revision),
-      syncSeq: Number(row.sync_seq),
-      byteSize: Number(blobRow?.plain_size ?? row.byte_size),
-      encryptedSize: Number(blobRow?.encrypted_size ?? row.byte_size),
-      chunkSize: Number(blobRow?.chunk_size ?? 65536),
-      chunkCount: Number(blobRow?.chunk_count ?? 1),
-      hasThumbnail: Boolean(blobRow?.thumb_blob_id),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      trashedAt: row.trashed_at,
-    };
-  }
-
-  listMedia(
-    dek: Buffer,
+  listEncryptedMedia(
     options: { kind?: MediaKind; includeTrashed?: boolean; onlyTrashed?: boolean } = {},
-  ): MediaItem[] {
+  ): EncryptedVaultRecordDto[] {
     const typeFilter = options.kind
       ? `v.item_type = '${options.kind === 'video' ? 'video' : 'image'}'`
       : `v.item_type IN ('image', 'video')`;
@@ -1120,10 +793,10 @@ export class VaultRepository {
       .all() as unknown as RawMediaBlobRow[];
     const blobMap = new Map(blobRows.map((b) => [b.item_id, b]));
 
-    return rows.map((r) => this.hydrateMediaRow(dek, r, blobMap.get(r.id)));
+    return rows.map((r) => this.serializeVaultRow(r, blobMap.get(r.id)));
   }
 
-  getMediaById(dek: Buffer, id: string): MediaItem | null {
+  getEncryptedMediaById(id: string): EncryptedVaultRecordDto | null {
     const row = this.db
       .prepare(
         `SELECT id, item_type, is_pinned, is_archived, is_trashed,
@@ -1139,7 +812,7 @@ export class VaultRepository {
       .prepare(`SELECT * FROM media_blobs WHERE item_id = ?`)
       .get(id) as unknown as RawMediaBlobRow | undefined;
 
-    return this.hydrateMediaRow(dek, row, blobRow);
+    return this.serializeVaultRow(row, blobRow);
   }
 
   getMediaBlobs(id: string): StoredMediaBlobs | null {
@@ -1147,84 +820,39 @@ export class VaultRepository {
       .prepare(`SELECT * FROM media_blobs WHERE item_id = ?`)
       .get(id) as unknown as RawMediaBlobRow | undefined;
     if (!row) return null;
-
-    const main: StoredEncryptedBlobMeta = {
-      blobId: row.blob_id,
-      fekSalt: Buffer.from(row.fek_salt),
-      fekNonce: Buffer.from(row.fek_nonce),
-      fekTag: Buffer.from(row.fek_tag),
-      wrappedFek: Buffer.from(row.wrapped_fek),
-      baseNonce: Buffer.from(row.base_nonce),
-      chunkSize: Number(row.chunk_size),
-      chunkCount: Number(row.chunk_count),
-      plainSize: Number(row.plain_size),
-      encryptedSize: Number(row.encrypted_size),
-      sha256: row.sha256_hex,
-    };
-
-    let thumbnail: StoredEncryptedBlobMeta | null = null;
-    if (
-      row.thumb_blob_id &&
-      row.thumb_fek_salt &&
-      row.thumb_fek_nonce &&
-      row.thumb_fek_tag &&
-      row.thumb_wrapped_fek &&
-      row.thumb_base_nonce
-    ) {
-      thumbnail = {
-        blobId: row.thumb_blob_id,
-        fekSalt: Buffer.from(row.thumb_fek_salt),
-        fekNonce: Buffer.from(row.thumb_fek_nonce),
-        fekTag: Buffer.from(row.thumb_fek_tag),
-        wrappedFek: Buffer.from(row.thumb_wrapped_fek),
-        baseNonce: Buffer.from(row.thumb_base_nonce),
-        chunkSize: Number(row.thumb_chunk_size || 65536),
-        chunkCount: Number(row.thumb_chunk_count || 1),
-        plainSize: Number(row.thumb_plain_size || 0),
-        encryptedSize: Number(row.thumb_encrypted_size || 0),
-        sha256: '',
-      };
-    }
-
-    return { main, thumbnail };
+    return parseRawMediaBlobRow(row);
   }
 
-  createMediaRecord(
-    dek: Buffer,
-    params: {
-      id?: string;
-      kind: MediaKind;
-      payload: MediaDecryptedPayload;
-      mainBlob: StoredEncryptedBlobMeta;
-      thumbBlob: StoredEncryptedBlobMeta | null;
-      isPinned?: boolean;
-    },
-  ): MediaItem {
-    const id =
-      params.id && /^[0-9a-f-]{36}$/i.test(params.id) ? params.id : crypto.randomUUID();
-    const revision = 1;
-    const now = new Date().toISOString();
+  createEncryptedMediaRecord(params: {
+    id: string;
+    kind: MediaKind;
+    isPinned?: boolean;
+    revision?: number;
+    envelope: CipherEnvelopeDto;
+    mainBlob: ValidatedBlobKeyMeta;
+    thumbBlob: ValidatedBlobKeyMeta | null;
+  }): EncryptedVaultRecordDto {
+    const id = assertValidUuid(params.id, 'media.id');
+    const revision = Number(params.revision ?? 1);
+    if (revision !== 1) {
+      throw new CryptoValidationError('新建媒体条目的初始 revision 必须为 1');
+    }
 
-    const cleanPayload: MediaDecryptedPayload = {
-      ...params.payload,
-      title:
-        params.payload.title.trim().slice(0, 160) ||
-        params.payload.originalFilename.replace(/\.[^.]+$/, '') ||
-        '未命名影像',
-      tags: normalizeTags(params.payload.tags ?? []),
-      description: (params.payload.description ?? '').slice(0, 4000),
-      takenAt: params.payload.takenAt || now,
-    };
-
-    const encrypted = encryptVaultPayload(dek, id, params.kind, revision, cleanPayload);
+    const encrypted = parseAndValidateCipherEnvelope(params.envelope);
     const totalEncryptedBytes =
       encrypted.byteSize +
       params.mainBlob.encryptedSize +
       (params.thumbBlob ? params.thumbBlob.encryptedSize : 0);
 
+    const now = new Date().toISOString();
     let syncSeq = 0;
+
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const existing = this.db.prepare(`SELECT id FROM vault_items WHERE id = ?`).get(id);
+      if (existing) {
+        throw new ConflictError('媒体条目 ID 已存在');
+      }
       syncSeq = this.nextSyncSeq();
       this.db
         .prepare(
@@ -1291,11 +919,11 @@ export class VaultRepository {
     }
 
     this.emitSync(syncSeq, params.kind);
-    return this.getMediaById(dek, id)!;
+    return this.getEncryptedMediaById(id)!;
   }
 
-  updateMedia(dek: Buffer, id: string, input: UpdateMediaRequest): MediaItem {
-    const current = this.getMediaById(dek, id);
+  updateEncryptedMedia(id: string, input: UpdateEncryptedItemRequest): EncryptedVaultRecordDto {
+    const current = this.getEncryptedMediaById(id);
     if (!current) {
       throw new NotFoundError('未找到该媒体条目');
     }
@@ -1309,45 +937,27 @@ export class VaultRepository {
       );
     }
 
-    const blobs = this.getMediaBlobs(id);
-    const payload: MediaDecryptedPayload = {
-      title:
-        input.title !== undefined
-          ? input.title.trim().slice(0, 160) || current.title
-          : current.title,
-      originalFilename: current.originalFilename,
-      mimeType: current.mimeType,
-      albumId: input.albumId !== undefined ? input.albumId : current.albumId,
-      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
-      description:
-        input.description !== undefined
-          ? input.description.slice(0, 4000)
-          : current.description,
-      width: current.width,
-      height: current.height,
-      durationMs: current.durationMs,
-      videoCodec: current.videoCodec,
-      audioCodec: current.audioCodec,
-      bitrate: current.bitrate,
-      sha256: current.sha256,
-      thumbnailMimeType: current.thumbnailMimeType,
-      takenAt: current.takenAt,
-    };
-
-    const nextPinned = input.isPinned !== undefined ? input.isPinned : current.isPinned;
-    const nextArchived = input.isArchived !== undefined ? input.isArchived : current.isArchived;
-    const nextTrashed = input.isTrashed !== undefined ? input.isTrashed : current.isTrashed;
     const nextRevision = current.revision + 1;
-    const now = new Date().toISOString();
-    const trashedAt = nextTrashed ? current.trashedAt || now : null;
+    if (Number(input.revision) !== nextRevision) {
+      throw new ConflictError(
+        `客户端媒体 AAD 绑定版本号不匹配（期望 revision=${nextRevision}，提交 ${String(input.revision)}）`,
+      );
+    }
 
-    const encrypted = encryptVaultPayload(dek, id, current.itemType, nextRevision, payload);
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
+    const blobs = this.getMediaBlobs(id);
     const totalEncryptedBytes =
       encrypted.byteSize +
       (blobs?.main.encryptedSize ?? 0) +
       (blobs?.thumbnail?.encryptedSize ?? 0);
 
+    const nextPinned = input.isPinned !== undefined ? input.isPinned : current.isPinned;
+    const nextArchived = input.isArchived !== undefined ? input.isArchived : current.isArchived;
+    const nextTrashed = input.isTrashed !== undefined ? input.isTrashed : current.isTrashed;
+    const now = new Date().toISOString();
+    const trashedAt = nextTrashed ? current.trashedAt || now : null;
     let syncSeq = 0;
+
     this.db.exec('BEGIN IMMEDIATE');
     try {
       syncSeq = this.nextSyncSeq();
@@ -1392,7 +1002,7 @@ export class VaultRepository {
     }
 
     this.emitSync(syncSeq, current.itemType);
-    return this.getMediaById(dek, id)!;
+    return this.getEncryptedMediaById(id)!;
   }
 
   permanentlyDeleteMedia(id: string, chunkStore: EncryptedChunkStore): void {
@@ -1449,9 +1059,9 @@ export class VaultRepository {
     return rows.length;
   }
 
-  // ==================== Encrypted Albums ====================
+  // ==================== Opaque Encrypted Albums ====================
 
-  listAlbums(dek: Buffer): MediaAlbum[] {
+  listEncryptedAlbums(): EncryptedAlbumRecordDto[] {
     const rows = this.db
       .prepare(
         `SELECT id, revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
@@ -1471,67 +1081,49 @@ export class VaultRepository {
       updated_at: string;
     }>;
 
-    const allMedia = this.listMedia(dek, { includeTrashed: false });
-    const countMap = new Map<string, number>();
-    for (const m of allMedia) {
-      if (m.albumId) {
-        countMap.set(m.albumId, (countMap.get(m.albumId) || 0) + 1);
-      }
-    }
-
-    return rows.map((row) => {
-      const payload = decryptVaultPayload<MediaAlbumDecryptedPayload>(
-        dek,
-        row.id,
-        'album',
-        Number(row.revision),
-        {
-          cipherVersion: Number(row.cipher_version),
-          itemSalt: Buffer.from(row.item_salt),
-          nonce: Buffer.from(row.nonce),
-          authTag: Buffer.from(row.auth_tag),
-          ciphertext: Buffer.from(row.ciphertext),
-        },
-      );
-      return {
-        id: row.id,
-        name: payload.name,
-        description: payload.description || '',
-        kind: payload.kind || 'mixed',
-        coverMediaId: payload.coverMediaId ?? null,
-        itemCount: countMap.get(row.id) || 0,
-        syncSeq: Number(row.sync_seq),
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      };
-    });
+    return rows.map((row) => ({
+      id: row.id,
+      revision: Number(row.revision),
+      syncSeq: Number(row.sync_seq),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      envelope: serializeCipherEnvelope({
+        cipherVersion: row.cipher_version,
+        itemSalt: row.item_salt,
+        nonce: row.nonce,
+        authTag: row.auth_tag,
+        ciphertext: row.ciphertext,
+      }),
+    }));
   }
 
-  createAlbum(dek: Buffer, input: CreateAlbumRequest): MediaAlbum {
-    const id = crypto.randomUUID();
+  createEncryptedAlbum(input: CreateEncryptedAlbumRequest): EncryptedAlbumRecordDto {
+    const id = assertValidUuid(input.id, 'album.id');
+    const revision = Number(input.revision ?? 1);
+    if (revision !== 1) {
+      throw new CryptoValidationError('新建相册 revision 必须为 1');
+    }
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
     const now = new Date().toISOString();
-    const payload: MediaAlbumDecryptedPayload = {
-      name: (input.name ?? '').trim().slice(0, 80) || '新建相册',
-      description: (input.description ?? '').trim().slice(0, 300),
-      kind: input.kind === 'image' || input.kind === 'video' ? input.kind : 'mixed',
-      coverMediaId: input.coverMediaId ?? null,
-    };
-
-    const encrypted = encryptVaultPayload(dek, id, 'album', 1, payload);
     let syncSeq = 0;
 
     this.db.exec('BEGIN IMMEDIATE');
     try {
+      const existing = this.db.prepare(`SELECT id FROM media_albums WHERE id = ?`).get(id);
+      if (existing) {
+        throw new ConflictError('相册 ID 已存在');
+      }
       syncSeq = this.nextSyncSeq();
       this.db
         .prepare(
           `INSERT INTO media_albums (
             id, revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
             ciphertext, created_at, updated_at
-          ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
+          revision,
           syncSeq,
           encrypted.cipherVersion,
           encrypted.itemSalt,
@@ -1550,11 +1142,11 @@ export class VaultRepository {
     this.emitSync(syncSeq, 'album');
     return {
       id,
-      ...payload,
-      itemCount: 0,
+      revision,
       syncSeq,
       createdAt: now,
       updatedAt: now,
+      envelope: serializeCipherEnvelope(encrypted),
     };
   }
 
@@ -1583,55 +1175,54 @@ export class VaultRepository {
     this.emitSync(syncSeq, 'album');
   }
 
-  // ==================== Resumable Upload Sessions ====================
+  // ==================== Blind Resumable Upload Sessions ====================
 
-  createUploadSession(
-    dek: Buffer,
-    input: ResumableUploadInitRequest,
-  ): DecryptedUploadSession {
-    const id = crypto.randomUUID();
-    const kind: MediaKind =
-      input.kind === 'video' || input.mimeType?.startsWith('video/') ? 'video' : 'image';
-    const totalBytes = Math.max(1, Math.floor(input.totalBytes));
-    const chunkBytes = Math.min(
+  createEncryptedUploadSession(
+    input: EncryptedResumableUploadInitRequest,
+  ): StoredEncryptedUploadSession {
+    const id = input.uploadId ? assertValidUuid(input.uploadId, 'uploadId') : crypto.randomUUID();
+    const kind: MediaKind = input.kind === 'video' ? 'video' : 'image';
+    const totalPlainBytes = Math.max(0, Math.floor(Number(input.totalPlainBytes)));
+    const totalEncryptedBytes = Math.max(36, Math.floor(Number(input.totalEncryptedBytes)));
+    const partPlainBytes = Math.min(
       16 * 1024 * 1024,
-      Math.max(64 * 1024, Math.floor(input.chunkBytes ?? 2 * 1024 * 1024)),
+      Math.max(DEFAULT_MEDIA_CHUNK_SIZE, Math.floor(Number(input.partPlainBytes || 2 * 1024 * 1024))),
     );
-    const totalChunks = Math.max(1, Math.ceil(totalBytes / chunkBytes));
+    if (partPlainBytes % DEFAULT_MEDIA_CHUNK_SIZE !== 0) {
+      throw new CryptoValidationError('分片明文跨度 partPlainBytes 必须为 64KiB 的整数倍');
+    }
+    const totalParts = Math.max(1, Math.floor(Number(input.totalParts)));
+    const metaEncrypted = parseAndValidateCipherEnvelope(input.metaEnvelope);
+
     const now = new Date();
     const createdAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + 12 * 3600 * 1000).toISOString();
 
-    const meta = {
-      filename: (input.filename ?? 'upload.bin').slice(0, 240),
-      mimeType: input.mimeType || (kind === 'video' ? 'video/mp4' : 'image/jpeg'),
-      title: (input.title ?? '').trim().slice(0, 160),
-      albumId: input.albumId ?? null,
-      tags: normalizeTags(input.tags ?? []),
-      description: (input.description ?? '').slice(0, 2000),
-      sha256: input.sha256,
-      takenAt: input.takenAt,
-    };
-
-    const encrypted = encryptVaultPayload(dek, id, 'upload', 1, meta);
+    const existing = this.db.prepare(`SELECT id FROM upload_sessions WHERE id = ?`).get(id);
+    if (existing) {
+      throw new ConflictError('上传会话 uploadId 已存在');
+    }
 
     this.db
       .prepare(
         `INSERT INTO upload_sessions (
-          id, kind, chunk_bytes, total_bytes, total_chunks, received_chunks_json,
-          meta_salt, meta_nonce, meta_tag, meta_ciphertext, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)`,
+          id, kind, part_plain_bytes, total_plain_bytes, total_encrypted_bytes, total_parts,
+          received_chunks_json, meta_cipher_version, meta_salt, meta_nonce, meta_tag, meta_ciphertext,
+          created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         kind,
-        chunkBytes,
-        totalBytes,
-        totalChunks,
-        encrypted.itemSalt,
-        encrypted.nonce,
-        encrypted.authTag,
-        encrypted.ciphertext,
+        partPlainBytes,
+        totalPlainBytes,
+        totalEncryptedBytes,
+        totalParts,
+        metaEncrypted.cipherVersion,
+        metaEncrypted.itemSalt,
+        metaEncrypted.nonce,
+        metaEncrypted.authTag,
+        metaEncrypted.ciphertext,
         createdAt,
         expiresAt,
       );
@@ -1639,17 +1230,18 @@ export class VaultRepository {
     return {
       id,
       kind,
-      chunkBytes,
-      totalBytes,
-      totalChunks,
+      partPlainBytes,
+      totalPlainBytes,
+      totalEncryptedBytes,
+      totalParts,
       receivedChunks: [],
-      meta,
+      metaEnvelope: serializeCipherEnvelope(metaEncrypted),
       createdAt,
       expiresAt,
     };
   }
 
-  getUploadSession(dek: Buffer, uploadId: string): DecryptedUploadSession | null {
+  getEncryptedUploadSession(uploadId: string): StoredEncryptedUploadSession | null {
     const row = this.db
       .prepare(`SELECT * FROM upload_sessions WHERE id = ?`)
       .get(uploadId) as Record<string, unknown> | undefined;
@@ -1660,29 +1252,22 @@ export class VaultRepository {
       return null;
     }
 
-    const meta = decryptVaultPayload<DecryptedUploadSession['meta']>(
-      dek,
-      uploadId,
-      'upload',
-      1,
-      {
-        cipherVersion: 1,
-        itemSalt: Buffer.from(row.meta_salt as Uint8Array),
-        nonce: Buffer.from(row.meta_nonce as Uint8Array),
-        authTag: Buffer.from(row.meta_tag as Uint8Array),
-        ciphertext: Buffer.from(row.meta_ciphertext as Uint8Array),
-      },
-    );
-
     const receivedChunks = JSON.parse(String(row.received_chunks_json || '[]')) as number[];
     return {
       id: String(row.id),
       kind: row.kind === 'video' ? 'video' : 'image',
-      chunkBytes: Number(row.chunk_bytes),
-      totalBytes: Number(row.total_bytes),
-      totalChunks: Number(row.total_chunks),
+      partPlainBytes: Number(row.part_plain_bytes),
+      totalPlainBytes: Number(row.total_plain_bytes),
+      totalEncryptedBytes: Number(row.total_encrypted_bytes),
+      totalParts: Number(row.total_parts),
       receivedChunks,
-      meta,
+      metaEnvelope: serializeCipherEnvelope({
+        cipherVersion: Number(row.meta_cipher_version),
+        itemSalt: row.meta_salt as Uint8Array,
+        nonce: row.meta_nonce as Uint8Array,
+        authTag: row.meta_tag as Uint8Array,
+        ciphertext: row.meta_ciphertext as Uint8Array,
+      }),
       createdAt: String(row.created_at),
       expiresAt: String(row.expires_at),
     };
@@ -1709,7 +1294,7 @@ export class VaultRepository {
     this.db.prepare(`DELETE FROM upload_sessions WHERE id = ?`).run(uploadId);
   }
 
-  // ==================== 4. Cipher Inspection & Security Summary ====================
+  // ==================== Cipher Inspection & Security Summary ====================
 
   inspectNoteCipherEnvelope(id: string): CipherEnvelopeInspection | null {
     return this.inspectItemCipherEnvelope(id, 'note');
@@ -1796,19 +1381,20 @@ export class VaultRepository {
       row.item_type === 'image' || row.item_type === 'video'
         ? this.getMediaBlobs(row.id)
         : null;
+    const cipherVer = Number(row.cipher_version);
 
     return {
       itemId: row.id,
       itemType: row.item_type,
       revision: Number(row.revision),
       syncSeq: Number(row.sync_seq),
-      cipherVersion: Number(row.cipher_version),
+      cipherVersion: cipherVer,
       algorithm: blobMeta
-        ? 'AES-256-GCM + PSENC001 64KiB Chunked Stream'
-        : 'AES-256-GCM (96-bit Nonce, 128-bit Auth Tag)',
-      kdfSpec: `${ENCRYPTION_SPEC.passwordKdf} → DEK → ${ENCRYPTION_SPEC.itemKdf}`,
-      hkdfContext: buildItemHkdfInfo(row.id, row.item_type),
-      aadJson: buildItemAad(row.id, row.item_type, Number(row.revision), Number(row.cipher_version)),
+        ? 'Client-Side AES-256-GCM + PSENC001 64KiB Chunked Stream'
+        : 'Client-Side AES-256-GCM (96-bit Nonce, 128-bit Auth Tag)',
+      kdfSpec: `${ENCRYPTION_SPEC.passwordKdf} (Client) → DEK → ${ENCRYPTION_SPEC.itemKdf}`,
+      hkdfContext: buildItemHkdfInfo(row.id, row.item_type, cipherVer),
+      aadJson: buildItemAad(row.id, row.item_type, Number(row.revision), cipherVer),
       saltHex: Buffer.from(row.item_salt).toString('hex'),
       nonceHex: Buffer.from(row.nonce).toString('hex'),
       authTagHex: Buffer.from(row.auth_tag).toString('hex'),
@@ -1900,9 +1486,9 @@ export class VaultRepository {
     };
   }
 
-  // ==================== 5. Multi-Device Incremental Sync ====================
+  // ==================== Multi-Device Blind Ciphertext Delta Sync ====================
 
-  pullSyncChanges(dek: Buffer, sinceSeq: number): SyncPullResponse {
+  pullEncryptedSyncChanges(sinceSeq: number): EncryptedSyncPullResponse {
     const admin = this.getAdminConfig();
     const latestSyncSeq = admin?.syncSeq ?? 0;
 
@@ -1922,28 +1508,14 @@ export class VaultRepository {
       .all() as unknown as RawMediaBlobRow[];
     const blobMap = new Map(blobRows.map((b) => [b.item_id, b]));
 
-    const items: VaultSyncItem[] = [];
-    const notes: NoteItem[] = [];
-    const passwords: PasswordItem[] = [];
-    const media: MediaItem[] = [];
+    const items = changedRows.map((row) =>
+      this.serializeVaultRow(
+        row,
+        row.item_type === 'image' || row.item_type === 'video' ? blobMap.get(row.id) : undefined,
+      ),
+    );
 
-    for (const row of changedRows) {
-      if (row.item_type === 'note') {
-        const note = this.hydrateNoteRow(dek, row);
-        notes.push(note);
-        items.push(note);
-      } else if (row.item_type === 'password') {
-        const pwd = this.hydratePasswordRow(dek, row);
-        passwords.push(pwd);
-        items.push(pwd);
-      } else if (row.item_type === 'image' || row.item_type === 'video') {
-        const m = this.hydrateMediaRow(dek, row, blobMap.get(row.id));
-        media.push(m);
-        items.push(m);
-      }
-    }
-
-    const allAlbums = this.listAlbums(dek).filter((a) => a.syncSeq > sinceSeq);
+    const albums = this.listEncryptedAlbums().filter((a) => a.syncSeq > sinceSeq);
 
     const tombstoneRows = this.db
       .prepare(
@@ -1964,10 +1536,7 @@ export class VaultRepository {
       latestSyncSeq,
       sinceSeq,
       items,
-      notes,
-      passwords,
-      media,
-      albums: allAlbums,
+      albums,
       deleted: tombstoneRows.map((t) => ({
         id: t.id,
         itemType: t.item_type,
@@ -1976,39 +1545,4 @@ export class VaultRepository {
       })),
     };
   }
-}
-
-function normalizeTags(tags: string[]): string[] {
-  const seen = new Set<string>();
-  const clean: string[] = [];
-  for (const raw of tags) {
-    const tag = String(raw)
-      .trim()
-      .replace(/^#+/, '')
-      .slice(0, 24);
-    if (!tag) continue;
-    const key = tag.toLowerCase();
-    if (!seen.has(key)) {
-      seen.add(key);
-      clean.push(tag);
-    }
-    if (clean.length >= 12) break;
-  }
-  return clean;
-}
-
-function sanitizeCustomFields(fields: PasswordCustomField[]): PasswordCustomField[] {
-  const clean: PasswordCustomField[] = [];
-  for (const f of fields.slice(0, 20)) {
-    const label = String(f.label ?? '').trim().slice(0, 64);
-    const value = String(f.value ?? '').slice(0, 1000);
-    if (!label && !value) continue;
-    clean.push({
-      id: f.id && String(f.id).slice(0, 48) ? String(f.id).slice(0, 48) : crypto.randomUUID(),
-      label: label || '自定义字段',
-      value,
-      hidden: Boolean(f.hidden),
-    });
-  }
-  return clean;
 }

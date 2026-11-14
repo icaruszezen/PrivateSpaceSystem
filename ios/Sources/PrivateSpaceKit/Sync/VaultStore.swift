@@ -56,6 +56,7 @@ public struct UploadTaskStatus: Identifiable, Equatable, Sendable {
 public final class VaultStore {
     private static let keychainServerURLKey = "server_base_url"
     private static let keychainSessionTokenKey = "device_session_token"
+    private static let keychainMasterDekKey = "vault_master_dek_raw"
     private static let keychainBiometricEnabledKey = "biometric_unlock_enabled"
     private static let keychainAutoLockTimeoutKey = "auto_lock_timeout_seconds"
     private static let keychainThemeKey = "app_theme_preference"
@@ -104,6 +105,7 @@ public final class VaultStore {
     ) {
         let savedServer = (try? secretStore.readString(forKey: Self.keychainServerURLKey)) ?? defaultServerURL
         let savedToken = try? secretStore.readString(forKey: Self.keychainSessionTokenKey)
+        let savedDek = try? secretStore.readData(forKey: Self.keychainMasterDekKey)
 
         self.serverURL = savedServer
         self.secretStore = secretStore
@@ -113,6 +115,7 @@ public final class VaultStore {
         self.apiClient = PrivateSpaceAPIClient(
             baseURLString: savedServer,
             sessionToken: savedToken,
+            masterDek: savedDek,
             deviceName: deviceName,
             urlSession: urlSession
         )
@@ -136,8 +139,11 @@ public final class VaultStore {
     public func bootstrap() async {
         biometricCapability = biometricService.detectCapability()
         let savedToken = try? secretStore.readString(forKey: Self.keychainSessionTokenKey)
+        let savedDek = try? secretStore.readData(forKey: Self.keychainMasterDekKey)
+        let hasValidKeychainDek = (savedDek?.count == 32)
         await apiClient.updateServerURL(serverURL)
         await apiClient.setSessionToken(savedToken)
+        await apiClient.setMasterDek(nil) // Keep RAM DEK cleared until authenticated unlock
 
         // Preload encrypted local snapshot metadata if available
         if let cached = try? localStore.loadSnapshot() {
@@ -156,7 +162,7 @@ public final class VaultStore {
                 return
             }
 
-            if status.authenticated, savedToken != nil {
+            if status.authenticated, savedToken != nil, hasValidKeychainDek {
                 if biometricUnlockEnabled && biometricCapability != .none {
                     self.phase = .biometricLocked(vaultName: status.vaultName, fingerprint: status.keyFingerprint)
                 } else {
@@ -164,16 +170,19 @@ public final class VaultStore {
                 }
             } else {
                 try? secretStore.deleteData(forKey: Self.keychainSessionTokenKey)
+                try? secretStore.deleteData(forKey: Self.keychainMasterDekKey)
                 await apiClient.setSessionToken(nil)
+                await apiClient.setMasterDek(nil)
                 self.phase = .passwordLocked(vaultName: status.vaultName, fingerprint: status.keyFingerprint)
             }
         } catch {
-            // Offline cold boot: if a valid session token & local encrypted cache exist, allow biometric offline access!
-            if savedToken != nil, (try? localStore.loadSnapshot()) != nil {
+            // Offline cold boot: if a valid session token, Keychain DEK & local encrypted cache exist, allow biometric offline access!
+            if savedToken != nil, hasValidKeychainDek, (try? localStore.loadSnapshot()) != nil {
                 self.isOfflineMode = true
                 if biometricUnlockEnabled && biometricCapability != .none {
                     self.phase = .biometricLocked(vaultName: vaultName, fingerprint: keyFingerprint)
                 } else if let cached = try? localStore.loadSnapshot() {
+                    await apiClient.setMasterDek(savedDek)
                     self.snapshot = cached
                     self.phase = .unlocked
                     showToast("处于离线加密缓存模式（游标 #\(cached.lastSyncSeq)）")
@@ -206,7 +215,7 @@ public final class VaultStore {
                 password: masterPassword,
                 vaultName: vaultNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
             )
-            try persistSessionAndEnterVault(auth)
+            try await persistSessionAndEnterVault(auth)
             await syncDelta()
             startRealtimeSyncStream()
         } catch {
@@ -223,7 +232,7 @@ public final class VaultStore {
             await apiClient.updateServerURL(normalized)
 
             let auth = try await apiClient.login(password: masterPassword)
-            try persistSessionAndEnterVault(auth)
+            try await persistSessionAndEnterVault(auth)
             await syncDelta()
             startRealtimeSyncStream()
         } catch {
@@ -244,8 +253,11 @@ public final class VaultStore {
         }
     }
 
-    private func persistSessionAndEnterVault(_ auth: AuthSessionResponse) throws {
+    private func persistSessionAndEnterVault(_ auth: AuthSessionResponse) async throws {
         try secretStore.writeString(auth.token, forKey: Self.keychainSessionTokenKey)
+        if let dek = await apiClient.getMasterDek(), dek.count == 32 {
+            try secretStore.writeData(dek, forKey: Self.keychainMasterDekKey)
+        }
         self.vaultName = auth.vaultName
         self.keyFingerprint = auth.keyFingerprint
         if let cached = try? localStore.loadSnapshot() {
@@ -263,6 +275,14 @@ public final class VaultStore {
     }
 
     private func unlockFromCachedAndSync() async throws {
+        guard let savedToken = try secretStore.readString(forKey: Self.keychainSessionTokenKey),
+              let savedDek = try secretStore.readData(forKey: Self.keychainMasterDekKey),
+              savedDek.count == 32 else {
+            self.phase = .passwordLocked(vaultName: vaultName, fingerprint: keyFingerprint)
+            return
+        }
+        await apiClient.setSessionToken(savedToken)
+        await apiClient.setMasterDek(savedDek)
         if let cached = try localStore.loadSnapshot() {
             self.snapshot = cached
         }
@@ -295,33 +315,36 @@ public final class VaultStore {
         }
     }
 
-    /// Locks the UI in-memory (wiping RAM caches) while preserving Keychain session for Face ID re-unlock.
+    /// Locks the UI in-memory (wiping RAM DEK & media caches) while preserving Keychain credentials for Face ID re-unlock.
     public func lockSessionLocally() {
         stopRealtimeSyncStream()
         VolatileMediaMemoryCache.shared.clearAll()
+        Task { await apiClient.setMasterDek(nil) }
         snapshot = MobileVaultSnapshot(vaultName: vaultName, keyFingerprint: keyFingerprint)
         securitySummary = nil
         activeSessions = []
         if biometricUnlockEnabled && biometricCapability != .none,
-           (try? secretStore.readString(forKey: Self.keychainSessionTokenKey)) != nil {
+           (try? secretStore.readString(forKey: Self.keychainSessionTokenKey)) != nil,
+           (try? secretStore.readData(forKey: Self.keychainMasterDekKey))?.count == 32 {
             phase = .biometricLocked(vaultName: vaultName, fingerprint: keyFingerprint)
         } else {
             phase = .passwordLocked(vaultName: vaultName, fingerprint: keyFingerprint)
         }
     }
 
-    /// Revokes the device session on server, shreds local `.pscache` encrypted files, and clears Keychain token.
+    /// Revokes the device session on server, shreds local `.pscache` encrypted files, and clears Keychain token & DEK.
     public func logoutAndWipeDevice() async {
         stopRealtimeSyncStream()
         await apiClient.logout()
         try? secretStore.deleteData(forKey: Self.keychainSessionTokenKey)
+        try? secretStore.deleteData(forKey: Self.keychainMasterDekKey)
         localStore.shredLocalCache()
         VolatileMediaMemoryCache.shared.clearAll()
         snapshot = MobileVaultSnapshot()
         securitySummary = nil
         activeSessions = []
         phase = .passwordLocked(vaultName: vaultName, fingerprint: keyFingerprint)
-        showToast("已注销当前设备并安全擦除本地加密缓存")
+        showToast("已注销当前设备并安全擦除本地加密缓存与密钥")
     }
 
     public func setBiometricPreference(_ enabled: Bool) {
@@ -375,6 +398,8 @@ public final class VaultStore {
         } catch PrivateSpaceClientError.unauthorized(let msg) {
             errorBanner = msg
             try? secretStore.deleteData(forKey: Self.keychainSessionTokenKey)
+            try? secretStore.deleteData(forKey: Self.keychainMasterDekKey)
+            await apiClient.setMasterDek(nil)
             phase = .passwordLocked(vaultName: vaultName, fingerprint: keyFingerprint)
         } catch {
             self.isOfflineMode = true

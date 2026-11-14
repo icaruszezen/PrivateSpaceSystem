@@ -1,6 +1,10 @@
 import { Hono } from 'hono';
-import type { CreateNoteRequest, UpdateNoteRequest } from '../../shared/types.js';
+import type {
+  CreateEncryptedItemRequest,
+  UpdateEncryptedItemRequest,
+} from '../../shared/types.js';
 import type { EphemeralSessionCrypto } from '../crypto/sessionStore.js';
+import { CryptoValidationError } from '../crypto/vaultCrypto.js';
 import { ConflictError, NotFoundError, type VaultRepository } from '../db/repositories.js';
 import { type AuthEnv, createRequireAuthMiddleware } from '../middleware/authMiddleware.js';
 
@@ -13,30 +17,45 @@ export function createNotesRoutes(
 
   router.use('*', requireAuth);
 
-  // GET /api/v1/notes
+  // GET /api/v1/notes - Returns opaque client-encrypted note envelopes
   router.get('/', (c) => {
-    const dek = c.get('dek');
     const includeTrashed = c.req.query('includeTrashed') === 'true';
     const onlyTrashed = c.req.query('onlyTrashed') === 'true';
     const onlyArchived = c.req.query('onlyArchived') === 'true';
 
-    const notes = repo.listNotes(dek, { includeTrashed, onlyTrashed, onlyArchived });
+    const items = repo.listEncryptedItems('note', { includeTrashed, onlyTrashed, onlyArchived });
     const admin = repo.getAdminConfig();
     return c.json({
-      notes,
+      items,
       latestSyncSeq: admin?.syncSeq ?? 0,
     });
   });
 
-  // POST /api/v1/notes
+  // POST /api/v1/notes - Stores client-encrypted note envelope
   router.post('/', async (c) => {
-    const dek = c.get('dek');
-    const body = (await c.req.json().catch(() => ({}))) as CreateNoteRequest;
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!rawBody.envelope && ('content' in rawBody || 'title' in rawBody)) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止上传明文笔记，请在客户端加密后提交 envelope',
+          },
+        },
+        400,
+      );
+    }
 
     try {
-      const note = repo.createNote(dek, body);
-      return c.json({ note }, 201);
+      const item = repo.createEncryptedItem(
+        'note',
+        rawBody as unknown as CreateEncryptedItemRequest,
+      );
+      return c.json({ item }, 201);
     } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_CIPHER_ENVELOPE', message: err.message } }, 400);
+      }
       if (err instanceof ConflictError) {
         return c.json({ error: { code: 'CONFLICT', message: err.message } }, 409);
       }
@@ -44,20 +63,19 @@ export function createNotesRoutes(
     }
   });
 
-  // DELETE /api/v1/notes/trash - Empty all trashed notes permanently
+  // DELETE /api/v1/notes/trash
   router.delete('/trash', (c) => {
-    const purgedCount = repo.emptyTrash();
+    const purgedCount = repo.emptyTrashByType('note');
     return c.json({ ok: true, purgedCount });
   });
 
   // GET /api/v1/notes/:id
   router.get('/:id', (c) => {
-    const dek = c.get('dek');
-    const note = repo.getNoteById(dek, c.req.param('id'));
-    if (!note) {
+    const item = repo.getEncryptedItemById(c.req.param('id'), 'note');
+    if (!item) {
       return c.json({ error: { code: 'NOT_FOUND', message: '未找到该文本记录' } }, 404);
     }
-    return c.json({ note });
+    return c.json({ item });
   });
 
   // GET /api/v1/notes/:id/cipher - Inspect raw AES-256-GCM envelope stored in SQLite
@@ -71,13 +89,30 @@ export function createNotesRoutes(
 
   // PATCH /api/v1/notes/:id
   router.patch('/:id', async (c) => {
-    const dek = c.get('dek');
-    const body = (await c.req.json().catch(() => ({}))) as UpdateNoteRequest;
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!rawBody.envelope && ('content' in rawBody || 'title' in rawBody)) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止提交明文更新，请在客户端重加密后提交 envelope',
+          },
+        },
+        400,
+      );
+    }
 
     try {
-      const note = repo.updateNote(dek, c.req.param('id'), body);
-      return c.json({ note });
+      const item = repo.updateEncryptedItem(
+        'note',
+        c.req.param('id'),
+        rawBody as unknown as UpdateEncryptedItemRequest,
+      );
+      return c.json({ item });
     } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_CIPHER_ENVELOPE', message: err.message } }, 400);
+      }
       if (err instanceof NotFoundError) {
         return c.json({ error: { code: 'NOT_FOUND', message: err.message } }, 404);
       }
@@ -88,10 +123,10 @@ export function createNotesRoutes(
     }
   });
 
-  // DELETE /api/v1/notes/:id - Permanent cryptographic deletion
+  // DELETE /api/v1/notes/:id
   router.delete('/:id', (c) => {
     try {
-      repo.permanentlyDeleteNote(c.req.param('id'));
+      repo.permanentlyDeleteItem('note', c.req.param('id'));
       return c.json({ ok: true });
     } catch (err) {
       if (err instanceof NotFoundError) {

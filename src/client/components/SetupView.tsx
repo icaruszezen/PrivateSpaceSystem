@@ -87,13 +87,13 @@ export const SetupView: React.FC<SetupViewProps> = ({
           <div className="auth-header">
             <div className="auth-key-badge">
               <KeyRound size={12} />
-              <span>INITIALIZE VAULT · 唯一管理员</span>
+              <span>ZERO-KNOWLEDGE E2EE · 唯一管理员</span>
             </div>
             <h1 id="setup-heading" className="auth-title">
-              初始化私密空间
+              初始化零知识私密空间
             </h1>
             <p className="auth-subtitle">
-              设置唯一管理员主密码，系统将自动生成 256 位空间主密钥并加密保护所有存储内容。
+              设置管理员主密码，浏览器将在本地随机生成 256 位主密钥（DEK）并端到端加密全部数据，服务器永不接触明文密码或解密密钥。
             </p>
           </div>
 
@@ -151,7 +151,7 @@ export const SetupView: React.FC<SetupViewProps> = ({
                 </div>
                 <div className="strength-caption">
                   <span>{strength.label}</span>
-                  <span className="mono">scrypt KDF</span>
+                  <span className="mono">PBKDF2 310k · Client E2EE</span>
                 </div>
               </div>
             </div>
@@ -179,13 +179,13 @@ export const SetupView: React.FC<SetupViewProps> = ({
                 checked={seedWelcomeNote}
                 onChange={(e) => setSeedWelcomeNote(e.target.checked)}
               />
-              <span>创建一篇《欢迎使用 PrivateSpace 私密空间》加密示例记录</span>
+              <span>创建一篇《欢迎使用 PrivateSpace 私密空间》端到端加密示例记录</span>
             </label>
 
             <div className="auth-notice">
               <ShieldCheck size={16} />
               <span>
-                自部署私密架构不依赖任何第三方云端账号。主密码用于包裹底层加密主密钥，请务必妥善保管。
+                零知识端到端加密架构：主密码永不离开当前设备，即使服务器主机或磁盘完全失陷，攻击者也无法解密任何数据。请务必牢记主密码。
               </span>
             </div>
 
@@ -201,18 +201,18 @@ export const SetupView: React.FC<SetupViewProps> = ({
               className="btn btn-primary auth-submit"
               disabled={submitting}
             >
-              {submitting ? '正在生成加密密钥并初始化...' : '创建密钥并进入空间'}
+              {submitting ? '正在本地生成主密钥并初始化...' : '本地创建密钥并进入空间'}
             </button>
           </form>
         </section>
       </main>
 
       <footer className="auth-footer">
-        <span className="auth-spec-item">AES-256-GCM 认证加密</span>
+        <span className="auth-spec-item">零知识端到端加密 (E2EE v2)</span>
         <span>·</span>
-        <span className="auth-spec-item">HKDF-SHA256 逐条隔离密钥</span>
+        <span className="auth-spec-item">PBKDF2-SHA256 310k 客户端派生</span>
         <span>·</span>
-        <span className="auth-spec-item">多端增量同步就绪</span>
+        <span className="auth-spec-item">服务端零明文 / 零密钥</span>
       </footer>
     </div>
   );

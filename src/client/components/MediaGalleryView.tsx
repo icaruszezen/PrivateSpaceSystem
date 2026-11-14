@@ -48,6 +48,78 @@ interface MediaGalleryViewProps {
   onNotify: (msg: string) => void;
 }
 
+function useDecryptedMediaUrls(item: MediaItem | null): {
+  fullUrl: string | null;
+  thumbUrl: string | null;
+} {
+  const [fullUrl, setFullUrl] = useState<string | null>(null);
+  const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!item) {
+      setFullUrl(null);
+      setThumbUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setFullUrl(null);
+    setThumbUrl(null);
+
+    void api
+      .loadMediaObjectUrl(item)
+      .then((url) => {
+        if (!cancelled) setFullUrl(url);
+      })
+      .catch(() => undefined);
+
+    if (item.hasThumbnail || item.itemType === 'image') {
+      void api
+        .loadThumbnailObjectUrl(item)
+        .then((url) => {
+          if (!cancelled) setThumbUrl(url);
+        })
+        .catch(() => undefined);
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [item]);
+
+  return { fullUrl, thumbUrl };
+}
+
+const EncryptedThumbImage: React.FC<{
+  item: MediaItem;
+  className: string;
+}> = ({ item, className }) => {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUrl(null);
+    void api
+      .loadThumbnailObjectUrl(item)
+      .then((loaded) => {
+        if (!cancelled) setUrl(loaded);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [item]);
+
+  if (!url) {
+    return (
+      <div className="pss-video-poster-fallback" aria-label={item.title}>
+        {item.itemType === 'video' ? <Film size={26} /> : <ImageIcon size={24} />}
+      </div>
+    );
+  }
+
+  return <img src={url} alt={item.title} loading="lazy" className={className} />;
+};
+
 export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
   kind,
   mediaItems,
@@ -424,12 +496,7 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                   }}
                 >
                   <div className="pss-photo-thumb-wrap">
-                    <img
-                      src={api.getMediaThumbnailUrl(item.id, item.revision)}
-                      alt={item.title}
-                      loading="lazy"
-                      className="pss-photo-thumb"
-                    />
+                    <EncryptedThumbImage item={item} className="pss-photo-thumb" />
                     {batchMode && (
                       <span className={`pss-check-dot ${checked ? 'is-on' : ''}`} />
                     )}
@@ -494,12 +561,7 @@ export const MediaGalleryView: React.FC<MediaGalleryViewProps> = ({
                 >
                   <div className="pss-video-poster-wrap">
                     {item.hasThumbnail ? (
-                      <img
-                        src={api.getMediaThumbnailUrl(item.id, item.revision)}
-                        alt={item.title}
-                        loading="lazy"
-                        className="pss-video-poster"
-                      />
+                      <EncryptedThumbImage item={item} className="pss-video-poster" />
                     ) : (
                       <div className="pss-video-poster-fallback">
                         <Film size={32} />
@@ -672,6 +734,7 @@ const MediaCinemaModal: React.FC<MediaCinemaModalProps> = ({
   const [rotate, setRotate] = useState(0);
   const [flipX, setFlipX] = useState(false);
   const [slideshow, setSlideshow] = useState(false);
+  const { fullUrl, thumbUrl } = useDecryptedMediaUrls(item);
 
   // Video controls
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -855,14 +918,19 @@ const MediaCinemaModal: React.FC<MediaCinemaModalProps> = ({
               </>
             )}
 
-            <a
-              href={api.getMediaDownloadUrl(item.id)}
+            <button
+              type="button"
               className="pss-dk-btn is-accent is-labeled"
-              download={item.originalFilename}
+              onClick={() => {
+                void api
+                  .downloadDecryptedMedia(item)
+                  .then(() => onNotify('已在浏览器本地完成解密导出'))
+                  .catch(() => onNotify('解密导出失败'));
+              }}
             >
               <Download size={14} />
-              <span>解密下载</span>
-            </a>
+              <span>本地解密下载</span>
+            </button>
 
             <button type="button" className="pss-dk-btn" onClick={onClose} aria-label="关闭检视器">
               <X size={16} />
@@ -883,28 +951,36 @@ const MediaCinemaModal: React.FC<MediaCinemaModalProps> = ({
           )}
 
           {item.itemType === 'image' ? (
-            <img
-              src={api.getMediaStreamUrl(item.id, item.revision)}
-              alt={item.title}
-              className="pss-darkroom-img"
-              style={{
-                transform: `scale(${zoom}) rotate(${rotate}deg) scaleX(${flipX ? -1 : 1})`,
-              }}
-            />
-          ) : (
+            fullUrl || thumbUrl ? (
+              <img
+                src={fullUrl || thumbUrl || ''}
+                alt={item.title}
+                className="pss-darkroom-img"
+                style={{
+                  transform: `scale(${zoom}) rotate(${rotate}deg) scaleX(${flipX ? -1 : 1})`,
+                }}
+              />
+            ) : (
+              <div className="pss-video-poster-fallback" style={{ color: '#fff' }}>
+                正在本地解密 PSENC001 原图...
+              </div>
+            )
+          ) : fullUrl ? (
             <video
               key={item.id}
               ref={videoRef}
-              src={api.getMediaStreamUrl(item.id, item.revision)}
-              poster={
-                item.hasThumbnail ? api.getMediaThumbnailUrl(item.id, item.revision) : undefined
-              }
+              src={fullUrl}
+              poster={thumbUrl ?? undefined}
               controls
               autoPlay
               playsInline
               loop={loopVideo}
               className="pss-darkroom-video"
             />
+          ) : (
+            <div className="pss-video-poster-fallback" style={{ color: '#fff' }}>
+              正在本地验证并解密 PSENC001 视频密文块...
+            </div>
           )}
 
           {onNext && (

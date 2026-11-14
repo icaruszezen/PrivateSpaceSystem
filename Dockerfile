@@ -31,7 +31,7 @@ ENV NODE_ENV=production \
     SESSION_TTL_HOURS=72
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /data && chown -R node:node /data /app
 

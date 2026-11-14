@@ -30,7 +30,7 @@ struct ServerConnectAndAuthView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "lock.shield.fill")
                             .font(.subheadline.weight(.bold))
-                        Text("AES-256-GCM · 信封加密 · 静态零明文")
+                        Text("E2EE v2 · 端到端零知识加密 · 服务端零明文")
                             .font(.caption.weight(.semibold))
                     }
                     .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
@@ -46,8 +46,8 @@ struct ServerConnectAndAuthView: View {
 
                     Text(
                         isSetupMode
-                            ? "当前服务器尚未创建管理员密钥信封，设置唯一主密码即可生成 256 位空间主密钥 (DEK)。"
-                            : "唯一管理员认证解锁 · 支持笔记、密码 (TOTP)、PSENC001 相册与流式影院多端同步。"
+                            ? "主密码仅在 iPhone 本地派生 KEK 与认证子密钥并封装 256 位主密钥 (DEK)，服务端永不接触明文。"
+                            : "唯一管理员零知识认证 · 笔记、密码 (TOTP)、PSENC001 原图与流式影院全程客户端本机加解密。"
                     )
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -231,8 +231,8 @@ struct ServerConnectAndAuthView: View {
 
                 // Cryptographic Spec Footer
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("scrypt (N=32768) 口令派生 + HKDF-SHA256 逐记录子密钥", systemImage: "cpu")
-                    Label("PSENC001 64 KiB 分块认证加密原图与 HTTP 206 流式视频", systemImage: "film.stack")
+                    Label("PBKDF2-HMAC-SHA256 (310,000 次) + HKDF-SHA256 逐记录子密钥", systemImage: "cpu")
+                    Label("客户端 PSENC001 64 KiB 分块加密原图与 HTTP 206 流式解密影院", systemImage: "film.stack")
                     Label("iOS Keychain 硬件保护 + 系统级 Safari / App 自动填充扩展", systemImage: "key.viewfinder")
                 }
                 .font(.caption)

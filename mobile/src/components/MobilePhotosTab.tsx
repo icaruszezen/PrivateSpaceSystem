@@ -183,6 +183,51 @@ export const MobilePhotosTab: React.FC<MobilePhotosTabProps> = ({
     onNotify('加密图片元数据已更新');
   };
 
+  const DecryptedPhotoImg: React.FC<{
+    item: MediaItem;
+    mode: 'thumb' | 'full';
+    style?: React.CSSProperties;
+  }> = ({ item, mode, style }) => {
+    const [src, setSrc] = useState<string | null>(null);
+    useEffect(() => {
+      let cancelled = false;
+      const promise =
+        mode === 'thumb'
+          ? client.loadThumbnailObjectUrl(item)
+          : client.loadMediaObjectUrl(item);
+      promise
+        .then((url) => {
+          if (!cancelled) setSrc(url);
+        })
+        .catch(() => {
+          if (!cancelled) setSrc(null);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [item, mode]);
+
+    if (!src) {
+      return (
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--m-text-tertiary)',
+            fontSize: '0.72rem',
+            ...style,
+          }}
+        >
+          解密中…
+        </div>
+      );
+    }
+    return <img src={src} alt={item.title} loading="lazy" style={style} />;
+  };
+
   return (
     <>
       {/* Upload Queue Progress */}
@@ -401,7 +446,7 @@ export const MobilePhotosTab: React.FC<MobilePhotosTabProps> = ({
           </div>
           <div style={{ fontWeight: 700, color: 'var(--m-text)' }}>私密相册暂无照片</div>
           <div style={{ fontSize: '0.82rem', marginTop: 4 }}>
-            照片将以 PSENC001 64KiB 分块认证加密格式存储，磁盘零明文留存
+            照片将在客户端本地封装为 PSENC001 密文容器，服务端零知识存储
           </div>
         </div>
       ) : (
@@ -421,11 +466,7 @@ export const MobilePhotosTab: React.FC<MobilePhotosTabProps> = ({
                   }
                 }}
               >
-                <img
-                  src={client.getThumbnailUrl(img.id, img.revision)}
-                  alt={img.title}
-                  loading="lazy"
-                />
+                <DecryptedPhotoImg item={img} mode="thumb" />
                 {img.isPinned && (
                   <span className="m-photo-badge-top">
                     <Star size={10} fill="#f5b841" color="#f5b841" />
@@ -532,9 +573,9 @@ export const MobilePhotosTab: React.FC<MobilePhotosTabProps> = ({
               </button>
             )}
 
-            <img
-              src={client.getStreamUrl(activePhoto.id, activePhoto.revision)}
-              alt={activePhoto.title}
+            <DecryptedPhotoImg
+              item={activePhoto}
+              mode="full"
               style={{
                 maxWidth: '100%',
                 maxHeight: '100%',
@@ -618,15 +659,15 @@ export const MobilePhotosTab: React.FC<MobilePhotosTabProps> = ({
               >
                 {slideshow ? <Pause size={18} /> : <Play size={18} />}
               </button>
-              <a
-                href={client.getDownloadUrl(activePhoto.id)}
-                download={activePhoto.originalFilename}
+              <button
+                type="button"
                 className="m-icon-btn"
-                style={{ color: '#fff', textDecoration: 'none' }}
-                aria-label="下载解密原图"
+                style={{ color: '#fff' }}
+                aria-label="本地解密导出原图"
+                onClick={() => void client.downloadDecryptedMedia(activePhoto)}
               >
                 <Download size={18} />
-              </a>
+              </button>
             </div>
 
             <div style={{ display: 'flex', gap: 8 }}>

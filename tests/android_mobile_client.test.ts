@@ -4,6 +4,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createApp, type AppInstance } from '../src/server/app.js';
 import { loadConfig } from '../src/server/config.js';
+import { deriveMasterKeysFromPassword } from '../src/shared/e2ee.js';
+import type { AuthParamsResponse } from '../src/shared/types.js';
 import {
   formatPairingUri,
   InMemoryVaultPersistence,
@@ -48,7 +50,7 @@ function buildMinimalPng(marker: string): Uint8Array {
   );
 }
 
-describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor CORS', () => {
+describe('Android Mobile Client E2EE SDK, Offline Encrypted Queue, Pairing & Capacitor CORS', () => {
   const cleanupTargets: Array<{ inst: AppInstance; dir: string }> = [];
 
   afterEach(() => {
@@ -104,7 +106,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
     expect(toggled).toContain('- [x] 待轮换密钥');
   });
 
-  it('allows Capacitor Android WebView CORS origins out-of-the-box without manual env overrides', async () => {
+  it('allows Capacitor Android WebView CORS origins out-of-the-box and exposes X-PrivateSpace-Cipher header', async () => {
     const { app } = createTestServer();
 
     for (const origin of ['http://localhost', 'https://localhost', 'capacitor://localhost']) {
@@ -113,7 +115,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
         headers: {
           Origin: origin,
           'Access-Control-Request-Method': 'POST',
-          'Access-Control-Request-Headers': 'Content-Type, Authorization',
+          'Access-Control-Request-Headers': 'Content-Type, Authorization, Range',
         },
       });
       expect(preflight.status).toBe(204);
@@ -121,7 +123,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
     }
   });
 
-  it('supports Android first-boot setup, offline mutation queueing, automatic flush on reconnect, Blob uploads, session revocation, and KEK rotation', async () => {
+  it('supports Android Zero-Knowledge setup, offline mutation queueing, automatic encrypted flush, PSENC001 uploads, session revocation, and KEK rotation', async () => {
     const { app, db, dbPath } = createTestServer();
 
     let networkOnline = true;
@@ -129,7 +131,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
       if (!networkOnline) {
         return Promise.reject(new TypeError('Failed to fetch: simulated Android airplane mode'));
       }
-      const urlStr = typeof input === 'string' ? input : input.toString();
+      const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
       const parsed = new URL(urlStr);
       return Promise.resolve(app.request(`${parsed.pathname}${parsed.search}`, init));
     };
@@ -143,27 +145,28 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
       fetchImpl: toggleableFetch,
     });
 
-    // 1. Probe uninitialized server & bootstrap vault directly from Android phone
+    // 1. Probe uninitialized server & bootstrap Zero-Knowledge vault directly from Android phone
     const statusBefore = await android.getAuthStatus();
     expect(statusBefore.initialized).toBe(false);
     expect(statusBefore.authenticated).toBe(false);
 
     const setupRes = await android.setupAdmin({
       password: 'AndroidMasterPass#2026!',
-      vaultName: '手机初始化私密空间',
+      vaultName: '手机零知识私密空间',
     });
     expect(setupRes.token).toBeTruthy();
 
     const authStatus = await android.getAuthStatus();
     expect(authStatus.authenticated).toBe(true);
-    expect(authStatus.vaultName).toBe('手机初始化私密空间');
+    expect(authStatus.vaultName).toBe('手机零知识私密空间');
+    expect(authStatus.encryption.zeroKnowledge).toBe(true);
 
     // 2. Enter Airplane Mode on Android -> create note & password offline into local queue
     networkOnline = false;
     const { note: offlineNote, queuedOffline: noteQueued } = await android.createNoteWithOffline(
       {
         title: '飞行模式应急备忘_OFFLINE_SECRET',
-        content: '- [x] 离线写入本地队列\n- [ ] 联网后自动加密同步',
+        content: '- [x] 离线写入本地加密队列\n- [ ] 联网后客户端加密同步',
         tags: ['离线', '安卓'],
         isPinned: true,
       },
@@ -190,7 +193,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
     expect(cachedWhileOffline?.notes[offlineNote.id]?.title).toContain('飞行模式应急备忘');
     expect(cachedWhileOffline?.passwords[offlinePwd.id]?.username).toBe('root');
 
-    // 3. Reconnect Wi-Fi -> syncDelta() automatically replays queued mutations & preserves client UUIDs
+    // 3. Reconnect Wi-Fi -> syncDelta() encrypts queued items locally & pushes opaque envelopes
     networkOnline = true;
     const { snapshot: afterReconnect } = await android.syncDelta();
     expect((await android.getPendingMutations()).length).toBe(0);
@@ -211,7 +214,7 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
     expect(rawSqlite).not.toContain('飞行模式应急备忘_OFFLINE_SECRET');
     expect(rawSqlite).not.toContain('OfflineVaultPassword!8848');
 
-    // 4. Batch CSV password import + Album & WebView Blob photo upload + Cipher Envelope inspection
+    // 4. Batch CSV password import + Album & WebView Blob PSENC001 photo upload + Cipher Envelope inspection
     const importedPwds = await android.importPasswords([
       {
         title: 'Cloudflare Zero Trust',
@@ -246,14 +249,22 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
 
     const envelope = await android.inspectItemCipher(uploadedPhoto.id);
     expect(envelope.algorithm).toContain('AES-256-GCM');
+    expect(envelope.cipherVersion).toBe(2);
     expect(envelope.chunkStore?.formatMagic).toBe('PSENC001');
 
-    // 5. Secondary Web session logs in -> Android lists sessions & revokes Web session remotely
+    // 5. Secondary Web session logs in via Zero-Knowledge authKey -> Android lists & revokes it remotely
+    const paramsRes = await app.request('/api/v1/auth/params');
+    const params = (await paramsRes.json()) as AuthParamsResponse;
+    const webDerived = await deriveMasterKeysFromPassword(
+      'AndroidMasterPass#2026!',
+      params.kdfSalt!,
+      params.kdfParams!,
+    );
     const webLoginRes = await app.request('/api/v1/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        password: 'AndroidMasterPass#2026!',
+        authKey: webDerived.authKeyBase64,
         platform: 'web',
         deviceName: 'Chrome Desktop',
       }),
@@ -270,15 +281,20 @@ describe('Android Mobile Client SDK, Offline Mutation Queue, Pairing & Capacitor
     expect(sessionsAfter).toHaveLength(1);
     expect(sessionsAfter[0].current).toBe(true);
 
-    // 6. Rotate Master Password (KEK) directly from Android phone & verify photo still decrypts
+    // 6. Rotate Master Password (KEK) directly from Android phone & verify client decrypts photo cleanly
     await android.changeMasterPassword({
       currentPassword: 'AndroidMasterPass#2026!',
       newPassword: 'RotatedAndroidMaster#2027!',
     });
-    const streamUrl = new URL(android.getDownloadUrl(uploadedPhoto.id));
-    const decryptedPhotoRes = await app.request(`${streamUrl.pathname}${streamUrl.search}`);
-    expect(decryptedPhotoRes.status).toBe(200);
-    const decryptedBytes = new Uint8Array(await decryptedPhotoRes.arrayBuffer());
+
+    // Legacy server-side plaintext /download is permanently disabled (410)
+    const legacyDownload = await app.request(`/api/v1/media/${uploadedPhoto.id}/download`, {
+      headers: { Authorization: `Bearer ${setupRes.token}` },
+    });
+    expect(legacyDownload.status).toBe(410);
+
+    // Client-side PSENC001 decryption returns exact original PNG bytes
+    const decryptedBytes = await android.decryptMediaBytes(pinnedPhoto);
     expect(Buffer.compare(Buffer.from(decryptedBytes), Buffer.from(pngBytes))).toBe(0);
   });
 });

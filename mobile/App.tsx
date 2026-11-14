@@ -14,6 +14,7 @@ import {
 import type {
   CreatePasswordRequest,
   MediaAlbum,
+  MediaItem,
   PasswordCategory,
   PasswordItem,
   SessionInfo,
@@ -233,6 +234,54 @@ function IosGlyph(props: {
     wand: '✦',
   };
   return <Text style={{ fontSize: s - 2, color: props.color }}>{fallbackMap[props.name]}</Text>;
+}
+
+function IosEncryptedMediaThumb(props: {
+  item: MediaItem;
+  client: PrivateSpaceMobileClient;
+  style?: Record<string, unknown>;
+}): React.JSX.Element {
+  const [uri, setUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setUri(null);
+    props.client
+      .loadThumbnailObjectUrl(props.item)
+      .then((u) => {
+        if (!cancelled) setUri(u);
+      })
+      .catch(() => {
+        if (!cancelled) setUri(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.item, props.client]);
+
+  if (!uri) {
+    return (
+      <View
+        style={{
+          width: '100%',
+          height: '100%',
+          alignItems: 'center',
+          justifyContent: 'center',
+          ...(props.style ?? {}),
+        }}
+      >
+        <Text style={{ fontSize: 10, color: 'rgba(128,140,145,0.85)' }}>解密中…</Text>
+      </View>
+    );
+  }
+
+  return (
+    <Image
+      source={{ uri }}
+      resizeMode="cover"
+      style={{ width: '100%', height: '100%', ...(props.style ?? {}) }}
+    />
+  );
 }
 
 export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps = {}): React.JSX.Element {
@@ -911,7 +960,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             >
               <IosGlyph name="shield" color={theme.accent} size={13} />
               <Text style={{ fontSize: 11, fontWeight: '700', color: theme.accent }}>
-                iOS 18 · AES-256-GCM 零明文落盘
+                iOS 18 · E2EE v2 端到端零知识加密
               </Text>
             </View>
 
@@ -950,8 +999,8 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             </Text>
             <Text style={{ fontSize: 13, color: theme.textSecondary, lineHeight: 1.5 }}>
               {serverInitialized
-                ? '连接自部署加密服务，实时同步密码 (2FA)、原图相册、HTTP 206 流式影院与 Markdown 笔记。'
-                : '首次启动向导：主密码经 scrypt 派生 256-bit 根密钥，全库仅设唯一管理员账号。'}
+                ? '连接自部署零知识盲存储服务，本地端到端加解密密码 (2FA)、原图相册、PSENC001 视频流与笔记。'
+                : '首次启动向导：主密码仅在本机经 PBKDF2-HMAC-SHA256 (310k) + HKDF-SHA256 派生密钥，服务端零明文可见。'}
             </Text>
           </View>
 
@@ -1930,15 +1979,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                     }}
                     testID={`ios-photo-tile-${img.id}`}
                   >
-                    <Image
-                      source={{
-                        uri: img.hasThumbnail
-                          ? client.getThumbnailUrl(img.id, img.revision)
-                          : client.getStreamUrl(img.id, img.revision),
-                      }}
-                      resizeMode="cover"
-                      style={{ width: '100%', height: '100%' }}
-                    />
+                    <IosEncryptedMediaThumb item={img} client={client} />
                     <View
                       style={{
                         position: 'absolute',
@@ -1985,7 +2026,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                   私密流式影院
                 </Text>
                 <Text style={{ fontSize: 11, color: theme.textSecondary }}>
-                  AVPlayer HTTP 206 Partial Content 随机分块实时解密
+                  PSENC001 端到端加密容器 · 客户端本地实时解密
                 </Text>
               </View>
 
@@ -2058,7 +2099,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                   暂无加密视频
                 </Text>
                 <Text style={{ fontSize: 12, color: theme.textSecondary }}>
-                  支持大体积 4K MP4 / MOV 512KiB 断点续传与零落盘流式播放
+                  支持大体积 4K MP4 / MOV 512KiB 断点续传与客户端本地解密播放
                 </Text>
               </View>
             ) : (
@@ -2085,9 +2126,9 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                     }}
                   >
                     {vid.hasThumbnail && (
-                      <Image
-                        source={{ uri: client.getThumbnailUrl(vid.id, vid.revision) }}
-                        resizeMode="cover"
+                      <IosEncryptedMediaThumb
+                        item={vid}
+                        client={client}
                         style={{
                           width: '100%',
                           height: '100%',
@@ -2455,7 +2496,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
 
               <Text style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.45 }}>
                 算法栈：{securitySummary?.encryption.cipher ?? 'AES-256-GCM'} +{' '}
-                {securitySummary?.encryption.passwordKdf ?? 'scrypt + HKDF-SHA256'} · 增量同步游标
+                {securitySummary?.encryption.passwordKdf ?? 'PBKDF2-HMAC-SHA256 + HKDF-SHA256'} · 端到端零知识同步游标
                 Seq #{snapshot.lastSyncSeq} ({sseLive ? 'SSE 实时流在线' : '轮询就绪'})
               </Text>
 

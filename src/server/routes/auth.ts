@@ -1,21 +1,28 @@
 import { Hono } from 'hono';
 import { deleteCookie, setCookie } from 'hono/cookie';
 import type {
+  AuthEnvelopeResponse,
+  AuthParamsResponse,
   AuthSessionResponse,
   AuthStatusResponse,
-  ChangePasswordRequest,
-  LoginRequest,
-  SetupRequest,
   UpdateVaultSettingsRequest,
+  ZeroKnowledgeChangePasswordRequest,
+  ZeroKnowledgeLoginRequest,
+  ZeroKnowledgeSetupRequest,
 } from '../../shared/types.js';
 import type { ServerConfig } from '../config.js';
 import type { EphemeralSessionCrypto, LoginRateLimiter } from '../crypto/sessionStore.js';
 import {
-  createMasterKeyEnvelope,
+  buildZeroKnowledgeAdminEnvelope,
+  CryptoValidationError,
   ENCRYPTION_SPEC,
-  unlockMasterKeyEnvelope,
+  verifyClientAuthKey,
 } from '../crypto/vaultCrypto.js';
-import { ConflictError, type VaultRepository } from '../db/repositories.js';
+import {
+  type AdminConfigRow,
+  ConflictError,
+  type VaultRepository,
+} from '../db/repositories.js';
 import {
   type AuthEnv,
   createRequireAuthMiddleware,
@@ -23,9 +30,6 @@ import {
   resolveOptionalSession,
   SESSION_COOKIE_NAME,
 } from '../middleware/authMiddleware.js';
-
-const MIN_PASSWORD_LENGTH = 8;
-const MAX_PASSWORD_LENGTH = 128;
 
 export function createAuthRoutes(
   repo: VaultRepository,
@@ -36,21 +40,14 @@ export function createAuthRoutes(
   const router = new Hono<AuthEnv>();
   const requireAuth = createRequireAuthMiddleware(repo, sessionCrypto);
 
-  function issueSessionResponse(
+  function issueBlindSessionResponse(
     c: Parameters<typeof setCookie>[0],
-    dek: Buffer,
-    vaultName: string,
-    keyFingerprint: string,
+    admin: AdminConfigRow,
     deviceOverride?: { deviceName?: string; platform?: 'web' | 'ios' | 'android' | 'api' },
   ): AuthSessionResponse {
     const detected = detectDeviceLabel(c, deviceOverride?.deviceName);
     const platform = deviceOverride?.platform || detected.platform;
     const tokenBundle = sessionCrypto.generateToken();
-    const wrappedDek = sessionCrypto.wrapDekForSession(
-      dek,
-      tokenBundle.sessionId,
-      tokenBundle.sessionSecret,
-    );
     tokenBundle.sessionSecret.fill(0);
 
     const session = repo.createSession({
@@ -59,7 +56,6 @@ export function createAuthRoutes(
       deviceName: detected.deviceName,
       platform,
       ipAddress: detected.ipAddress,
-      wrappedDek,
       ttlHours: config.sessionTtlHours,
     });
 
@@ -74,11 +70,40 @@ export function createAuthRoutes(
     return {
       token: tokenBundle.fullToken,
       expiresAt: session.expiresAt,
-      vaultName,
-      keyFingerprint,
+      vaultName: admin.vaultName,
+      keyFingerprint: admin.envelope.keyFingerprint,
+      kdfSalt: admin.kdfSaltBase64,
+      kdfParams: admin.kdfParams,
+      wrappedDek: admin.wrappedDekDto,
       session,
     };
   }
+
+  // GET /api/v1/auth/params - Public pre-login KDF salt & iteration parameters (NEVER exposes wrappedDek)
+  router.get('/params', (c) => {
+    const admin = repo.getAdminConfig();
+    if (!admin) {
+      const resp: AuthParamsResponse = {
+        initialized: false,
+        vaultName: config.vaultDefaultName,
+        keyFingerprint: null,
+        kdfSalt: null,
+        kdfParams: null,
+        encryption: ENCRYPTION_SPEC,
+      };
+      return c.json(resp);
+    }
+
+    const resp: AuthParamsResponse = {
+      initialized: true,
+      vaultName: admin.vaultName,
+      keyFingerprint: admin.envelope.keyFingerprint,
+      kdfSalt: admin.kdfSaltBase64,
+      kdfParams: admin.kdfParams,
+      encryption: ENCRYPTION_SPEC,
+    };
+    return c.json(resp);
+  });
 
   // GET /api/v1/auth/status
   router.get('/status', (c) => {
@@ -89,6 +114,9 @@ export function createAuthRoutes(
         authenticated: false,
         vaultName: config.vaultDefaultName,
         keyFingerprint: null,
+        kdfSalt: null,
+        kdfParams: null,
+        wrappedDek: null,
         encryption: ENCRYPTION_SPEC,
         session: null,
       };
@@ -96,22 +124,36 @@ export function createAuthRoutes(
     }
 
     const resolved = resolveOptionalSession(c, repo, sessionCrypto);
-    if (resolved) {
-      resolved.dek.fill(0);
-    }
+    const authenticated = Boolean(resolved);
 
     const status: AuthStatusResponse = {
       initialized: true,
-      authenticated: Boolean(resolved),
+      authenticated,
       vaultName: admin.vaultName,
       keyFingerprint: admin.envelope.keyFingerprint,
+      kdfSalt: admin.kdfSaltBase64,
+      kdfParams: admin.kdfParams,
+      wrappedDek: authenticated ? admin.wrappedDekDto : null,
       encryption: ENCRYPTION_SPEC,
       session: resolved?.sessionInfo ?? null,
     };
     return c.json(status);
   });
 
-  // POST /api/v1/auth/setup - Single administrator initial bootstrap
+  // GET /api/v1/auth/envelope - Authenticated fetch of wrapped Master Key envelope
+  router.get('/envelope', requireAuth, (c) => {
+    const admin = repo.getAdminConfig()!;
+    const resp: AuthEnvelopeResponse = {
+      vaultName: admin.vaultName,
+      keyFingerprint: admin.envelope.keyFingerprint,
+      kdfSalt: admin.kdfSaltBase64,
+      kdfParams: admin.kdfParams,
+      wrappedDek: admin.wrappedDekDto,
+    };
+    return c.json(resp);
+  });
+
+  // POST /api/v1/auth/setup - Zero-Knowledge client-generated DEK envelope bootstrap
   router.post('/setup', async (c) => {
     const existing = repo.getAdminConfig();
     if (existing) {
@@ -126,57 +168,49 @@ export function createAuthRoutes(
       );
     }
 
-    const body = (await c.req.json().catch(() => ({}))) as Partial<SetupRequest>;
-    const password = typeof body.password === 'string' ? body.password : '';
-
-    if (password.length < MIN_PASSWORD_LENGTH) {
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if ('password' in rawBody) {
       return c.json(
         {
           error: {
-            code: 'WEAK_PASSWORD',
-            message: `管理员主密码长度至少需要 ${MIN_PASSWORD_LENGTH} 个字符`,
-          },
-        },
-        400,
-      );
-    }
-    if (password.length > MAX_PASSWORD_LENGTH) {
-      return c.json(
-        {
-          error: {
-            code: 'INVALID_PASSWORD',
-            message: `密码长度不能超过 ${MAX_PASSWORD_LENGTH} 个字符`,
+            code: 'E2EE_REQUIRED',
+            message:
+              '服务端已启用零知识端到端加密（E2EE v2），禁止向服务端发送明文主密码，请在客户端派生密钥后提交密文信封',
           },
         },
         400,
       );
     }
 
-    const { dek, envelope } = createMasterKeyEnvelope(password);
+    const body = rawBody as Partial<ZeroKnowledgeSetupRequest>;
+
     try {
+      const envelope = buildZeroKnowledgeAdminEnvelope({
+        kdfSaltBase64: body.kdfSalt || '',
+        kdfParams: body.kdfParams!,
+        authKeyBase64: body.authKey || '',
+        wrappedDek: body.wrappedDek!,
+        keyFingerprint: body.keyFingerprint || '',
+      });
+
       const admin = repo.initializeAdmin(body.vaultName || config.vaultDefaultName, envelope);
-      const response = issueSessionResponse(
-        c,
-        dek,
-        admin.vaultName,
-        admin.envelope.keyFingerprint,
-        {
-          deviceName: body.deviceName,
-          platform: body.platform,
-        },
-      );
+      const response = issueBlindSessionResponse(c, admin, {
+        deviceName: body.deviceName,
+        platform: body.platform,
+      });
       return c.json(response, 201);
     } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_E2EE_ENVELOPE', message: err.message } }, 400);
+      }
       if (err instanceof ConflictError) {
         return c.json({ error: { code: 'ALREADY_INITIALIZED', message: err.message } }, 409);
       }
       throw err;
-    } finally {
-      dek.fill(0);
     }
   });
 
-  // POST /api/v1/auth/login - Single administrator unlock
+  // POST /api/v1/auth/login - Zero-Knowledge split-key authentication (never sees password or KEK)
   router.post('/login', async (c) => {
     const admin = repo.getAdminConfig();
     if (!admin) {
@@ -199,108 +233,110 @@ export function createAuthRoutes(
         {
           error: {
             code: 'RATE_LIMITED',
-            message: `密码尝试次数过多，请等待 ${rateCheck.retryAfterSeconds} 秒后再试`,
+            message: `认证尝试次数过多，请等待 ${rateCheck.retryAfterSeconds} 秒后再试`,
           },
         },
         429,
       );
     }
 
-    const body = (await c.req.json().catch(() => ({}))) as Partial<LoginRequest>;
-    const password = typeof body.password === 'string' ? body.password : '';
-    if (!password) {
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if ('password' in rawBody) {
       return c.json(
         {
           error: {
-            code: 'MISSING_PASSWORD',
-            message: '请输入管理员密码',
+            code: 'E2EE_REQUIRED',
+            message: '服务端已启用零知识端到端加密（E2EE v2），禁止上传明文主密码',
           },
         },
         400,
       );
     }
 
-    const dek = unlockMasterKeyEnvelope(password, admin.envelope);
-    if (!dek) {
+    const body = rawBody as Partial<ZeroKnowledgeLoginRequest>;
+    const authKey = typeof body.authKey === 'string' ? body.authKey.trim() : '';
+    if (!authKey) {
+      return c.json(
+        {
+          error: {
+            code: 'MISSING_AUTH_KEY',
+            message: '缺少客户端派生的零知识认证密钥 authKey',
+          },
+        },
+        400,
+      );
+    }
+
+    const verified = verifyClientAuthKey(
+      authKey,
+      admin.envelope.verifierSalt,
+      admin.envelope.authVerifier,
+    );
+    if (!verified) {
       rateLimiter.recordFailure(ipAddress);
       return c.json(
         {
           error: {
             code: 'INVALID_CREDENTIALS',
-            message: '管理员密码不正确，无法解密主密钥信封',
+            message: '管理员主密码不正确，零知识密钥校验未通过',
           },
         },
         401,
       );
     }
 
-    try {
-      rateLimiter.reset(ipAddress);
-      const response = issueSessionResponse(
-        c,
-        dek,
-        admin.vaultName,
-        admin.envelope.keyFingerprint,
-        {
-          deviceName: body.deviceName,
-          platform: body.platform,
-        },
-      );
-      return c.json(response);
-    } finally {
-      dek.fill(0);
-    }
+    rateLimiter.reset(ipAddress);
+    const response = issueBlindSessionResponse(c, admin, {
+      deviceName: body.deviceName,
+      platform: body.platform,
+    });
+    return c.json(response);
   });
 
-  // POST /api/v1/auth/logout (also serves as "Lock Vault" for current device)
+  // POST /api/v1/auth/logout
   router.post('/logout', (c) => {
     const resolved = resolveOptionalSession(c, repo, sessionCrypto);
     if (resolved) {
-      resolved.dek.fill(0);
       repo.deleteSession(resolved.sessionInfo.id);
     }
     deleteCookie(c, SESSION_COOKIE_NAME, { path: '/' });
     return c.json({ ok: true });
   });
 
-  // POST /api/v1/auth/change-password - Envelope KEK rotation without re-encrypting vault items
+  // POST /api/v1/auth/change-password - Client-side KEK rotation without exposing DEK or re-encrypting items
   router.post('/change-password', requireAuth, async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as Partial<ChangePasswordRequest>;
-    const currentPassword = typeof body.currentPassword === 'string' ? body.currentPassword : '';
-    const newPassword = typeof body.newPassword === 'string' ? body.newPassword : '';
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if ('currentPassword' in rawBody || 'newPassword' in rawBody) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止向服务端发送明文原密码或新密码',
+          },
+        },
+        400,
+      );
+    }
+
+    const body = rawBody as Partial<ZeroKnowledgeChangePasswordRequest>;
+    const currentAuthKey =
+      typeof body.currentAuthKey === 'string' ? body.currentAuthKey.trim() : '';
     const revokeOtherSessions = body.revokeOtherSessions !== false;
 
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      return c.json(
-        {
-          error: {
-            code: 'WEAK_PASSWORD',
-            message: `新管理员主密码长度至少需要 ${MIN_PASSWORD_LENGTH} 个字符`,
-          },
-        },
-        400,
-      );
-    }
-    if (newPassword.length > MAX_PASSWORD_LENGTH) {
-      return c.json(
-        {
-          error: {
-            code: 'INVALID_PASSWORD',
-            message: `密码长度不能超过 ${MAX_PASSWORD_LENGTH} 个字符`,
-          },
-        },
-        400,
-      );
-    }
-
     const admin = repo.getAdminConfig()!;
-    const verifiedDek = unlockMasterKeyEnvelope(currentPassword, admin.envelope);
-    if (!verifiedDek) {
+    if (
+      !currentAuthKey ||
+      !verifyClientAuthKey(
+        currentAuthKey,
+        admin.envelope.verifierSalt,
+        admin.envelope.authVerifier,
+      )
+    ) {
       return c.json(
         {
           error: {
             code: 'INVALID_CREDENTIALS',
-            message: '当前管理员密码验证失败',
+            message: '当前管理员主密码校验失败',
           },
         },
         401,
@@ -308,13 +344,27 @@ export function createAuthRoutes(
     }
 
     try {
-      const { dek: sameDek, envelope: newEnvelope } = createMasterKeyEnvelope(
-        newPassword,
-        verifiedDek,
-      );
-      sameDek.fill(0);
-      repo.updateAdminEnvelope(newEnvelope);
+      const newEnvelope = buildZeroKnowledgeAdminEnvelope({
+        kdfSaltBase64: body.newKdfSalt || '',
+        kdfParams: body.newKdfParams!,
+        authKeyBase64: body.newAuthKey || '',
+        wrappedDek: body.newWrappedDek!,
+        keyFingerprint: body.keyFingerprint || '',
+      });
 
+      if (newEnvelope.keyFingerprint !== admin.envelope.keyFingerprint) {
+        return c.json(
+          {
+            error: {
+              code: 'FINGERPRINT_MISMATCH',
+              message: '新信封包裹的主密钥指纹与原 DEK 不一致，已拒绝替换以保护既有密文数据',
+            },
+          },
+          400,
+        );
+      }
+
+      repo.updateAdminEnvelope(newEnvelope);
       if (revokeOtherSessions) {
         repo.deleteAllSessionsExcept(c.get('sessionId'));
       }
@@ -324,8 +374,11 @@ export function createAuthRoutes(
         keyFingerprint: newEnvelope.keyFingerprint,
         passwordUpdatedAt: new Date().toISOString(),
       });
-    } finally {
-      verifiedDek.fill(0);
+    } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_E2EE_ENVELOPE', message: err.message } }, 400);
+      }
+      throw err;
     }
   });
 
@@ -347,7 +400,7 @@ export function createAuthRoutes(
     return c.json({ vaultName });
   });
 
-  // GET /api/v1/auth/security - Cryptographic storage summary
+  // GET /api/v1/auth/security - Blind cryptographic storage summary
   router.get('/security', requireAuth, (c) => {
     const summary = repo.getSecuritySummary();
     return c.json(summary);

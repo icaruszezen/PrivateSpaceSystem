@@ -456,7 +456,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
             <span>当前设备标识：{deviceName}</span>
           </div>
           <div style={{ marginTop: 3 }}>
-            支持 scrypt + HKDF-SHA256 信封加密 · PSENC001 分块流媒体
+            端到端零知识加密 (E2EE v2) · PBKDF2-SHA256 + HKDF · PSENC001 流媒体
           </div>
         </div>
       </div>

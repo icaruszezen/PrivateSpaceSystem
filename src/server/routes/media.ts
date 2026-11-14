@@ -1,32 +1,27 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Hono } from 'hono';
 import type {
-  CreateAlbumRequest,
-  MediaItem,
+  CreateEncryptedAlbumRequest,
+  EncryptedMediaUploadMetadata,
+  EncryptedResumableUploadCompleteRequest,
+  EncryptedResumableUploadInitRequest,
   MediaKind,
-  ResumableUploadInitRequest,
-  UpdateMediaRequest,
+  UpdateEncryptedItemRequest,
 } from '../../shared/types.js';
-import type { EncryptedChunkStore } from '../crypto/chunkStore.js';
+import type { EncryptedChunkStore, StoredEncryptedBlobMeta } from '../crypto/chunkStore.js';
 import type { EphemeralSessionCrypto } from '../crypto/sessionStore.js';
+import {
+  CryptoValidationError,
+  parseAndValidateBlobKeyMeta,
+} from '../crypto/vaultCrypto.js';
 import { ConflictError, NotFoundError, type VaultRepository } from '../db/repositories.js';
-import { processUploadedMediaFile } from '../media/mediaProcessor.js';
 import {
   type AuthEnv,
   createRequireAuthMiddleware,
   resolveOptionalSession,
 } from '../middleware/authMiddleware.js';
-
-function inferMediaKind(mimeType: string, filename: string, explicitKind?: string): MediaKind {
-  if (explicitKind === 'video' || explicitKind === 'image') return explicitKind;
-  if (mimeType.toLowerCase().startsWith('video/')) return 'video';
-  if (/\.(mp4|mov|webm|mkv|m4v|avi)$/i.test(filename)) return 'video';
-  return 'image';
-}
 
 function parseByteRange(
   rangeHeader: string,
@@ -41,7 +36,6 @@ function parseByteRange(
   const endStr = spec.slice(dashIdx + 1).trim();
 
   if (startStr === '') {
-    // Suffix range: bytes=-65536
     const suffixLen = Number.parseInt(endStr, 10);
     if (!Number.isFinite(suffixLen) || suffixLen <= 0) return null;
     const start = Math.max(0, totalSize - suffixLen);
@@ -64,63 +58,86 @@ function parseByteRange(
   return { start, end: Math.min(totalSize - 1, parsedEnd) };
 }
 
-async function ingestFileIntoEncryptedVault(params: {
-  dek: Buffer;
-  repo: VaultRepository;
+function serveEncryptedBlobResponse(params: {
+  method: string;
+  rangeHeader: string | undefined;
   chunkStore: EncryptedChunkStore;
-  sourceFilePath: string;
-  filename: string;
-  mimeType: string;
-  kind: MediaKind;
-  title?: string;
-  albumId?: string | null;
-  tags?: string[];
-  description?: string;
-  expectedSha256?: string;
-  takenAt?: string;
-  isPinned?: boolean;
-}): Promise<MediaItem> {
-  const probe = await processUploadedMediaFile(
-    params.sourceFilePath,
-    params.kind,
-    params.mimeType,
-  );
+  blobMeta: StoredEncryptedBlobMeta;
+}): Response {
+  const isHead = params.method === 'HEAD';
+  const totalEncrypted = params.blobMeta.encryptedSize;
 
-  const mainBlob = await params.chunkStore.encryptFile(params.dek, params.sourceFilePath);
+  const baseHeaders: Record<string, string> = {
+    'Content-Type': 'application/octet-stream',
+    'Accept-Ranges': 'bytes',
+    'X-PrivateSpace-Cipher': 'PSENC001',
+  };
 
-  if (
-    params.expectedSha256 &&
-    params.expectedSha256.toLowerCase() !== mainBlob.sha256.toLowerCase()
-  ) {
-    params.chunkStore.shredBlobSync(mainBlob.blobId);
-    throw new Error('文件 SHA-256 完整性校验不匹配，分片可能损坏');
+  if (params.rangeHeader) {
+    const parsed = parseByteRange(params.rangeHeader, totalEncrypted);
+    if (!parsed) {
+      return new Response(null, {
+        status: 416,
+        headers: {
+          ...baseHeaders,
+          'Content-Range': `bytes */${totalEncrypted}`,
+        },
+      });
+    }
+
+    const contentLength = parsed.end - parsed.start + 1;
+    if (isHead) {
+      return new Response(null, {
+        status: 206,
+        headers: {
+          ...baseHeaders,
+          'Content-Range': `bytes ${parsed.start}-${parsed.end}/${totalEncrypted}`,
+          'Content-Length': String(contentLength),
+        },
+      });
+    }
+
+    const slice = params.chunkStore.createEncryptedRangeStream(
+      params.blobMeta.blobId,
+      totalEncrypted,
+      parsed.start,
+      parsed.end,
+    );
+    const webStream = Readable.toWeb(slice.stream) as ReadableStream<Uint8Array>;
+
+    return new Response(webStream, {
+      status: 206,
+      headers: {
+        ...baseHeaders,
+        'Content-Range': `bytes ${slice.start}-${slice.end}/${totalEncrypted}`,
+        'Content-Length': String(slice.contentLength),
+      },
+    });
   }
 
-  const thumbBlob = probe.thumbnailBuffer
-    ? await params.chunkStore.encryptBuffer(params.dek, probe.thumbnailBuffer)
-    : null;
+  if (isHead) {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        ...baseHeaders,
+        'Content-Length': String(totalEncrypted),
+      },
+    });
+  }
 
-  return params.repo.createMediaRecord(params.dek, {
-    kind: params.kind,
-    isPinned: params.isPinned,
-    mainBlob,
-    thumbBlob,
-    payload: {
-      title: params.title?.trim() || params.filename.replace(/\.[^.]+$/, '') || '未命名影像',
-      originalFilename: params.filename,
-      mimeType: params.mimeType,
-      albumId: params.albumId ?? null,
-      tags: params.tags ?? [],
-      description: params.description ?? '',
-      width: probe.width,
-      height: probe.height,
-      durationMs: probe.durationMs,
-      videoCodec: probe.videoCodec,
-      audioCodec: probe.audioCodec,
-      bitrate: probe.bitrate,
-      sha256: mainBlob.sha256,
-      thumbnailMimeType: probe.thumbnailMimeType,
-      takenAt: params.takenAt || new Date().toISOString(),
+  const full = params.chunkStore.createEncryptedRangeStream(
+    params.blobMeta.blobId,
+    totalEncrypted,
+    0,
+    Math.max(0, totalEncrypted - 1),
+  );
+  const webStream = Readable.toWeb(full.stream) as ReadableStream<Uint8Array>;
+
+  return new Response(webStream, {
+    status: 200,
+    headers: {
+      ...baseHeaders,
+      'Content-Length': String(full.contentLength),
     },
   });
 }
@@ -133,225 +150,106 @@ export function createMediaRoutes(
   const router = new Hono<AuthEnv>();
   const requireAuth = createRequireAuthMiddleware(repo, sessionCrypto);
 
-  // ==================== Binary Streaming & Thumbnail Endpoints ====================
-  // Placed before generic middleware so `<img src>` / `<video src>` & mobile `?token=` work cleanly,
-  // and DEK is unwrapped & zeroed synchronously before streaming chunks asynchronously.
+  // ==================== Blind Ciphertext Streaming & Thumbnail Endpoints ====================
+  // Serves raw `.psenc` ciphertext (`PSENC001`) with HTTP 206 Range support for client-side decryption.
 
-  // GET /api/v1/media/:id/thumbnail
-  router.get('/:id/thumbnail', async (c) => {
+  router.on(['GET', 'HEAD'], ['/:id/blob', '/:id/stream'], (c) => {
     const resolved = resolveOptionalSession(c, repo, sessionCrypto, true);
     if (!resolved) {
-      return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权访问缩略图' } }, 401);
+      return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权访问加密媒体密文流' } }, 401);
     }
 
     const id = c.req.param('id');
-    let media: MediaItem | null = null;
-    let buf: Buffer | null = null;
-    let contentType = 'image/jpeg';
-
-    try {
-      media = repo.getMediaById(resolved.dek, id);
-      const blobs = repo.getMediaBlobs(id);
-      if (!media || !blobs) {
-        return c.json({ error: { code: 'NOT_FOUND', message: '未找到该媒体资源' } }, 404);
-      }
-
-      if (blobs.thumbnail) {
-        buf = await chunkStore.decryptToBuffer(resolved.dek, blobs.thumbnail);
-        contentType = media.thumbnailMimeType || 'image/jpeg';
-      } else if (media.itemType === 'image') {
-        buf = await chunkStore.decryptToBuffer(resolved.dek, blobs.main);
-        contentType = media.mimeType || 'image/jpeg';
-      } else {
-        return c.json({ error: { code: 'NO_THUMBNAIL', message: '该视频暂无封面帧' } }, 404);
-      }
-    } finally {
-      resolved.dek.fill(0);
-    }
-
-    return new Response(new Uint8Array(buf), {
-      status: 200,
-      headers: {
-        'Content-Type': contentType,
-        'Content-Length': String(buf.length),
-      },
-    });
-  });
-
-  // GET|HEAD /api/v1/media/:id/stream - HTTP 206 Partial Content random-access chunk decryption
-  router.on(['GET', 'HEAD'], '/:id/stream', (c) => {
-    const resolved = resolveOptionalSession(c, repo, sessionCrypto, true);
-    if (!resolved) {
-      return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权访问加密流' } }, 401);
-    }
-
-    const id = c.req.param('id');
-    const isHead = c.req.method === 'HEAD';
-    let media: MediaItem | null = null;
-    let fek: Buffer | null = null;
+    const record = repo.getEncryptedMediaById(id);
     const blobs = repo.getMediaBlobs(id);
+    if (!record || !blobs) {
+      return c.json({ error: { code: 'NOT_FOUND', message: '未找到该加密媒体资源' } }, 404);
+    }
 
     try {
-      media = repo.getMediaById(resolved.dek, id);
-      if (!media || !blobs) {
-        return c.json({ error: { code: 'NOT_FOUND', message: '未找到该加密媒体' } }, 404);
-      }
-      if (!isHead) {
-        // Unwrap 32-byte FEK synchronously while DEK is active
-        fek = chunkStore.unwrapFek(resolved.dek, blobs.main);
-      }
-    } finally {
-      resolved.dek.fill(0);
-    }
-
-    const totalSize = blobs.main.plainSize;
-    const mimeType = media.mimeType || 'application/octet-stream';
-    const rangeHeader = c.req.header('range') || c.req.header('Range');
-
-    if (isHead) {
-      if (rangeHeader) {
-        const parsed = parseByteRange(rangeHeader, totalSize);
-        if (!parsed) {
-          return new Response(null, {
-            status: 416,
-            headers: {
-              'Content-Range': `bytes */${totalSize}`,
-            },
-          });
-        }
-        const contentLength = parsed.end - parsed.start + 1;
-        return new Response(null, {
-          status: 206,
-          headers: {
-            'Content-Type': mimeType,
-            'Accept-Ranges': 'bytes',
-            'Content-Range': `bytes ${parsed.start}-${parsed.end}/${totalSize}`,
-            'Content-Length': String(contentLength),
-          },
-        });
-      }
-
-      return new Response(null, {
-        status: 200,
-        headers: {
-          'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes',
-          'Content-Length': String(totalSize),
-        },
+      return serveEncryptedBlobResponse({
+        method: c.req.method,
+        rangeHeader: c.req.header('range') || c.req.header('Range'),
+        chunkStore,
+        blobMeta: blobs.main,
       });
+    } catch {
+      return c.json({ error: { code: 'BLOB_NOT_FOUND', message: '底层加密分片文件不存在' } }, 404);
     }
-
-    if (rangeHeader) {
-      const parsed = parseByteRange(rangeHeader, totalSize);
-      if (!parsed) {
-        fek!.fill(0);
-        return new Response(null, {
-          status: 416,
-          headers: {
-            'Content-Range': `bytes */${totalSize}`,
-          },
-        });
-      }
-
-      const { start, end } = parsed;
-      const contentLength = end - start + 1;
-      const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(
-        fek!,
-        blobs.main,
-        start,
-        end,
-      );
-      const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
-
-      return new Response(webStream, {
-        status: 206,
-        headers: {
-          'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes',
-          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
-          'Content-Length': String(contentLength),
-        },
-      });
-    }
-
-    const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(
-      fek!,
-      blobs.main,
-      0,
-      Math.max(0, totalSize - 1),
-    );
-    const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
-
-    return new Response(webStream, {
-      status: 200,
-      headers: {
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': String(totalSize),
-      },
-    });
   });
 
-  // GET /api/v1/media/:id/download - Full decrypted file download
-  router.get('/:id/download', (c) => {
+  router.on(['GET', 'HEAD'], '/:id/thumbnail-blob', (c) => {
     const resolved = resolveOptionalSession(c, repo, sessionCrypto, true);
     if (!resolved) {
-      return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权下载媒体' } }, 401);
+      return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权访问加密缩略图密文' } }, 401);
     }
 
     const id = c.req.param('id');
-    let media: MediaItem | null = null;
-    let fek: Buffer | null = null;
+    const record = repo.getEncryptedMediaById(id);
     const blobs = repo.getMediaBlobs(id);
-
-    try {
-      media = repo.getMediaById(resolved.dek, id);
-      if (!media || !blobs) {
-        return c.json({ error: { code: 'NOT_FOUND', message: '未找到该媒体文件' } }, 404);
-      }
-      fek = chunkStore.unwrapFek(resolved.dek, blobs.main);
-    } finally {
-      resolved.dek.fill(0);
+    if (!record || !blobs) {
+      return c.json({ error: { code: 'NOT_FOUND', message: '未找到该加密媒体资源' } }, 404);
     }
 
-    const totalSize = blobs.main.plainSize;
-    const safeFilename = encodeURIComponent(media.originalFilename || `${media.title}`);
-    const nodeStream = chunkStore.createDecryptedRangeStreamWithFek(
-      fek,
-      blobs.main,
-      0,
-      Math.max(0, totalSize - 1),
-    );
-    const webStream = Readable.toWeb(nodeStream) as ReadableStream<Uint8Array>;
+    const targetBlob =
+      blobs.thumbnail ?? (record.itemType === 'image' ? blobs.main : null);
+    if (!targetBlob) {
+      return c.json({ error: { code: 'NO_THUMBNAIL', message: '该视频暂无加密缩略图' } }, 404);
+    }
 
-    return new Response(webStream, {
-      status: 200,
-      headers: {
-        'Content-Type': media.mimeType || 'application/octet-stream',
-        'Content-Length': String(totalSize),
-        'Content-Disposition': `attachment; filename*=UTF-8''${safeFilename}`,
-      },
-    });
+    try {
+      return serveEncryptedBlobResponse({
+        method: c.req.method,
+        rangeHeader: c.req.header('range') || c.req.header('Range'),
+        chunkStore,
+        blobMeta: targetBlob,
+      });
+    } catch {
+      return c.json({ error: { code: 'BLOB_NOT_FOUND', message: '加密缩略图文件不存在' } }, 404);
+    }
   });
 
-  // ==================== Authenticated JSON & Upload Routes ====================
+  // Explicitly reject legacy plaintext media endpoints so server never emits unencrypted bytes
+  router.get('/:id/thumbnail', (c) =>
+    c.json(
+      {
+        error: {
+          code: 'E2EE_CLIENT_DECRYPT_REQUIRED',
+          message: '服务端不再解密缩略图，请通过 /:id/thumbnail-blob 拉取 PSENC001 密文并在客户端解密',
+        },
+      },
+      410,
+    ),
+  );
+  router.get('/:id/download', (c) =>
+    c.json(
+      {
+        error: {
+          code: 'E2EE_CLIENT_DECRYPT_REQUIRED',
+          message: '服务端不再提供明文下载，请通过 /:id/blob 拉取 PSENC001 密文并在客户端本地解密导出',
+        },
+      },
+      410,
+    ),
+  );
+
+  // ==================== Authenticated Opaque Metadata & Upload Routes ====================
 
   router.use('*', requireAuth);
 
   // GET /api/v1/media
   router.get('/', (c) => {
-    const dek = c.get('dek');
     const rawKind = c.req.query('kind');
     const kind: MediaKind | undefined =
       rawKind === 'image' || rawKind === 'video' ? rawKind : undefined;
     const includeTrashed = c.req.query('includeTrashed') === 'true';
     const onlyTrashed = c.req.query('onlyTrashed') === 'true';
 
-    const media = repo.listMedia(dek, { kind, includeTrashed, onlyTrashed });
-    const albums = repo.listAlbums(dek);
+    const items = repo.listEncryptedMedia({ kind, includeTrashed, onlyTrashed });
+    const albums = repo.listEncryptedAlbums();
     const admin = repo.getAdminConfig();
     return c.json({
-      media,
+      items,
       albums,
       latestSyncSeq: admin?.syncSeq ?? 0,
     });
@@ -359,24 +257,36 @@ export function createMediaRoutes(
 
   // GET /api/v1/media/albums
   router.get('/albums', (c) => {
-    const dek = c.get('dek');
-    return c.json({ albums: repo.listAlbums(dek) });
+    return c.json({ albums: repo.listEncryptedAlbums() });
   });
 
   // POST /api/v1/media/albums
   router.post('/albums', async (c) => {
-    const dek = c.get('dek');
-    const body = (await c.req.json().catch(() => ({}))) as Partial<CreateAlbumRequest>;
-    if (!body.name?.trim()) {
-      return c.json({ error: { code: 'INVALID_INPUT', message: '请输入相册或合集名称' } }, 400);
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!rawBody.envelope && 'name' in rawBody) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止上传明文相册名称，请在客户端加密后提交 envelope',
+          },
+        },
+        400,
+      );
     }
-    const album = repo.createAlbum(dek, {
-      name: body.name,
-      description: body.description,
-      kind: body.kind,
-      coverMediaId: body.coverMediaId,
-    });
-    return c.json({ album }, 201);
+
+    try {
+      const album = repo.createEncryptedAlbum(rawBody as unknown as CreateEncryptedAlbumRequest);
+      return c.json({ album }, 201);
+    } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_CIPHER_ENVELOPE', message: err.message } }, 400);
+      }
+      if (err instanceof ConflictError) {
+        return c.json({ error: { code: 'CONFLICT', message: err.message } }, 409);
+      }
+      throw err;
+    }
   });
 
   // DELETE /api/v1/media/albums/:id
@@ -392,173 +302,190 @@ export function createMediaRoutes(
     }
   });
 
-  // POST /api/v1/media/upload - Multipart form-data upload for images & videos
+  // POST /api/v1/media/upload - Multipart upload of client-encrypted PSENC001 blobs + cipher envelope
   router.post('/upload', async (c) => {
-    const dek = c.get('dek');
     const form = await c.req.parseBody();
-    const fileField = form['file'];
-
-    if (!(fileField instanceof File)) {
-      return c.json({ error: { code: 'MISSING_FILE', message: '未检测到上传文件字段 file' } }, 400);
-    }
-
-    const filename = fileField.name || 'upload.bin';
-    const mimeType = fileField.type || 'application/octet-stream';
-    const kind = inferMediaKind(
-      mimeType,
-      filename,
-      typeof form['kind'] === 'string' ? form['kind'] : undefined,
-    );
-    const title = typeof form['title'] === 'string' ? form['title'] : undefined;
-    const albumId =
-      typeof form['albumId'] === 'string' && form['albumId'].trim()
-        ? form['albumId'].trim()
-        : null;
-    const description = typeof form['description'] === 'string' ? form['description'] : '';
-    const rawTags = typeof form['tags'] === 'string' ? form['tags'] : '';
-    const tags = rawTags
-      ? rawTags
-          .split(',')
-          .map((t) => t.trim())
-          .filter(Boolean)
-      : [];
-    const isPinned = form['isPinned'] === 'true';
-
-    const tempFile = path.join(os.tmpdir(), `pss-upload-${crypto.randomUUID()}`);
-    try {
-      const arrayBuf = await fileField.arrayBuffer();
-      await fs.promises.writeFile(tempFile, Buffer.from(arrayBuf), { mode: 0o600 });
-
-      const media = await ingestFileIntoEncryptedVault({
-        dek,
-        repo,
-        chunkStore,
-        sourceFilePath: tempFile,
-        filename,
-        mimeType,
-        kind,
-        title,
-        albumId,
-        tags,
-        description,
-        isPinned,
-      });
-
-      return c.json({ media }, 201);
-    } finally {
-      try {
-        await fs.promises.unlink(tempFile);
-      } catch {
-        // ignore
-      }
-    }
-  });
-
-  // ==================== Resumable Chunked Upload Endpoints ====================
-
-  // POST /api/v1/media/uploads/init
-  router.post('/uploads/init', async (c) => {
-    const dek = c.get('dek');
-    const body = (await c.req.json().catch(() => ({}))) as Partial<ResumableUploadInitRequest>;
-
-    if (!body.filename || !body.totalBytes || body.totalBytes <= 0) {
+    if (form['file'] instanceof File && !(form['encryptedFile'] instanceof File)) {
       return c.json(
-        { error: { code: 'INVALID_UPLOAD_INIT', message: '请提供有效的文件名与总字节数' } },
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message:
+              '服务端已启用零知识端到端加密（E2EE v2），禁止直接上传明文媒体文件，请在客户端封装为 PSENC001 密文后上传 encryptedFile',
+          },
+        },
         400,
       );
     }
 
-    const session = repo.createUploadSession(dek, {
-      filename: body.filename,
-      mimeType: body.mimeType || 'application/octet-stream',
-      kind: body.kind,
-      totalBytes: body.totalBytes,
-      chunkBytes: body.chunkBytes,
-      title: body.title,
-      albumId: body.albumId,
-      tags: body.tags,
-      description: body.description,
-      sha256: body.sha256,
-      takenAt: body.takenAt,
-    });
+    const encryptedFile = form['encryptedFile'];
+    const rawMetaStr = typeof form['metadata'] === 'string' ? form['metadata'] : '';
+    if (!(encryptedFile instanceof File) || !rawMetaStr) {
+      return c.json(
+        {
+          error: {
+            code: 'MISSING_ENCRYPTED_PAYLOAD',
+            message: '缺少客户端加密文件 encryptedFile 或密文元数据 metadata',
+          },
+        },
+        400,
+      );
+    }
 
-    await fs.promises.mkdir(chunkStore.getUploadSessionDir(session.id), {
-      recursive: true,
-      mode: 0o700,
-    });
+    let parsedMeta: EncryptedMediaUploadMetadata;
+    try {
+      parsedMeta = JSON.parse(rawMetaStr) as EncryptedMediaUploadMetadata;
+    } catch {
+      return c.json({ error: { code: 'INVALID_METADATA_JSON', message: 'metadata JSON 解析失败' } }, 400);
+    }
 
-    return c.json(
-      {
-        uploadId: session.id,
-        chunkBytes: session.chunkBytes,
-        totalChunks: session.totalChunks,
-        expiresAt: session.expiresAt,
-      },
-      201,
-    );
+    let storedMainBlobId: string | null = null;
+    let storedThumbBlobId: string | null = null;
+
+    try {
+      const kind: MediaKind = parsedMeta.kind === 'video' ? 'video' : 'image';
+      const mainBlob = parseAndValidateBlobKeyMeta(parsedMeta.mainBlob, 'mainBlob');
+      const thumbBlob = parsedMeta.thumbBlob
+        ? parseAndValidateBlobKeyMeta(parsedMeta.thumbBlob, 'thumbBlob')
+        : null;
+
+      const mainEncryptedBuf = Buffer.from(await encryptedFile.arrayBuffer());
+      await chunkStore.storeEncryptedBuffer(mainBlob.blobId, mainEncryptedBuf, {
+        plainSize: mainBlob.plainSize,
+        chunkSize: mainBlob.chunkSize,
+        encryptedSize: mainBlob.encryptedSize,
+      });
+      storedMainBlobId = mainBlob.blobId;
+
+      const encryptedThumbField = form['encryptedThumbnail'];
+      if (thumbBlob) {
+        if (!(encryptedThumbField instanceof File)) {
+          throw new CryptoValidationError('metadata 声明了 thumbBlob 但未提交 encryptedThumbnail 密文分片');
+        }
+        const thumbEncryptedBuf = Buffer.from(await encryptedThumbField.arrayBuffer());
+        await chunkStore.storeEncryptedBuffer(thumbBlob.blobId, thumbEncryptedBuf, {
+          plainSize: thumbBlob.plainSize,
+          chunkSize: thumbBlob.chunkSize,
+          encryptedSize: thumbBlob.encryptedSize,
+        });
+        storedThumbBlobId = thumbBlob.blobId;
+      }
+
+      const item = repo.createEncryptedMediaRecord({
+        id: parsedMeta.id,
+        kind,
+        isPinned: parsedMeta.isPinned,
+        revision: parsedMeta.revision ?? 1,
+        envelope: parsedMeta.envelope,
+        mainBlob,
+        thumbBlob,
+      });
+
+      return c.json({ item }, 201);
+    } catch (err) {
+      if (storedMainBlobId) chunkStore.shredBlobSync(storedMainBlobId);
+      if (storedThumbBlobId) chunkStore.shredBlobSync(storedThumbBlobId);
+
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_E2EE_MEDIA', message: err.message } }, 400);
+      }
+      if (err instanceof ConflictError) {
+        return c.json({ error: { code: 'CONFLICT', message: err.message } }, 409);
+      }
+      throw err;
+    }
+  });
+
+  // ==================== Blind Resumable Encrypted Upload Endpoints ====================
+
+  // POST /api/v1/media/uploads/init
+  router.post('/uploads/init', async (c) => {
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if ('filename' in rawBody && !('metaEnvelope' in rawBody)) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止在断点续传初始化中提交明文文件名，请提交 metaEnvelope',
+          },
+        },
+        400,
+      );
+    }
+
+    try {
+      const session = repo.createEncryptedUploadSession(
+        rawBody as unknown as EncryptedResumableUploadInitRequest,
+      );
+      await fs.promises.mkdir(chunkStore.getUploadSessionDir(session.id), {
+        recursive: true,
+        mode: 0o700,
+      });
+
+      return c.json(
+        {
+          uploadId: session.id,
+          partPlainBytes: session.partPlainBytes,
+          totalParts: session.totalParts,
+          totalPlainBytes: session.totalPlainBytes,
+          totalEncryptedBytes: session.totalEncryptedBytes,
+          expiresAt: session.expiresAt,
+        },
+        201,
+      );
+    } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_UPLOAD_INIT', message: err.message } }, 400);
+      }
+      if (err instanceof ConflictError) {
+        return c.json({ error: { code: 'CONFLICT', message: err.message } }, 409);
+      }
+      throw err;
+    }
   });
 
   // GET /api/v1/media/uploads/:uploadId
   router.get('/uploads/:uploadId', (c) => {
-    const dek = c.get('dek');
-    const session = repo.getUploadSession(dek, c.req.param('uploadId'));
+    const session = repo.getEncryptedUploadSession(c.req.param('uploadId'));
     if (!session) {
       return c.json({ error: { code: 'NOT_FOUND', message: '分片上传会话不存在或已过期' } }, 404);
     }
     return c.json({
       uploadId: session.id,
+      kind: session.kind,
       receivedChunks: session.receivedChunks,
-      totalChunks: session.totalChunks,
-      totalBytes: session.totalBytes,
-      chunkBytes: session.chunkBytes,
+      totalChunks: session.totalParts,
+      totalBytes: session.totalPlainBytes,
+      totalEncryptedBytes: session.totalEncryptedBytes,
+      chunkBytes: session.partPlainBytes,
+      metaEnvelope: session.metaEnvelope,
     });
   });
 
-  // PUT /api/v1/media/uploads/:uploadId/chunks/:index
+  // PUT /api/v1/media/uploads/:uploadId/chunks/:index - Stores pre-encrypted PSENC001 part
   router.put('/uploads/:uploadId/chunks/:index', async (c) => {
-    const dek = c.get('dek');
     const uploadId = c.req.param('uploadId');
     const chunkIndex = Number.parseInt(c.req.param('index'), 10);
 
-    const session = repo.getUploadSession(dek, uploadId);
+    const session = repo.getEncryptedUploadSession(uploadId);
     if (!session) {
       return c.json({ error: { code: 'NOT_FOUND', message: '分片上传会话不存在或已过期' } }, 404);
     }
 
-    if (!Number.isFinite(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalChunks) {
-      return c.json({ error: { code: 'INVALID_CHUNK', message: '分片序号超出范围' } }, 400);
+    if (!Number.isFinite(chunkIndex) || chunkIndex < 0 || chunkIndex >= session.totalParts) {
+      return c.json({ error: { code: 'INVALID_CHUNK', message: '加密分片序号超出范围' } }, 400);
     }
 
-    const rawBytes = Buffer.from(await c.req.arrayBuffer());
-    const sessionDir = chunkStore.getUploadSessionDir(uploadId);
-    await fs.promises.mkdir(sessionDir, { recursive: true, mode: 0o700 });
-    const partPath = path.join(sessionDir, `part_${String(chunkIndex).padStart(6, '0')}`);
-    await fs.promises.writeFile(partPath, rawBytes, { mode: 0o600 });
-
-    const receivedChunks = repo.markUploadChunkReceived(uploadId, chunkIndex);
-    return c.json({
-      ok: true,
-      chunkIndex,
-      receivedCount: receivedChunks.length,
-      totalChunks: session.totalChunks,
-    });
-  });
-
-  // POST /api/v1/media/uploads/:uploadId/complete
-  router.post('/uploads/:uploadId/complete', async (c) => {
-    const dek = c.get('dek');
-    const uploadId = c.req.param('uploadId');
-    const session = repo.getUploadSession(dek, uploadId);
-    if (!session) {
-      return c.json({ error: { code: 'NOT_FOUND', message: '分片上传会话不存在或已过期' } }, 404);
+    const encryptedPartBytes = Buffer.from(await c.req.arrayBuffer());
+    if (encryptedPartBytes.length === 0) {
+      return c.json({ error: { code: 'EMPTY_CHUNK', message: '加密分片内容不能为空' } }, 400);
     }
-
-    if (session.receivedChunks.length < session.totalChunks) {
+    if (chunkIndex === 0 && encryptedPartBytes.subarray(0, 8).toString('ascii') !== 'PSENC001') {
       return c.json(
         {
           error: {
-            code: 'INCOMPLETE_CHUNKS',
-            message: `分片尚未传完（已收到 ${session.receivedChunks.length}/${session.totalChunks}）`,
+            code: 'INVALID_PSENC_HEADER',
+            message: '首个分片必须包含客户端生成的 PSENC001 密文容器头',
           },
         },
         400,
@@ -566,13 +493,58 @@ export function createMediaRoutes(
     }
 
     const sessionDir = chunkStore.getUploadSessionDir(uploadId);
-    const assembledPath = path.join(sessionDir, 'assembled.bin');
+    await fs.promises.mkdir(sessionDir, { recursive: true, mode: 0o700 });
+    const partPath = path.join(sessionDir, `part_${String(chunkIndex).padStart(6, '0')}`);
+    await fs.promises.writeFile(partPath, encryptedPartBytes, { mode: 0o600 });
+
+    const receivedChunks = repo.markUploadChunkReceived(uploadId, chunkIndex);
+    return c.json({
+      ok: true,
+      chunkIndex,
+      receivedCount: receivedChunks.length,
+      totalChunks: session.totalParts,
+    });
+  });
+
+  // POST /api/v1/media/uploads/:uploadId/complete - Concatenates encrypted PSENC001 parts blindly
+  router.post('/uploads/:uploadId/complete', async (c) => {
+    const uploadId = c.req.param('uploadId');
+    const session = repo.getEncryptedUploadSession(uploadId);
+    if (!session) {
+      return c.json({ error: { code: 'NOT_FOUND', message: '分片上传会话不存在或已过期' } }, 404);
+    }
+
+    if (session.receivedChunks.length < session.totalParts) {
+      return c.json(
+        {
+          error: {
+            code: 'INCOMPLETE_CHUNKS',
+            message: `加密分片尚未传完（已收到 ${session.receivedChunks.length}/${session.totalParts}）`,
+          },
+        },
+        400,
+      );
+    }
+
+    const body = (await c.req
+      .json()
+      .catch(() => ({}))) as Partial<EncryptedResumableUploadCompleteRequest>;
+
+    const sessionDir = chunkStore.getUploadSessionDir(uploadId);
+    const assembledPath = path.join(sessionDir, 'assembled.psenc');
+    let storedMainBlobId: string | null = null;
+    let storedThumbBlobId: string | null = null;
 
     try {
+      const mainBlob = parseAndValidateBlobKeyMeta(body.mainBlob, 'mainBlob');
+      const thumbBlob = body.thumbBlob
+        ? parseAndValidateBlobKeyMeta(body.thumbBlob, 'thumbBlob')
+        : null;
+
       const outFd = await fs.promises.open(assembledPath, 'w', 0o600);
       try {
         let pos = 0;
-        for (let i = 0; i < session.totalChunks; i++) {
+        for (let i = 0; i < session.totalParts; i++) {
           const partPath = path.join(sessionDir, `part_${String(i).padStart(6, '0')}`);
           const partBuf = await fs.promises.readFile(partPath);
           await outFd.write(partBuf, 0, partBuf.length, pos);
@@ -582,25 +554,39 @@ export function createMediaRoutes(
         await outFd.close();
       }
 
-      const media = await ingestFileIntoEncryptedVault({
-        dek,
-        repo,
-        chunkStore,
-        sourceFilePath: assembledPath,
-        filename: session.meta.filename,
-        mimeType: session.meta.mimeType,
-        kind: session.kind,
-        title: session.meta.title,
-        albumId: session.meta.albumId,
-        tags: session.meta.tags,
-        description: session.meta.description,
-        expectedSha256: session.meta.sha256,
-        takenAt: session.meta.takenAt,
+      await chunkStore.storeEncryptedFile(mainBlob.blobId, assembledPath, {
+        plainSize: mainBlob.plainSize,
+        chunkSize: mainBlob.chunkSize,
+        encryptedSize: mainBlob.encryptedSize,
+      });
+      storedMainBlobId = mainBlob.blobId;
+
+      if (thumbBlob && body.encryptedThumbnailBase64) {
+        const thumbBuf = Buffer.from(body.encryptedThumbnailBase64, 'base64');
+        await chunkStore.storeEncryptedBuffer(thumbBlob.blobId, thumbBuf, {
+          plainSize: thumbBlob.plainSize,
+          chunkSize: thumbBlob.chunkSize,
+          encryptedSize: thumbBlob.encryptedSize,
+        });
+        storedThumbBlobId = thumbBlob.blobId;
+      }
+
+      const item = repo.createEncryptedMediaRecord({
+        id: body.id || '',
+        kind: body.kind === 'video' ? 'video' : session.kind,
+        isPinned: body.isPinned,
+        revision: body.revision ?? 1,
+        envelope: body.envelope!,
+        mainBlob,
+        thumbBlob: storedThumbBlobId ? thumbBlob : null,
       });
 
       repo.deleteUploadSession(uploadId);
-      return c.json({ media }, 201);
+      return c.json({ item }, 201);
     } catch (err) {
+      if (storedMainBlobId) chunkStore.shredBlobSync(storedMainBlobId);
+      if (storedThumbBlobId) chunkStore.shredBlobSync(storedThumbBlobId);
+
       return c.json(
         {
           error: {
@@ -626,12 +612,11 @@ export function createMediaRoutes(
 
   // GET /api/v1/media/:id
   router.get('/:id', (c) => {
-    const dek = c.get('dek');
-    const media = repo.getMediaById(dek, c.req.param('id'));
-    if (!media) {
+    const item = repo.getEncryptedMediaById(c.req.param('id'));
+    if (!item) {
       return c.json({ error: { code: 'NOT_FOUND', message: '未找到该媒体条目' } }, 404);
     }
-    return c.json({ media });
+    return c.json({ item });
   });
 
   // GET /api/v1/media/:id/cipher
@@ -645,12 +630,29 @@ export function createMediaRoutes(
 
   // PATCH /api/v1/media/:id
   router.patch('/:id', async (c) => {
-    const dek = c.get('dek');
-    const body = (await c.req.json().catch(() => ({}))) as UpdateMediaRequest;
+    const rawBody = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!rawBody.envelope && ('title' in rawBody || 'description' in rawBody || 'tags' in rawBody)) {
+      return c.json(
+        {
+          error: {
+            code: 'E2EE_REQUIRED',
+            message: '零知识模式下禁止提交明文媒体元数据更新，请在客户端重加密后提交 envelope',
+          },
+        },
+        400,
+      );
+    }
+
     try {
-      const media = repo.updateMedia(dek, c.req.param('id'), body);
-      return c.json({ media });
+      const item = repo.updateEncryptedMedia(
+        c.req.param('id'),
+        rawBody as unknown as UpdateEncryptedItemRequest,
+      );
+      return c.json({ item });
     } catch (err) {
+      if (err instanceof CryptoValidationError) {
+        return c.json({ error: { code: 'INVALID_CIPHER_ENVELOPE', message: err.message } }, 400);
+      }
       if (err instanceof NotFoundError) {
         return c.json({ error: { code: 'NOT_FOUND', message: err.message } }, 404);
       }

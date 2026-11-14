@@ -7,7 +7,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { ServerConfig } from './config.js';
 import { EncryptedChunkStore } from './crypto/chunkStore.js';
 import { EphemeralSessionCrypto, LoginRateLimiter } from './crypto/sessionStore.js';
-import { createMasterKeyEnvelope } from './crypto/vaultCrypto.js';
+import { bootstrapHeadlessZeroKnowledgeAdmin } from './crypto/vaultCrypto.js';
 import { openVaultDatabase } from './db/database.js';
 import { VaultRepository } from './db/repositories.js';
 import { createAuthRoutes } from './routes/auth.js';
@@ -62,17 +62,18 @@ export function createApp(config: ServerConfig): AppInstance {
     sseHub.broadcast(latestSyncSeq, itemType);
   });
 
-  // Optional headless bootstrap via ADMIN_PASSWORD environment variable (e.g., Docker Compose)
-  if (config.adminBootstrapPassword && !repo.getAdminConfig()) {
-    if (config.adminBootstrapPassword.length < 8) {
-      throw new Error('ADMIN_PASSWORD 环境变量长度至少需要 8 个字符');
-    }
-    const { dek, envelope } = createMasterKeyEnvelope(config.adminBootstrapPassword);
-    try {
+  // Optional one-shot headless bootstrap via ADMIN_PASSWORD environment variable.
+  // Immediately wipes DEK/KEK buffers and removes ADMIN_PASSWORD from process.env/config.
+  if (config.adminBootstrapPassword) {
+    if (!repo.getAdminConfig()) {
+      if (config.adminBootstrapPassword.length < 8) {
+        throw new Error('ADMIN_PASSWORD 环境变量长度至少需要 8 个字符');
+      }
+      const envelope = bootstrapHeadlessZeroKnowledgeAdmin(config.adminBootstrapPassword);
       repo.initializeAdmin(config.vaultDefaultName, envelope);
-    } finally {
-      dek.fill(0);
     }
+    config.adminBootstrapPassword = undefined;
+    delete process.env.ADMIN_PASSWORD;
   }
 
   const app = new Hono();
@@ -97,12 +98,17 @@ export function createApp(config: ServerConfig): AppInstance {
       origin: allowedCorsOrigins,
       credentials: true,
       allowHeaders: ['Content-Type', 'Authorization', 'Range', 'Accept'],
-      exposeHeaders: ['Content-Range', 'Accept-Ranges', 'Content-Length'],
+      exposeHeaders: [
+        'Content-Range',
+        'Accept-Ranges',
+        'Content-Length',
+        'X-PrivateSpace-Cipher',
+      ],
       allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
   );
 
-  // Prevent caching of decrypted API responses
+  // Prevent caching of API responses
   app.use('/api/*', async (c, next) => {
     await next();
     c.header('Cache-Control', 'no-store, no-cache, must-revalidate');
@@ -153,7 +159,7 @@ export function createApp(config: ServerConfig): AppInstance {
     );
   });
 
-  // Mount REST v1 API routes
+  // Mount REST v1 Zero-Knowledge API routes
   app.route('/api/v1/health', createHealthRoutes(repo));
   app.route('/api/v1/auth', createAuthRoutes(repo, sessionCrypto, rateLimiter, config));
   app.route('/api/v1/notes', createNotesRoutes(repo, sessionCrypto));

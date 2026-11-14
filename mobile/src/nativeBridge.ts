@@ -411,7 +411,12 @@ export const quickLockManager = {
     }
   },
 
-  async configurePin(pin: string, biometricEnabled: boolean, currentToken: string): Promise<void> {
+  async configurePin(
+    pin: string,
+    biometricEnabled: boolean,
+    currentToken: string,
+    dekBase64?: string | null,
+  ): Promise<void> {
     const saltBytes = new Uint8Array(16);
     globalThis.crypto.getRandomValues(saltBytes);
     const saltHex = Array.from(saltBytes, (b) => b.toString(16).padStart(2, '0')).join('');
@@ -422,18 +427,22 @@ export const quickLockManager = {
       biometricEnabled,
       updatedAt: new Date().toISOString(),
     };
+    const serializedSession = dekBase64
+      ? JSON.stringify({ token: currentToken, dekBase64 })
+      : currentToken;
     await androidBridge.secureSet(QUICK_LOCK_META_KEY, JSON.stringify(meta));
-    await androidBridge.secureSet(KEYSTORE_SESSION_KEY, currentToken);
+    await androidBridge.secureSet(KEYSTORE_SESSION_KEY, serializedSession);
   },
 
-  async saveSessionToKeystore(token: string | null): Promise<void> {
+  async saveSessionToKeystore(token: string | null, dekBase64?: string | null): Promise<void> {
     if (!token) {
       await androidBridge.secureRemove(KEYSTORE_SESSION_KEY);
       return;
     }
     const cfg = await this.getConfig();
     if (cfg) {
-      await androidBridge.secureSet(KEYSTORE_SESSION_KEY, token);
+      const serializedSession = dekBase64 ? JSON.stringify({ token, dekBase64 }) : token;
+      await androidBridge.secureSet(KEYSTORE_SESSION_KEY, serializedSession);
     }
   },
 

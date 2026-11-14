@@ -224,7 +224,7 @@ export default function PrivateSpaceMobileApp() {
       }
 
       const savedToken = await client.restoreSession();
-      if (savedToken) {
+      if (savedToken && client.hasUnlockedKey()) {
         try {
           const status = await client.getAuthStatus();
           if (status.authenticated) {
@@ -547,7 +547,8 @@ export default function PrivateSpaceMobileApp() {
   const handleLockApp = useCallback(async () => {
     const qCfg = await quickLockManager.getConfig();
     if (qCfg && client.getToken()) {
-      await quickLockManager.saveSessionToKeystore(client.getToken());
+      await quickLockManager.saveSessionToKeystore(client.getToken(), client.getDekBase64());
+      client.clearUnlockedKey();
       setQuickLockCfg(qCfg);
       setStage('pin_locked');
       return;
@@ -609,7 +610,7 @@ export default function PrivateSpaceMobileApp() {
           <ShieldCheck size={24} />
         </div>
         <div style={{ marginTop: 12, fontSize: '0.88rem', color: 'var(--m-text-secondary)' }}>
-          正在启动 Android 安全加密空间...
+          正在启动 Android 零知识加密空间...
         </div>
       </div>
     );
@@ -623,6 +624,10 @@ export default function PrivateSpaceMobileApp() {
         biometricEnabled={Boolean(quickLockCfg?.biometricEnabled)}
         onUnlockedWithToken={async (restoredToken) => {
           await client.setSessionToken(restoredToken);
+          if (!client.hasUnlockedKey()) {
+            setStage('auth');
+            return;
+          }
           setStage('unlocked');
           void performDeltaSync(true);
         }}
@@ -648,15 +653,17 @@ export default function PrivateSpaceMobileApp() {
             localStorage.setItem(LS_VAULT_NAME, vName);
 
             const token = client.getToken();
+            const dekBase64 = client.getDekBase64();
             if (quickPin && token) {
               await quickLockManager.configurePin(
                 quickPin,
                 deviceMeta.biometricAvailable,
                 token,
+                dekBase64,
               );
               setQuickLockCfg(await quickLockManager.getConfig());
             } else if (token) {
-              await quickLockManager.saveSessionToKeystore(token);
+              await quickLockManager.saveSessionToKeystore(token, dekBase64);
             }
 
             const { snapshot: initialSnap } = await client.syncDelta();

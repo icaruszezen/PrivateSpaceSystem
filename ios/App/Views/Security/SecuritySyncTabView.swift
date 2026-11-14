@@ -106,7 +106,8 @@ struct SecuritySyncTabView: View {
 
                 // 3. 4-Pillar Cryptographic Storage Summary
                 if let summary = store.securitySummary {
-                    Section("信封加密与四维密文存储统计") {
+                    Section("端到端零知识加密与四维密文存储统计") {
+                        LabeledContent("安全架构", value: summary.encryption.architecture ?? "ZERO_KNOWLEDGE_E2EE_V2")
                         LabeledContent("主密钥指纹 (DEK)") {
                             Text(summary.keyFingerprint)
                                 .font(.system(.caption, design: .monospaced))

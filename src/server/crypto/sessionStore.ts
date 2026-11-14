@@ -1,21 +1,14 @@
 import crypto from 'node:crypto';
 
 /**
- * Ephemeral runtime secret generated exclusively in volatile RAM at process boot.
- * Combined with the client-held session secret via HKDF-SHA256 to wrap the Vault Master Key (DEK)
- * per active session, ensuring:
- * 1. Raw DEK never sits unencrypted in heap memory between requests.
- * 2. Database theft at rest cannot decrypt session envelopes even if a token were captured.
+ * Blind session token manager (`pss_<sessionId>.<secretHex>`).
+ *
+ * Under Zero-Knowledge E2EE v2, the server stores ONLY `SHA-256(sessionSecret)` to authenticate
+ * API requests. No DEK or KEK is ever wrapped in or recoverable from server sessions.
  */
 export class EphemeralSessionCrypto {
-  private readonly runtimeSecret: Buffer;
-
-  constructor() {
-    this.runtimeSecret = crypto.randomBytes(32);
-  }
-
   /**
-   * Generates a structured token: `pss_<sessionId>.<secretHex>`
+   * Generates a structured bearer/cookie token: `pss_<sessionId>.<secretHex>`
    */
   generateToken(): {
     fullToken: string;
@@ -57,58 +50,6 @@ export class EphemeralSessionCrypto {
     const tokenHash = crypto.createHash('sha256').update(sessionSecret).digest();
     return { sessionId, sessionSecret, tokenHash };
   }
-
-  private deriveSessionWrapKey(sessionId: string, sessionSecret: Buffer): Buffer {
-    const ikm = Buffer.concat([this.runtimeSecret, sessionSecret]);
-    try {
-      const derived = crypto.hkdfSync(
-        'sha256',
-        ikm,
-        Buffer.from(sessionId, 'utf8'),
-        Buffer.from('privatespace:session-dek:v1', 'utf8'),
-        32,
-      );
-      return Buffer.from(derived);
-    } finally {
-      ikm.fill(0);
-    }
-  }
-
-  wrapDekForSession(
-    dek: Buffer,
-    sessionId: string,
-    sessionSecret: Buffer,
-  ): { iv: Buffer; tag: Buffer; ciphertext: Buffer } {
-    const wrapKey = this.deriveSessionWrapKey(sessionId, sessionSecret);
-    try {
-      const iv = crypto.randomBytes(12);
-      const cipher = crypto.createCipheriv('aes-256-gcm', wrapKey, iv);
-      cipher.setAAD(Buffer.from(`session:${sessionId}`, 'utf8'));
-      const ciphertext = Buffer.concat([cipher.update(dek), cipher.final()]);
-      const tag = cipher.getAuthTag();
-      return { iv, tag, ciphertext };
-    } finally {
-      wrapKey.fill(0);
-    }
-  }
-
-  unwrapDekForSession(
-    sessionId: string,
-    sessionSecret: Buffer,
-    envelope: { iv: Buffer; tag: Buffer; ciphertext: Buffer },
-  ): Buffer | null {
-    const wrapKey = this.deriveSessionWrapKey(sessionId, sessionSecret);
-    try {
-      const decipher = crypto.createDecipheriv('aes-256-gcm', wrapKey, envelope.iv);
-      decipher.setAAD(Buffer.from(`session:${sessionId}`, 'utf8'));
-      decipher.setAuthTag(envelope.tag);
-      return Buffer.concat([decipher.update(envelope.ciphertext), decipher.final()]);
-    } catch {
-      return null;
-    } finally {
-      wrapKey.fill(0);
-    }
-  }
 }
 
 interface RateBucket {
@@ -118,7 +59,7 @@ interface RateBucket {
 }
 
 /**
- * Protects the single-administrator login endpoint against brute-force guessing.
+ * Protects the single-administrator Zero-Knowledge login endpoint against brute-force guessing.
  */
 export class LoginRateLimiter {
   private readonly buckets = new Map<string, RateBucket>();
