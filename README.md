@@ -16,9 +16,10 @@
   2. **密码保险箱（Passwords）**：加密存储站点、账号、密码、**RFC 6238 动态两步验证码（TOTP `SHA-1` / `SHA-256` 实时倒计时环）**、自定义隐藏字段与最近 15 次历史密码版本；内置 **无偏拒绝采样 CSPRNG 随机密码与助记词组生成器**、**安全健康度审计面板**（弱口令、重复密码、未启用 2FA 筛选）以及主流密码管理器 CSV 批量导入。
   3. **加密相册（Images）**：支持拖拽多图上传、自动解析 PNG/JPEG/GIF/WebP 分辨率、加密相册分类管理、**暗房级灯箱预览**（滚轮/按钮缩放、90° 旋转、水平翻转、幻灯片播放、信息编辑）与 `.psenc` 分块密文透视。
   4. **私密视频影院（Videos）**：支持大文件 **`512 KiB` 分片断点续传 + SHA-256 完整性校验**、基于 `ffmpeg` 的编码探测与加密封面帧提取，以及 **HTTP `206 Partial Content` $O(1)$ 随机块解密流式播放**（秒开拖动进度条、`±10s` 快进退、`0.75×–2×` 倍速、循环、画中画 PiP）。
-- **Web / Android / iOS 多端实时增量同步**：
-  - 统一单调递增游标协议（`GET /api/v1/sync?since_seq=...`）与 **SSE 实时游标广播**（`/api/v1/sync/stream`），同时支持 `HttpOnly Cookie`（网页端）与 `Bearer pss_...` 令牌（移动端）。仓库内置 [`mobile/`](mobile/README.md) 跨端 TypeScript 同步 SDK 与 React Native（Android / iOS）客户端。
-- **Docker 一键部署 & GitHub 自动构建**：GitHub Actions 自动运行全量加密与流媒体测试，并构建 `linux/amd64` 与 `linux/arm64` 多架构镜像（内置 `ffmpeg`）发布至 `ghcr.io/icaruszezen/privatespacesystem`。
+- **Web / Android 原生手机端 / iOS 多端实时增量同步**：
+  - 统一单调递增游标协议（`GET /api/v1/sync?since_seq=...`）与 **SSE 实时游标广播**（`/api/v1/sync/stream`），同时支持 `HttpOnly Cookie`（网页端）与 `Bearer pss_...` 令牌（移动端），网页端「多端会话」支持一键复制 `privatespace://pair?...` 配对码快速绑定手机。
+  - 仓库内置完整 **Android 原生手机客户端**（[`mobile/`](mobile/README.md)，包名 `com.privatespace.mobile`，Capacitor 6 + Kotlin 原生插件），支持 **`AndroidKeyStore` 硬件级密钥封装、`BiometricPrompt` 指纹/面容解锁、`FLAG_SECURE` 防截屏护盾、Android 13+ 敏感剪贴板遮罩与 30s 自动擦除、系统分享菜单加密入库、离线变更队列回放、相机直拍 `.psenc` 入库及 `HTTP 206` 视频影院**。
+- **Docker 一键部署 & GitHub 自动构建（含 Android APK 产物）**：GitHub Actions 自动运行全量加密测试、编译原生 Android APK 并上传构建产物，同时发布 `linux/amd64` 与 `linux/arm64` 多架构镜像至 `ghcr.io/icaruszezen/privatespacesystem`。
 
 ---
 
@@ -92,11 +93,19 @@ npm run build
 npm start
 ```
 
-开发模式下可分别启动前后端热重载：
+开发模式下可分别启动后端、桌面网页端与安卓手机端热重载：
 
 ```bash
 npm run dev:server   # 后端监听 http://127.0.0.1:8080
-npm run dev:client   # 前端 Vite 监听 http://127.0.0.1:5173 并代理 /api
+npm run dev:client   # 网页端 Vite 监听 http://127.0.0.1:5173 并代理 /api
+npm run dev:mobile   # 安卓手机端 Vite 监听 http://127.0.0.1:5174 并代理 /api
 ```
 
-详细加密模型、`.psenc` 分块流式解密与多端增量同步协议设计请参阅 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与移动端说明 [mobile/README.md](mobile/README.md)。
+若本机已配置 **JDK 17** 与 **Android SDK (`ANDROID_HOME`)**，可直接运行原生 Kotlin 单元测试并编译安卓 APK 安装包：
+
+```bash
+npm run android:test # 运行 Android Kotlin JUnit 单元测试
+npm run android:apk  # 编译 mobile/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+详细加密模型、`.psenc` 分块流式解密与多端增量同步协议设计请参阅 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与安卓手机端说明 [mobile/README.md](mobile/README.md)。

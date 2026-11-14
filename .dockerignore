@@ -14,3 +14,7 @@ coverage
 README.md
 docs
 tests
+mobile/android
+*.apk
+*.aab
+
