@@ -11,6 +11,7 @@ export interface ServerConfig {
   vaultDefaultName: string;
   cookieSecure: boolean;
   corsOrigins: string[];
+  appleAppId: string;
 }
 
 export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig {
@@ -29,6 +30,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
   const corsOrigins = process.env.CORS_ORIGINS
     ? process.env.CORS_ORIGINS.split(',').map((s) => s.trim()).filter(Boolean)
     : [];
+  const appleAppId = process.env.APPLE_APP_ID?.trim() || 'TEAMID.io.privatespace.ios';
 
   return {
     port,
@@ -41,6 +43,7 @@ export function loadConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
     vaultDefaultName,
     cookieSecure,
     corsOrigins,
+    appleAppId,
     ...overrides,
   };
 }

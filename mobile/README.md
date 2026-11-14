@@ -1,19 +1,24 @@
-# PrivateSpace Mobile (`Android` & `iOS`)
+# PrivateSpace Mobile (`iOS` & `Android` · React Native / Expo + Standalone `/ios`)
 
-`mobile/` 提供面向 **Android** 与 **iOS** 的多端增量同步客户端与 TypeScript SDK（[`PrivateSpaceMobileClient`](./src/syncClient.ts)），与服务端 `/api/v1/*` 协议及 Web 端共享核心加密辅助模块（`@shared/totp`、`@shared/passwordGenerator`、`@shared/types`）。
+`mobile/` 提供面向 **iOS** 与 **Android** 的全功能跨端加密同步客户端与 TypeScript SDK（[`PrivateSpaceMobileClient`](./src/syncClient.ts)），同时可直接运行于 Expo / React Native 移动容器以及自部署服务端 `/ios` 独立移动端入口（iPhone Safari 主屏幕 Web App / 桌面 iPhone 16 Pro 交互预览舱）。
 
-## 核心特性
+> 若需构建含系统级 `ASCredentialProviderViewController` 自动填充扩展与 `LocalAuthentication` / `CryptoKit` Keychain 集成的 **纯原生 Apple Swift / SwiftUI 工程**，请同时参阅仓库根目录下的 [`../ios/README.md`](../ios/README.md)。
 
-1. **原生 `Bearer` 设备会话认证**：登录时自动上报 `platform: 'android' | 'ios'` 与设备名称，获取独立 `pss_<sessionId>.<secret>` 令牌，可在任意端「数据加密与多端安全」面板中独立吊销。
-2. **单调游标增量同步（`since_seq`）**：持久化本地 `lastSyncSeq`，通过 `GET /api/v1/sync?since_seq=<cursor>` 原子拉取新增/修改的 **文本笔记、密码、图片、视频、相册** 与永久销毁墓碑（`deleted`）。
-3. **离线实时 TOTP 两步验证码**：复用零外部依赖的 RFC 6238 实现（`SHA-1` / `SHA-256`），无网环境下仍可每秒刷新 6/8 位动态口令。
-4. **蜂窝网络断点续传与原生流式播放**：
-   - 大体积 4K 视频与原图按 `512 KiB` 分片上传（`POST /uploads/init` → `PUT /uploads/:id/chunks/:index` → `POST /uploads/:id/complete`），网络中断后自动查询已接收分片继续上传；
-   - 生成携带临时认证凭据的 `/api/v1/media/:id/stream?token=...` 地址，直接对接 iOS `AVPlayer` 与 Android `Media3 ExoPlayer` 的 HTTP `206 Partial Content` 分块实时解密流。
+## 核心模块与架构
 
-## 类型检查与集成
+- **[`App.tsx`](./App.tsx)**：5 栏原生触感移动空间主界面（**密码库 · 相册 · 影院 · 笔记 · 安全**），支持首次管理员初始化向导、Face ID 隐私遮蔽快速锁、深浅双色 Mineral Pine 主题。
+- **[`src/syncClient.ts`](./src/syncClient.ts)**：
+  - `PrivateSpaceMobileClient`：完整封装 `/api/v1/*` 认证、管理员初始化、主密码轮换、设备会话吊销、单调游标增量同步（`since_seq`）、SSE 实时流订阅（`/api/v1/sync/stream`）、离线变更队列（`outbox`）重放、密文信封透视（`inspectCipher`）、四大核心数据空间全量 CRUD 与 `512 KiB` 分片断点续传。
+  - `EncryptedWebVaultPersistence`：基于 WebCrypto `AES-256-GCM`（随机 96-bit IV + 256-bit 设备密钥）加密持久化本机快照，杜绝明文 JSON 落入本地存储。
+- **[`src/components/IosModals.tsx`](./src/components/IosModals.tsx)**：
+  - 凭据详情抽屉（含每秒刷新的 RFC 6238 TOTP 圆环与自定义隐藏字段）、CSPRNG 随机口令/助记词生成器、Apple/Chrome/1Password/Bitwarden CSV 批量导入；
+  - 暗房级原图查看器（缩放、90° 旋转、镜像翻转）、HTTP `206 Partial Content` 视频流式播放舱（倍速 `0.75×`–`2×`、±10s 快进退）；
+  - Markdown + 交互式待办清单编辑器、SQLite / `PSENC001` 底层密文信封透视器。
+
+## 类型检查与运行验证
 
 ```bash
-# 在仓库根目录执行（已集成至 npm run typecheck）
-npx tsc -p mobile/tsconfig.json --noEmit
+# 在仓库根目录执行完整类型检查与单元测试
+npm run typecheck
+npm test
 ```

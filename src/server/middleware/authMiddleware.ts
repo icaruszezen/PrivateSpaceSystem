@@ -43,10 +43,16 @@ export function detectDeviceLabel(c: Context, explicitDeviceName?: string): {
   let platform: 'web' | 'ios' | 'android' | 'api' = 'web';
   let inferredDevice = 'Web Browser';
 
-  if (/iPhone|iPad|iPod/i.test(ua)) {
+  if (/PrivateSpace-?IOS/i.test(ua)) {
+    platform = 'ios';
+    inferredDevice = /iPad/i.test(ua) ? 'iPad · PrivateSpace iOS' : 'iPhone · PrivateSpace iOS';
+  } else if (/iPhone|iPad|iPod/i.test(ua)) {
     platform = 'ios';
     inferredDevice = /iPad/i.test(ua) ? 'iPad · Safari/Web' : 'iPhone · Safari/Web';
-  } else if (/Android/i.test(ua)) {
+  } else if (/CFNetwork\/.*Darwin\//i.test(ua)) {
+    platform = 'ios';
+    inferredDevice = 'Apple Device · PrivateSpace iOS';
+  } else if (/PrivateSpace-?ANDROID/i.test(ua) || /Android/i.test(ua)) {
     platform = 'android';
     inferredDevice = 'Android · Mobile';
   } else if (/Macintosh|Mac OS X/i.test(ua)) {

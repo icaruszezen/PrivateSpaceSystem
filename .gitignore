@@ -20,3 +20,14 @@ data/
 .DS_Store
 coverage/
 .vite/
+
+# iOS / Xcode / SwiftPM / Expo build artifacts
+ios/.build/
+ios/.swiftpm/
+ios/DerivedData/
+ios/*.xcodeproj/xcuserdata/
+ios/*.xcodeproj/project.xcworkspace/xcuserdata/
+ios/*.xcarchive
+ios/*.ipa
+mobile/.expo/
+mobile/dist/
