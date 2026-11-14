@@ -8,6 +8,7 @@ import {
 
 interface PasswordGeneratorModalProps {
   open: boolean;
+  stacked?: boolean;
   onClose: () => void;
   onUsePassword?: (pwd: string) => void;
   onNotify: (msg: string) => void;
@@ -15,6 +16,7 @@ interface PasswordGeneratorModalProps {
 
 export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
   open,
+  stacked = false,
   onClose,
   onUsePassword,
   onNotify,
@@ -36,7 +38,10 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        onClose();
+      }
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -87,7 +92,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
 
   return (
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop ${stacked ? 'is-stacked' : ''}`}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -132,18 +137,48 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
           </button>
         </div>
 
-        <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div className="modal-body" style={{ gap: 16 }}>
           <div className="pss-gen-preview-box">
-            <div className="pss-gen-output mono">{generated}</div>
+            <div className="pss-gen-output mono">
+              {[...generated].map((ch, idx) => {
+                if (/\d/.test(ch)) {
+                  return (
+                    <span key={idx} style={{ color: 'var(--accent)', fontWeight: 650 }}>
+                      {ch}
+                    </span>
+                  );
+                }
+                if (/[^a-zA-Z0-9]/.test(ch)) {
+                  return (
+                    <span key={idx} style={{ color: 'var(--amber)', fontWeight: 650 }}>
+                      {ch}
+                    </span>
+                  );
+                }
+                return <span key={idx}>{ch}</span>;
+              })}
+            </div>
+
+            <div className="strength-bars" style={{ marginBottom: 12 }}>
+              {[1, 2, 3, 4].map((idx) => (
+                <span
+                  key={idx}
+                  className={`strength-bar ${
+                    strength.score >= idx ? `level-${Math.max(1, strength.score)}` : ''
+                  }`}
+                />
+              ))}
+            </div>
+
             <div className="pss-gen-preview-footer">
               <span className={`pss-entropy-pill level-${strength.score}`}>
-                强度: {strength.label} · {strength.entropyBits} bits
+                强度：{strength.label} · {strength.entropyBits} bits
               </span>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  style={{ height: 32, padding: '0 10px' }}
+                  style={{ height: 32, padding: '0 10px', fontSize: '0.82rem' }}
                   onClick={() => setSeed((s) => s + 1)}
                 >
                   <RefreshCw size={13} />
@@ -151,8 +186,8 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                 </button>
                 <button
                   type="button"
-                  className="btn btn-primary"
-                  style={{ height: 32, padding: '0 12px' }}
+                  className={onUsePassword ? 'btn btn-secondary' : 'btn btn-primary'}
+                  style={{ height: 32, padding: '0 12px', fontSize: '0.82rem' }}
                   onClick={() => void handleCopy()}
                 >
                   {copied ? <Check size={13} /> : <Copy size={13} />}
@@ -162,7 +197,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   <button
                     type="button"
                     className="btn btn-primary"
-                    style={{ height: 32, padding: '0 12px' }}
+                    style={{ height: 32, padding: '0 12px', fontSize: '0.82rem' }}
                     onClick={() => {
                       onUsePassword(generated);
                       onClose();
@@ -178,7 +213,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
           {mode === 'random' ? (
             <>
               <div className="field-group">
-                <div className="field-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div className="field-label">
                   <span>密码长度</span>
                   <span className="mono" style={{ fontWeight: 600, color: 'var(--accent)' }}>
                     {length} 位
@@ -195,7 +230,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
               </div>
 
               <div className="pss-checkbox-grid">
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={uppercase}
@@ -203,7 +238,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   />
                   <span>大写字母 (A-Z)</span>
                 </label>
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={lowercase}
@@ -211,7 +246,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   />
                   <span>小写字母 (a-z)</span>
                 </label>
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={digits}
@@ -219,7 +254,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   />
                   <span>数字 (0-9)</span>
                 </label>
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={symbols}
@@ -227,7 +262,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   />
                   <span>特殊符号 (!@#$%)</span>
                 </label>
-                <label className="auth-checkbox-row" style={{ gridColumn: '1 / -1' }}>
+                <label className="pss-checkbox-item" style={{ gridColumn: '1 / -1' }}>
                   <input
                     type="checkbox"
                     checked={excludeAmbiguous}
@@ -240,7 +275,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
           ) : (
             <>
               <div className="field-group">
-                <div className="field-label" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div className="field-label">
                   <span>词组数量</span>
                   <span className="mono" style={{ fontWeight: 600, color: 'var(--accent)' }}>
                     {wordCount} 个词
@@ -257,7 +292,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
               </div>
 
               <div className="pss-checkbox-grid">
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={capitalize}
@@ -265,7 +300,7 @@ export const PasswordGeneratorModal: React.FC<PasswordGeneratorModalProps> = ({
                   />
                   <span>单词首字母大写</span>
                 </label>
-                <label className="auth-checkbox-row">
+                <label className="pss-checkbox-item">
                   <input
                     type="checkbox"
                     checked={includeNumber}
