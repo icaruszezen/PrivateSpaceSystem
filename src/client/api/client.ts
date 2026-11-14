@@ -34,11 +34,15 @@ import {
 import { probeMediaOnClient } from '@shared/mediaProbe';
 import type {
   ApiErrorResponse,
+  AppUpdateCheckResponse,
   AuthEnvelopeResponse,
   AuthParamsResponse,
   AuthSessionResponse,
   AuthStatusResponse,
   ChangePasswordRequest,
+  MobileUpdatePlatform,
+  ServerUpdateConfigResponse,
+  UpdateChannel,
   CipherEnvelopeInspection,
   CreateAlbumRequest,
   CreateEncryptedItemRequest,
@@ -1251,5 +1255,24 @@ export const api = {
       albums,
       deleted: raw.deleted,
     };
+  },
+
+  // ==================== 5. Mobile App Release & Auto-Update Status ====================
+  getUpdateConfig(): Promise<ServerUpdateConfigResponse> {
+    return requestJson('/api/v1/updates/config');
+  },
+
+  checkMobileUpdate(
+    platform: MobileUpdatePlatform,
+    channel: UpdateChannel = 'stable',
+    force = false,
+  ): Promise<AppUpdateCheckResponse> {
+    const qs = new URLSearchParams({
+      platform,
+      channel,
+      current_version: '0.4.0',
+      force: force ? '1' : '0',
+    });
+    return requestJson(`/api/v1/updates/check?${qs.toString()}`);
   },
 };

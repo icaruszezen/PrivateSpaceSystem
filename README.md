@@ -23,9 +23,10 @@
 - **完备的 Apple iOS 客户端体系（原生 SwiftUI + `/ios` 独立应用）**：
   - **纯原生 Apple Swift / SwiftUI 工程（[`ios/`](ios/README.md)，iOS 17+）**：基于 `CommonCrypto` + `CryptoKit` 原生实现与桌面/安卓端完全互通的零知识 E2EE v2 引擎、Keychain 硬件隔离托管 `DEK`、`LocalAuthentication` **Face ID / Touch ID** 解锁、`PrivateSpaceAutoFill` 系统密码自动填充扩展（配合 `/.well-known/apple-app-site-association`）以及基于 `AVAssetResourceLoaderDelegate`（`psenc-stream://`）的 **原生 `AVPlayer` HTTP `206` 边下边解密零落盘流式播放**。
   - **零编译即开即用的 `/ios` 独立移动端入口**：内置双引擎加密层（WebCrypto + Pure-TS Fallback），即使在局域网 HTTP 环境下也可在 iPhone Safari 全功能完成本地端到端加解密。
-- **Web / Android / iOS 实时盲同步 & CI 自动构建**：
+- **Web / Android / iOS 实时盲同步、GitHub 自动更新 & CI 自动发版**：
   - 统一单调递增密文游标协议（`GET /api/v1/sync?since_seq=...`）与 **SSE 实时游标广播**（`/api/v1/sync/stream`，仅广播序列号、不含任何密钥或明文）。
-  - GitHub Actions 在 `ubuntu-latest` 与 `macos-15` 上自动执行零知识密码学测试、容器烟雾测试、编译上传原生 **Android APK** 产物、验证原生 **iOS Swift XCTest & Xcode Simulator** 构建，并发布 `linux/amd64` 与 `linux/arm64` 多架构镜像至 `ghcr.io/icaruszezen/privatespacesystem`。
+  - **Android & iOS 客户端自动更新**：内置 SemVer 版本检测、服务端私有仓库代理网关（`/api/v1/updates/*`）与 GitHub Releases 直连双模式，支持 **Android 原生流式下载 + SHA-256 校验覆盖安装** 以及 **iOS 无线 OTA (`itms-services://`) / TestFlight / AltStore / PWA 热更新**。推送 `v*.*.*` 标签即可由 GitHub Actions 自动签名发布双端安装包与 `release-manifest.json`（配置说明见 [`docs/AUTO_UPDATE_GITHUB_CONFIG.md`](docs/AUTO_UPDATE_GITHUB_CONFIG.md)）。
+  - GitHub Actions 在 `ubuntu-latest` 与 `macos-15` 上自动执行零知识密码学测试、容器烟雾测试、编译上传原生 **Android APK** 产物、验证原生 **iOS Swift XCTest & Xcode** 构建，并发布 `linux/amd64` 与 `linux/arm64` 多架构镜像至 `ghcr.io/icaruszezen/privatespacesystem`。
 
 ---
 
@@ -57,10 +58,10 @@ docker compose up -d --build
 
 ### 初始化与多端接入
 
-1. **桌面网页端**：打开 `http://localhost:8080`，首次启动在浏览器本地生成 256 位随机 `DEK` 并设置主密码（不会向服务器发送明文密码）；在「安全中心 → 多端同步与设备」可一键复制 `privatespace://pair` 配对码。
-2. **Android 原生手机端（APK / `/mobile/`）**：从 GitHub Actions 构建产物或本地 `npm run android:apk` 安装 `app-debug.apk`，粘贴配对码输入主密码即可在手机端本地解封 `DEK` 同步数据；详见 [`mobile/README.md`](mobile/README.md)。
-3. **iPhone 免编译独立客户端（PWA）**：在 iPhone Safari 打开 `https://你的部署域名/ios`，点击分享 →「添加到主屏幕」即可全屏运行。
-4. **iOS 原生 SwiftUI 客户端与系统自动填充**：在 macOS 上进入 `ios/` 目录，执行 `xcodegen generate && open PrivateSpaceIOS.xcodeproj` 编译安装至真机；详见 [`ios/README.md`](ios/README.md)。
+1. **桌面网页端**：打开 `http://localhost:8080`，首次启动在浏览器本地生成 256 位随机 `DEK` 并设置主密码（不会向服务器发送明文密码）；在「安全中心 → 多端同步与设备」可一键复制 `privatespace://pair` 配对码并查看移动端最新发布版本。
+2. **Android 原生手机端（APK / `/mobile/`）**：从 GitHub Releases / Actions 构建产物或本地 `npm run android:apk` 安装 APK，粘贴配对码输入主密码即可同步数据，后续新版本支持应用内一键校验 SHA-256 自动升级；详见 [`mobile/README.md`](mobile/README.md)。
+3. **iPhone 免编译独立客户端（PWA）**：在 iPhone Safari 打开 `https://你的部署域名/ios`，点击分享 →「添加到主屏幕」即可全屏运行，并支持应用内版本检测与一键热更新。
+4. **iOS 原生 SwiftUI 客户端与系统自动填充**：在 macOS 上进入 `ios/` 目录，执行 `xcodegen generate && open PrivateSpaceIOS.xcodeproj` 编译安装至真机，支持 OTA / TestFlight / AltStore 自动更新检测；详见 [`ios/README.md`](ios/README.md)。
 
 ---
 
@@ -76,6 +77,9 @@ docker compose up -d --build
 | `COOKIE_SECURE` | `false` | 部署于 HTTPS 反向代理后建议设为 `true` |
 | `CORS_ORIGINS` | 空 | 允许跨域访问的客户端 Origin 列表（逗号分隔；默认已内置放行 Capacitor WebView 源） |
 | `APPLE_APP_ID` | `TEAMID.io.privatespace.ios` | Apple Developer Team ID + Bundle ID，用于生成 `/.well-known/apple-app-site-association` 支持 iOS 自动填充与通用链接 |
+| `GITHUB_REPO` | `icaruszezen/PrivateSpaceSystem` | Android / iOS 自动更新绑定的 GitHub 仓库（`owner/repo`） |
+| `GITHUB_TOKEN` | 空 | 可选 GitHub Fine-grained 只读 Token（用于私有仓库 Release 代理下载或提升 API 限额） |
+| `UPDATE_CHANNEL` | `stable` | 默认更新通道（`stable` 正式版 / `beta` 含预发布版）；完整仓库签名与 App 参数见 [`docs/AUTO_UPDATE_GITHUB_CONFIG.md`](docs/AUTO_UPDATE_GITHUB_CONFIG.md) |
 
 ---
 

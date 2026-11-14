@@ -41,7 +41,20 @@ import {
   type VaultPasswordAuditReport,
 } from '@shared/passwordGenerator';
 import { generateTotp, type TotpTokenSnapshot } from '@shared/totp';
+import {
+  cleanSemverString,
+  computeVersionCodeFromSemver,
+  CURRENT_APP_BUILD,
+  CURRENT_APP_VERSION,
+  DEFAULT_GITHUB_API_BASE,
+  DEFAULT_GITHUB_REPO,
+  normalizeGithubRepo,
+  parseSha256SumsText,
+  resolveUpdateFromGithubReleases,
+  type GithubReleaseApiItem,
+} from '@shared/appUpdate';
 import type {
+  AppUpdateCheckResponse,
   AuthEnvelopeResponse,
   AuthParamsResponse,
   AuthSessionResponse,
@@ -64,18 +77,24 @@ import type {
   MediaDecryptedPayload,
   MediaItem,
   MediaKind,
+  MobileUpdatePlatform,
+  MobileUpdatePreferences,
   NoteDecryptedPayload,
   NoteItem,
   PasswordCustomField,
   PasswordDecryptedPayload,
   PasswordHistoryEntry,
   PasswordItem,
+  ReleaseManifestDto,
+  ServerUpdateConfigResponse,
   SessionInfo,
   SetupRequest,
   SyncPullResponse,
+  UpdateChannel,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
+  UpdateSourceMode,
   VaultSecuritySummary,
   ZeroKnowledgeChangePasswordRequest,
 } from '@shared/types';
@@ -2535,5 +2554,203 @@ export class PrivateSpaceMobileClient {
     return this.buildUrl(
       `/api/v1/media/${encodeURIComponent(mediaId)}/thumbnail-blob?${params.toString()}`,
     );
+  }
+
+  // ==================== 6. Android & iOS Auto-Update Check (Server + Direct GitHub) ====================
+
+  async getServerUpdateConfig(): Promise<ServerUpdateConfigResponse> {
+    return this.requestJson<ServerUpdateConfigResponse>('/api/v1/updates/config', undefined, true);
+  }
+
+  async checkAppUpdate(options?: {
+    platform?: MobileUpdatePlatform;
+    currentVersion?: string;
+    currentBuild?: number;
+    channel?: UpdateChannel;
+    sourceMode?: UpdateSourceMode;
+    customGithubRepo?: string;
+    githubApiBaseUrl?: string;
+    force?: boolean;
+  }): Promise<AppUpdateCheckResponse> {
+    const targetPlatform: MobileUpdatePlatform =
+      options?.platform ?? (this.platform === 'ios' ? 'ios' : 'android');
+    const currentVersion = cleanSemverString(
+      options?.currentVersion || CURRENT_APP_VERSION,
+      CURRENT_APP_VERSION,
+    );
+    const currentBuild =
+      options?.currentBuild ?? computeVersionCodeFromSemver(currentVersion) ?? CURRENT_APP_BUILD;
+    const channel: UpdateChannel = options?.channel === 'beta' ? 'beta' : 'stable';
+    const sourceMode: UpdateSourceMode = options?.sourceMode === 'github' ? 'github' : 'server';
+
+    if (sourceMode === 'server') {
+      try {
+        const qs = new URLSearchParams({
+          platform: targetPlatform,
+          channel,
+          current_version: currentVersion,
+          current_build: String(currentBuild),
+          force: options?.force ? '1' : '0',
+        });
+        return await this.requestJson<AppUpdateCheckResponse>(
+          `/api/v1/updates/check?${qs.toString()}`,
+          undefined,
+          true,
+        );
+      } catch (serverErr) {
+        // Fallback to direct GitHub Releases check if custom repo is valid or default repo reachable
+        const fallbackRepo =
+          normalizeGithubRepo(options?.customGithubRepo) || DEFAULT_GITHUB_REPO;
+        try {
+          return await this.checkGithubReleasesDirect({
+            repository: fallbackRepo,
+            apiBaseUrl: options?.githubApiBaseUrl || DEFAULT_GITHUB_API_BASE,
+            platform: targetPlatform,
+            channel,
+            currentVersion,
+            currentBuild,
+          });
+        } catch {
+          throw serverErr;
+        }
+      }
+    }
+
+    const repo = normalizeGithubRepo(options?.customGithubRepo);
+    if (!repo) {
+      throw new MobileApiError(
+        'GitHub 仓库格式无效，请填写 owner/repo（例如 icaruszezen/PrivateSpaceSystem）',
+        400,
+        'INVALID_GITHUB_REPO',
+        false,
+      );
+    }
+
+    return this.checkGithubReleasesDirect({
+      repository: repo,
+      apiBaseUrl: options?.githubApiBaseUrl || DEFAULT_GITHUB_API_BASE,
+      platform: targetPlatform,
+      channel,
+      currentVersion,
+      currentBuild,
+    });
+  }
+
+  private async checkGithubReleasesDirect(params: {
+    repository: string;
+    apiBaseUrl: string;
+    platform: MobileUpdatePlatform;
+    channel: UpdateChannel;
+    currentVersion: string;
+    currentBuild: number;
+  }): Promise<AppUpdateCheckResponse> {
+    const cleanApi = params.apiBaseUrl.replace(/\/+$/, '');
+    const res = await this.fetchFn(
+      `${cleanApi}/repos/${params.repository}/releases?per_page=10`,
+      {
+        headers: {
+          Accept: 'application/vnd.github+json',
+        },
+      },
+    );
+
+    if (!res.ok) {
+      throw new MobileApiError(
+        `GitHub Releases 查询失败 (HTTP ${res.status})`,
+        res.status,
+        `GITHUB_HTTP_${res.status}`,
+        false,
+      );
+    }
+
+    const releases = (await res.json()) as GithubReleaseApiItem[];
+    const matching = (releases || [])
+      .filter((r) => !r.draft)
+      .filter((r) => (params.channel === 'beta' ? true : !r.prerelease));
+    const top = matching[0];
+
+    let manifestOverride: ReleaseManifestDto | null = null;
+    let sha256Map: Record<string, string> | undefined;
+
+    if (top?.assets) {
+      const manifestAsset = top.assets.find((a) => a.name === 'release-manifest.json');
+      if (manifestAsset?.browser_download_url) {
+        try {
+          const mRes = await this.fetchFn(manifestAsset.browser_download_url);
+          if (mRes.ok) {
+            manifestOverride = (await mRes.json()) as ReleaseManifestDto;
+          }
+        } catch {
+          // optional manifest asset
+        }
+      }
+      const sumsAsset = top.assets.find((a) => /^SHA256SUMS(\.txt)?$/i.test(a.name));
+      if (sumsAsset?.browser_download_url) {
+        try {
+          const sRes = await this.fetchFn(sumsAsset.browser_download_url);
+          if (sRes.ok) {
+            sha256Map = parseSha256SumsText(await sRes.text());
+          }
+        } catch {
+          // optional sums asset
+        }
+      }
+    }
+
+    return resolveUpdateFromGithubReleases(releases, {
+      repository: params.repository,
+      platform: params.platform,
+      channel: params.channel,
+      currentVersion: params.currentVersion,
+      currentBuild: params.currentBuild,
+      source: 'github-direct',
+      manifestOverride,
+      sha256Map,
+    });
+  }
+}
+
+export const DEFAULT_MOBILE_UPDATE_PREFERENCES: MobileUpdatePreferences = {
+  autoCheckOnLaunch: true,
+  sourceMode: 'server',
+  customGithubRepo: DEFAULT_GITHUB_REPO,
+  channel: 'stable',
+  skippedVersion: null,
+  lastCheckedAt: null,
+};
+
+export function loadMobileUpdatePreferences(storageKey = 'pss_mobile_update_prefs_v1'): MobileUpdatePreferences {
+  if (typeof localStorage === 'undefined') {
+    return { ...DEFAULT_MOBILE_UPDATE_PREFERENCES };
+  }
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return { ...DEFAULT_MOBILE_UPDATE_PREFERENCES };
+    const parsed = JSON.parse(raw) as Partial<MobileUpdatePreferences>;
+    return {
+      autoCheckOnLaunch: parsed.autoCheckOnLaunch !== false,
+      sourceMode: parsed.sourceMode === 'github' ? 'github' : 'server',
+      customGithubRepo:
+        normalizeGithubRepo(parsed.customGithubRepo) ||
+        parsed.customGithubRepo?.trim() ||
+        DEFAULT_GITHUB_REPO,
+      channel: parsed.channel === 'beta' ? 'beta' : 'stable',
+      skippedVersion: parsed.skippedVersion ?? null,
+      lastCheckedAt: parsed.lastCheckedAt ?? null,
+    };
+  } catch {
+    return { ...DEFAULT_MOBILE_UPDATE_PREFERENCES };
+  }
+}
+
+export function saveMobileUpdatePreferences(
+  prefs: MobileUpdatePreferences,
+  storageKey = 'pss_mobile_update_prefs_v1',
+): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(prefs));
+  } catch {
+    // ignore storage quota errors
   }
 }

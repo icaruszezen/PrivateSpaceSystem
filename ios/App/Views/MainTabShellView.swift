@@ -59,6 +59,7 @@ struct MainTabShellView: View {
             .tabItem {
                 Label("安全", systemImage: "checkmark.shield.fill")
             }
+            .badge(store.hasPendingVisibleUpdate ? "新" : nil)
             .tag(PrimaryVaultTab.security)
         }
         .sheet(
@@ -70,6 +71,9 @@ struct MainTabShellView: View {
             if let itemId = inspectedCipherItemId {
                 CipherInspectorSheet(itemId: itemId, apiClient: store.apiClient)
             }
+        }
+        .sheet(isPresented: $store.isShowingUpdateSheet) {
+            AppUpdatePromptSheet(store: store)
         }
     }
 }

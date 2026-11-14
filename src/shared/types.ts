@@ -612,3 +612,96 @@ export interface ApiErrorResponse {
     message: string;
   };
 }
+
+// ==================== 6. Mobile App Auto-Update & GitHub Release Distribution ====================
+
+export type UpdateChannel = 'stable' | 'beta';
+export type MobileUpdatePlatform = 'android' | 'ios';
+export type UpdateSourceMode = 'server' | 'github';
+
+export type IosInstallMethod =
+  | 'appstore'
+  | 'testflight'
+  | 'ota-itms'
+  | 'altstore'
+  | 'ipa-release'
+  | 'pwa-reload';
+
+export interface PlatformReleaseAsset {
+  platform: MobileUpdatePlatform;
+  version: string;
+  buildNumber: number;
+  minSupportedVersion?: string | null;
+  mandatory?: boolean;
+  fileName: string;
+  downloadUrl: string;
+  sha256?: string | null;
+  fileSize?: number | null;
+  signingMode?: 'release-signed' | 'debug-signed' | 'adhoc-ota' | 'unsigned-sideload';
+  iosInstallMethod?: IosInstallMethod;
+  otaManifestUrl?: string | null;
+  itmsServicesUrl?: string | null;
+  altStoreUrl?: string | null;
+  testFlightUrl?: string | null;
+  appStoreUrl?: string | null;
+}
+
+export interface ReleaseManifestDto {
+  schemaVersion: 1;
+  repository: string;
+  tagName: string;
+  version: string;
+  buildNumber: number;
+  prerelease: boolean;
+  publishedAt: string;
+  releaseNotes?: string;
+  htmlUrl?: string;
+  android?: PlatformReleaseAsset | null;
+  ios?: PlatformReleaseAsset | null;
+}
+
+export interface ServerUpdateConfigResponse {
+  githubRepo: string;
+  githubApiBaseUrl: string;
+  hasGithubTokenConfigured: boolean;
+  defaultChannel: UpdateChannel;
+  cacheTtlSeconds: number;
+  serverVersion: string;
+  androidApplicationId: string;
+  androidMinSupportedVersion: string | null;
+  iosBundleId: string;
+  iosMinSupportedVersion: string | null;
+  iosAppStoreId: string | null;
+  iosTestFlightUrl: string | null;
+  iosOtaManifestUrl: string | null;
+}
+
+export interface AppUpdateCheckResponse {
+  checkedAt: string;
+  source: 'server-github' | 'github-direct' | 'server-local-override';
+  repository: string;
+  channel: UpdateChannel;
+  platform: MobileUpdatePlatform;
+  currentVersion: string;
+  currentBuild: number;
+  latestVersion: string;
+  latestBuild: number;
+  hasUpdate: boolean;
+  mandatory: boolean;
+  prerelease: boolean;
+  releaseName: string;
+  releaseNotes: string;
+  publishedAt: string | null;
+  htmlUrl: string;
+  asset: PlatformReleaseAsset | null;
+}
+
+export interface MobileUpdatePreferences {
+  autoCheckOnLaunch: boolean;
+  sourceMode: UpdateSourceMode;
+  customGithubRepo: string;
+  channel: UpdateChannel;
+  skippedVersion: string | null;
+  lastCheckedAt: string | null;
+}
+

@@ -164,4 +164,85 @@ object PrivateSpaceCryptoHelper {
             null
         }
     }
+
+    /**
+     * Constant-time SHA-256 verification for downloaded APK update packages.
+     * If expectedSha256 is null/blank, returns true (optional checksum); if present, must be valid 64-hex and match.
+     */
+    fun verifyApkSha256(expectedSha256: String?, actualSha256: String): Boolean {
+        val cleanExpected = expectedSha256?.trim()?.lowercase().orEmpty()
+        if (cleanExpected.isEmpty()) return true
+        if (cleanExpected.length != 64 || actualSha256.length != 64) return false
+        if (!cleanExpected.all { it in '0'..'9' || it in 'a'..'f' }) return false
+        return MessageDigest.isEqual(
+            cleanExpected.toByteArray(StandardCharsets.US_ASCII),
+            actualSha256.trim().lowercase().toByteArray(StandardCharsets.US_ASCII),
+        )
+    }
+
+    fun sanitizeApkFileName(versionName: String?): String {
+        val cleaned = versionName
+            ?.trim()
+            ?.removePrefix("v")
+            ?.removePrefix("V")
+            ?.replace("..", "_")
+            ?.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            ?.take(32)
+            ?.takeIf { it.isNotEmpty() }
+            ?: "latest"
+        return "PrivateSpace-v$cleaned.apk"
+    }
+
+    /**
+     * Pure SemVer 2.0 comparator (1 if a > b, -1 if a < b, 0 if equal).
+     */
+    fun compareSemver(a: String?, b: String?): Int {
+        val pa = parseSemverParts(a)
+        val pb = parseSemverParts(b)
+        if (pa == null && pb == null) return 0
+        if (pa == null) return -1
+        if (pb == null) return 1
+
+        if (pa.first[0] != pb.first[0]) return if (pa.first[0] > pb.first[0]) 1 else -1
+        if (pa.first[1] != pb.first[1]) return if (pa.first[1] > pb.first[1]) 1 else -1
+        if (pa.first[2] != pb.first[2]) return if (pa.first[2] > pb.first[2]) 1 else -1
+
+        val preA = pa.second
+        val preB = pb.second
+        if (preA.isEmpty() && preB.isEmpty()) return 0
+        if (preA.isEmpty()) return 1
+        if (preB.isEmpty()) return -1
+
+        val maxLen = maxOf(preA.size, preB.size)
+        for (i in 0 until maxLen) {
+            val idA = preA.getOrNull(i) ?: return -1
+            val idB = preB.getOrNull(i) ?: return 1
+            if (idA == idB) continue
+            val numA = idA.toLongOrNull()
+            val numB = idB.toLongOrNull()
+            if (numA != null && numB != null) return if (numA > numB) 1 else -1
+            if (numA != null) return -1
+            if (numB != null) return 1
+            return if (idA > idB) 1 else -1
+        }
+        return 0
+    }
+
+    private fun parseSemverParts(raw: String?): Pair<IntArray, List<String>>? {
+        val trimmed = raw?.trim()?.removePrefix("v")?.removePrefix("V")?.substringBefore('+') ?: return null
+        if (trimmed.isEmpty()) return null
+        val core = trimmed.substringBefore('-')
+        val pre = if ('-' in trimmed) trimmed.substringAfter('-').split('.').filter { it.isNotEmpty() } else emptyList()
+        val nums = core.split('.')
+        if (nums.size < 2 || nums.size > 3) return null
+        val major = nums[0].toIntOrNull() ?: return null
+        val minor = nums[1].toIntOrNull() ?: return null
+        val patch = if (nums.size == 3) (nums[2].toIntOrNull() ?: return null) else 0
+        if (major < 0 || minor < 0 || patch < 0) return null
+        return IntArray(3).apply {
+            this[0] = major
+            this[1] = minor
+            this[2] = patch
+        } to pre
+    }
 }

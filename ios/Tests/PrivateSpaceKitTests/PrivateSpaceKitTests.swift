@@ -403,5 +403,120 @@ final class PrivateSpaceKitTests: XCTestCase {
         _ = try await secondClient.login(password: rotatedPassword)
         let fullDecryptedFromSecondDevice = try await secondClient.fetchFullMediaData(mediaId: media.id)
         XCTAssertEqual(fullDecryptedFromSecondDevice, syntheticVideo)
+
+        // 5. Verify live server `/api/v1/updates/config` & `/api/v1/updates/ios-manifest.plist` endpoints
+        let updateConfig = try await secondClient.getServerUpdateConfig()
+        XCTAssertFalse(updateConfig.githubRepo.isEmpty)
+        XCTAssertEqual(updateConfig.iosBundleId, "io.privatespace.ios")
+
+        let plistURL = try XCTUnwrap(URL(string: "\(serverURL)/api/v1/updates/ios-manifest.plist?ipa_url=https://example.com/PrivateSpace.ipa&version=0.5.0&build=500"))
+        let (plistBytes, plistResp) = try await URLSession.shared.data(from: plistURL)
+        XCTAssertEqual((plistResp as? HTTPURLResponse)?.statusCode, 200)
+        let plistXml = String(decoding: plistBytes, as: UTF8.self)
+        XCTAssertTrue(plistXml.contains("software-package"))
+        XCTAssertTrue(plistXml.contains("io.privatespace.ios"))
+    }
+
+    // MARK: - 6. SemVer 2.0 Precedence & GitHub Release Auto-Update Resolver Tests
+
+    func testSemverComparisonAndGithubAutoUpdateResolution() throws {
+        let v040 = try XCTUnwrap(SemverVersion(parsing: "v0.4.0"))
+        let v050Beta1 = try XCTUnwrap(SemverVersion(parsing: "0.5.0-beta.1"))
+        let v050Beta2 = try XCTUnwrap(SemverVersion(parsing: "v0.5.0-beta.2"))
+        let v050 = try XCTUnwrap(SemverVersion(parsing: "v0.5.0+20261114"))
+        let v100 = try XCTUnwrap(SemverVersion(parsing: "1.0.0"))
+
+        XCTAssertLessThan(v040, v050Beta1)
+        XCTAssertLessThan(v050Beta1, v050Beta2)
+        XCTAssertLessThan(v050Beta2, v050)
+        XCTAssertLessThan(v050, v100)
+        XCTAssertEqual(v050.normalized, "0.5.0")
+        XCTAssertEqual(v050.computedBuildNumber, 500)
+
+        XCTAssertEqual(
+            AppUpdateService.normalizeGithubRepo("https://github.com/icaruszezen/PrivateSpaceSystem.git/"),
+            "icaruszezen/PrivateSpaceSystem"
+        )
+        XCTAssertNil(AppUpdateService.normalizeGithubRepo("invalid-repo-only"))
+
+        let mockGithubJson = """
+        [
+          {
+            "tag_name": "v0.6.0-beta.1",
+            "name": "PrivateSpace 0.6.0 Beta 1",
+            "body": "Beta channel preview",
+            "draft": false,
+            "prerelease": true,
+            "published_at": "2026-11-14T08:00:00Z",
+            "html_url": "https://github.com/icaruszezen/PrivateSpaceSystem/releases/tag/v0.6.0-beta.1",
+            "assets": [
+              {
+                "name": "PrivateSpace-iOS-v0.6.0-beta.1.ipa",
+                "size": 18450000,
+                "browser_download_url": "https://github.com/icaruszezen/PrivateSpaceSystem/releases/download/v0.6.0-beta.1/PrivateSpace-iOS-v0.6.0-beta.1.ipa",
+                "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+              }
+            ]
+          },
+          {
+            "tag_name": "v0.5.0",
+            "name": "PrivateSpace v0.5.0",
+            "body": "- 新增 Android/iOS GitHub 自动更新",
+            "draft": false,
+            "prerelease": false,
+            "published_at": "2026-11-14T06:00:00Z",
+            "html_url": "https://github.com/icaruszezen/PrivateSpaceSystem/releases/tag/v0.5.0",
+            "assets": [
+              {
+                "name": "PrivateSpace-iOS-v0.5.0.ipa",
+                "size": 17200000,
+                "browser_download_url": "https://github.com/icaruszezen/PrivateSpaceSystem/releases/download/v0.5.0/PrivateSpace-iOS-v0.5.0.ipa"
+              },
+              {
+                "name": "ios-ota-manifest.plist",
+                "size": 1200,
+                "browser_download_url": "https://github.com/icaruszezen/PrivateSpaceSystem/releases/download/v0.5.0/ios-ota-manifest.plist"
+              }
+            ]
+          }
+        ]
+        """
+        let sums = AppUpdateService.parseSha256Sums(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789  PrivateSpace-iOS-v0.5.0.ipa\n"
+        )
+
+        let stableCheck = try AppUpdateService.resolveFromGithubReleasesData(
+            Data(mockGithubJson.utf8),
+            repository: "icaruszezen/PrivateSpaceSystem",
+            channel: .stable,
+            currentVersion: "0.4.0",
+            currentBuild: 400,
+            sha256Map: sums
+        )
+        XCTAssertTrue(stableCheck.hasUpdate)
+        XCTAssertEqual(stableCheck.latestVersion, "0.5.0")
+        XCTAssertEqual(stableCheck.asset?.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
+        XCTAssertEqual(stableCheck.asset?.iosInstallMethod, .otaItms)
+        XCTAssertEqual(
+            stableCheck.asset?.itmsServicesUrl?.hasPrefix("itms-services://?action=download-manifest&url="),
+            true
+        )
+
+        let betaCheck = try AppUpdateService.resolveFromGithubReleasesData(
+            Data(mockGithubJson.utf8),
+            repository: "icaruszezen/PrivateSpaceSystem",
+            channel: .beta,
+            currentVersion: "0.5.0",
+            currentBuild: 500
+        )
+        XCTAssertTrue(betaCheck.hasUpdate)
+        XCTAssertEqual(betaCheck.latestVersion, "0.6.0-beta.1")
+        XCTAssertTrue(betaCheck.prerelease)
+        XCTAssertEqual(betaCheck.asset?.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+
+        let actions = AppUpdateService.resolveInstallActions(from: stableCheck)
+        XCTAssertGreaterThanOrEqual(actions.count, 3)
+        XCTAssertEqual(actions.first?.url.scheme, "itms-services")
     }
 }
+

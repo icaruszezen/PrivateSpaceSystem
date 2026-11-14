@@ -61,3 +61,8 @@ npm run android:apk
 adb install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 生成的 APK 位于：`mobile/android/app/build/outputs/apk/debug/app-debug.apk`。
+
+### 3. Android 应用内自动更新与 Release 签名配置
+- 原生插件内置 `downloadAndInstallApk`、`openUnknownSourcesSettings` 与 `verifyApkSha256`，支持从自部署服务端 `/api/v1/updates/*` 或自定义 GitHub Releases（`owner/repo`）自动检测新版本、流式校验 SHA-256 并通过 `FileProvider` + `REQUEST_INSTALL_PACKAGES` 覆盖安装。
+- 若需通过 GitHub Actions 自动构建支持无缝覆盖升级的正式签名 APK，请参照 [`../docs/AUTO_UPDATE_GITHUB_CONFIG.md`](../docs/AUTO_UPDATE_GITHUB_CONFIG.md) 配置 `ANDROID_KEYSTORE_BASE64` 等仓库密钥。
+

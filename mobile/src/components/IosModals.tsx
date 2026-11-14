@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import type {
+  AppUpdateCheckResponse,
   CipherEnvelopeInspection,
   CreatePasswordRequest,
   MediaItem,
@@ -1872,3 +1873,421 @@ export function IosCipherInspectorModal(props: {
     </Modal>
   );
 }
+
+// ==================== 9. iOS Software Auto-Update & GitHub Release Sheet ====================
+
+function openExternalUrlSafely(url: string): void {
+  if (!url || typeof window === 'undefined') return;
+  if (
+    url.startsWith('itms-services://') ||
+    url.startsWith('itms-apps://') ||
+    url.startsWith('altstore://')
+  ) {
+    window.location.href = url;
+    return;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+export function IosAppUpdateModal(props: {
+  visible: boolean;
+  updateInfo: AppUpdateCheckResponse | null;
+  theme: IosThemeTokens;
+  onClose: () => void;
+  onSkipVersion: (version: string) => void;
+  onToast: (msg: string) => void;
+}): React.JSX.Element | null {
+  const [reloadingPwa, setReloadingPwa] = useState(false);
+
+  if (!props.visible || !props.updateInfo) return null;
+  const info = props.updateInfo;
+  const asset = info.asset;
+
+  const handleHotReloadPwa = async () => {
+    setReloadingPwa(true);
+    try {
+      if (typeof window !== 'undefined' && 'caches' in window) {
+        const keys = await window.caches.keys();
+        await Promise.all(keys.map((k) => window.caches.delete(k)));
+      }
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+      props.onToast(`正在热重载 /ios Web 应用资源至 v${info.latestVersion}...`);
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          const nextUrl = new URL(window.location.href);
+          nextUrl.searchParams.set('_v', info.latestVersion);
+          window.location.replace(nextUrl.toString());
+        }
+      }, 350);
+    } catch {
+      setReloadingPwa(false);
+      if (typeof window !== 'undefined') window.location.reload();
+    }
+  };
+
+  return (
+    <Modal
+      visible
+      transparent
+      animationType="slide"
+      onRequestClose={() => {
+        if (!info.mandatory) props.onClose();
+      }}
+    >
+      <View
+        style={{
+          maxHeight: '92%',
+          backgroundColor: props.theme.bgPage,
+          borderTopLeftRadius: 22,
+          borderTopRightRadius: 22,
+          overflow: 'hidden',
+          borderTopWidth: 1,
+          borderTopColor: props.theme.border,
+        }}
+        testID="ios-update-modal"
+      >
+        <SheetHeader
+          title={info.hasUpdate ? `发现新版本 v${info.latestVersion}` : `当前版本 v${info.currentVersion}`}
+          leftLabel={info.mandatory ? '必选更新' : '稍后'}
+          onLeft={() => {
+            if (!info.mandatory) props.onClose();
+          }}
+          theme={props.theme}
+        />
+
+        <ScrollView contentContainerStyle={{ padding: 16, gap: 12 }}>
+          {/* Version Upgrade Summary Card */}
+          <View
+            style={{
+              backgroundColor: props.theme.bgCard,
+              borderRadius: 15,
+              padding: 14,
+              gap: 8,
+              borderWidth: 1,
+              borderColor: info.mandatory ? props.theme.danger : props.theme.accentBorder,
+            }}
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: 6,
+              }}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <View
+                  style={{
+                    paddingHorizontal: 8,
+                    paddingVertical: 3,
+                    borderRadius: 999,
+                    backgroundColor: props.theme.accentSoft,
+                  }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: '800', color: props.theme.accent }}>
+                    {info.channel === 'beta' ? 'Beta 预览通道' : 'Stable 稳定通道'}
+                  </Text>
+                </View>
+                {info.mandatory && (
+                  <View
+                    style={{
+                      paddingHorizontal: 8,
+                      paddingVertical: 3,
+                      borderRadius: 999,
+                      backgroundColor: props.theme.dangerSoft,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '800', color: props.theme.danger }}>
+                      安全强制升级
+                    </Text>
+                  </View>
+                )}
+              </View>
+
+              <Text
+                style={{
+                  fontSize: 11,
+                  fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  color: props.theme.textSecondary,
+                }}
+              >
+                {info.repository}
+              </Text>
+            </View>
+
+            <Text style={{ fontSize: 16, fontWeight: '800', color: props.theme.textPrimary }}>
+              {info.releaseName || `PrivateSpace iOS v${info.latestVersion}`}
+            </Text>
+
+            <Text
+              style={{
+                fontSize: 12,
+                fontWeight: '700',
+                fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                color: props.theme.accent,
+              }}
+            >
+              v{info.currentVersion} (Build #{info.currentBuild}) → v{info.latestVersion} (Build #
+              {info.latestBuild})
+            </Text>
+
+            {info.publishedAt && (
+              <Text style={{ fontSize: 11, color: props.theme.textTertiary }}>
+                发布时间：{formatMobileShortTime(info.publishedAt)} · 来源：
+                {info.source === 'github-direct'
+                  ? 'GitHub Releases 直连'
+                  : info.source === 'server-local-override'
+                    ? '自托管节点离线分发源'
+                    : '服务端 GitHub Release 网关'}
+              </Text>
+            )}
+          </View>
+
+          {/* Release Notes */}
+          <View
+            style={{
+              backgroundColor: props.theme.bgCard,
+              borderRadius: 15,
+              padding: 14,
+              gap: 6,
+              borderWidth: 1,
+              borderColor: props.theme.border,
+            }}
+          >
+            <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textSecondary }}>
+              更新说明 (Release Notes)
+            </Text>
+            <Text
+              style={{
+                fontSize: 12,
+                color: props.theme.textPrimary,
+                lineHeight: 1.55,
+              }}
+              selectable
+            >
+              {info.releaseNotes?.trim() || '包含端到端加密同步稳定性优化与安全修复。'}
+            </Text>
+          </View>
+
+          {/* Asset & SHA-256 Verification */}
+          {asset && (
+            <View
+              style={{
+                backgroundColor: props.theme.bgCard,
+                borderRadius: 15,
+                padding: 14,
+                gap: 6,
+                borderWidth: 1,
+                borderColor: props.theme.border,
+              }}
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textSecondary }}>
+                  iOS 构建产物与 SHA-256 校验
+                </Text>
+                {asset.fileSize ? (
+                  <Text style={{ fontSize: 11, color: props.theme.textTertiary }}>
+                    {formatMobileBytes(asset.fileSize)}
+                  </Text>
+                ) : null}
+              </View>
+
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '600',
+                  fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  color: props.theme.textPrimary,
+                }}
+                selectable
+              >
+                {asset.fileName}
+              </Text>
+
+              {asset.sha256 && (
+                <View style={{ gap: 4 }}>
+                  <Text
+                    style={{
+                      fontSize: 10,
+                      fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                      color: props.theme.textSecondary,
+                      wordBreak: 'break-all',
+                      lineHeight: 1.4,
+                    }}
+                    selectable
+                  >
+                    SHA-256: {asset.sha256}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={async () => {
+                      if (asset.sha256) {
+                        await copyTextWithClipboard(asset.sha256);
+                        props.onToast('已复制安装包 SHA-256 校验指纹');
+                      }
+                    }}
+                    style={{ alignSelf: 'flex-start' }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: props.theme.accent }}>
+                      复制 SHA-256 指纹
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* Primary & Multi-Channel iOS Upgrade Actions */}
+          <View style={{ gap: 8 }}>
+            {asset?.itmsServicesUrl && (
+              <TouchableOpacity
+                onPress={() => openExternalUrlSafely(asset.itmsServicesUrl!)}
+                style={{
+                  backgroundColor: props.theme.accent,
+                  paddingVertical: 12,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                }}
+                testID="ios-ota-install-btn"
+              >
+                <Text style={{ fontSize: 13, fontWeight: '800', color: props.theme.textOnAccent }}>
+                  无线 OTA 安装原生 iOS 端 (itms-services)
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {(asset?.testFlightUrl || asset?.appStoreUrl) && (
+              <TouchableOpacity
+                onPress={() =>
+                  openExternalUrlSafely((asset.testFlightUrl || asset.appStoreUrl)!)
+                }
+                style={{
+                  backgroundColor: asset?.itmsServicesUrl
+                    ? props.theme.accentSoft
+                    : props.theme.accent,
+                  paddingVertical: 12,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                }}
+                testID="ios-store-update-btn"
+              >
+                <Text
+                  style={{
+                    fontSize: 13,
+                    fontWeight: '800',
+                    color: asset?.itmsServicesUrl
+                      ? props.theme.accent
+                      : props.theme.textOnAccent,
+                  }}
+                >
+                  {asset?.testFlightUrl ? '打开 TestFlight 更新版本' : '前往 App Store 更新'}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <TouchableOpacity
+              disabled={reloadingPwa}
+              onPress={() => void handleHotReloadPwa()}
+              style={{
+                backgroundColor:
+                  !asset?.itmsServicesUrl && !asset?.testFlightUrl && !asset?.appStoreUrl
+                    ? props.theme.accent
+                    : props.theme.accentSoft,
+                paddingVertical: 12,
+                borderRadius: 12,
+                alignItems: 'center',
+              }}
+              testID="ios-pwa-hot-reload-btn"
+            >
+              <Text
+                style={{
+                  fontSize: 13,
+                  fontWeight: '800',
+                  color:
+                    !asset?.itmsServicesUrl && !asset?.testFlightUrl && !asset?.appStoreUrl
+                      ? props.theme.textOnAccent
+                      : props.theme.accent,
+                }}
+              >
+                {reloadingPwa
+                  ? '正在刷新缓存...'
+                  : `立即热更新 /ios 主屏幕 Web 端至 v${info.latestVersion}`}
+              </Text>
+            </TouchableOpacity>
+
+            {asset?.altStoreUrl && (
+              <TouchableOpacity
+                onPress={() => openExternalUrlSafely(asset.altStoreUrl!)}
+                style={{
+                  backgroundColor: props.theme.bgCard,
+                  borderWidth: 1,
+                  borderColor: props.theme.border,
+                  paddingVertical: 11,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                }}
+                testID="ios-altstore-install-btn"
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textPrimary }}>
+                  通过 AltStore / SideStore 一键安装 IPA
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {asset?.downloadUrl && (
+              <TouchableOpacity
+                onPress={() => openExternalUrlSafely(asset.downloadUrl)}
+                style={{
+                  backgroundColor: props.theme.bgCard,
+                  borderWidth: 1,
+                  borderColor: props.theme.border,
+                  paddingVertical: 11,
+                  borderRadius: 12,
+                  alignItems: 'center',
+                }}
+                testID="ios-ipa-download-btn"
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textPrimary }}>
+                  下载原生 .ipa 安装包 ({asset.fileName})
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingTop: 4 }}>
+              {info.htmlUrl ? (
+                <TouchableOpacity onPress={() => openExternalUrlSafely(info.htmlUrl)}>
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: props.theme.accent }}>
+                    查看 GitHub Release 详情 ↗
+                  </Text>
+                </TouchableOpacity>
+              ) : (
+                <View />
+              )}
+
+              {!info.mandatory && info.hasUpdate && (
+                <TouchableOpacity
+                  onPress={() => props.onSkipVersion(info.latestVersion)}
+                  testID="ios-skip-version-btn"
+                >
+                  <Text style={{ fontSize: 12, fontWeight: '600', color: props.theme.textSecondary }}>
+                    忽略 v{info.latestVersion}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+

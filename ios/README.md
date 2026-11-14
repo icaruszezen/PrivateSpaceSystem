@@ -59,3 +59,9 @@ xcodebuild \
 1. 在 Xcode 的 `Signing & Capabilities` 中为 `PrivateSpaceIOS` 与 `PrivateSpaceAutoFill` 选择您的 Apple Developer Team，并确认 App Group（`group.io.privatespace.ios`）一致；
 2. 若需关联自部署域名自动匹配，可在服务端 `.env` 配置 `APPLE_APP_ID=<TeamID>.io.privatespace.ios`（服务端已自动暴露 `/.well-known/apple-app-site-association`）；
 3. 安装至 iPhone 后，前往 **系统设置 → 通用 → 自动填充与密码**，开启 **PrivateSpace**。
+
+### 4. iOS 软件自动更新与 GitHub Releases / OTA / TestFlight 配置
+
+- `PrivateSpaceKit` 内置 `SemverVersion` 与 `AppUpdateService`（`Sources/PrivateSpaceKit/Sync/AppUpdateService.swift`），在解锁或切回前台时自动检测自托管服务端 `/api/v1/updates/check?platform=ios` 或指定 GitHub 仓库 Releases，并在「安全与同步」页提供 `itms-services://` 无线 OTA、TestFlight、App Store、AltStore 及 `.ipa` 安装入口与 SHA-256 指纹校验。
+- 关于 Apple 证书（`.p12` / Provisioning Profile）、TestFlight API 密钥与服务端 OTA 清单参数的完整配置说明，请参阅 [`../docs/AUTO_UPDATE_GITHUB_CONFIG.md`](../docs/AUTO_UPDATE_GITHUB_CONFIG.md)。
+

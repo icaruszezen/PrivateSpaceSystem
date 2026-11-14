@@ -1425,6 +1425,174 @@ public struct AutoFillCredentialRecord: Codable, Sendable, Identifiable, Equatab
     }
 }
 
+// MARK: - 7. Mobile App Auto-Update & GitHub Release Distribution
+
+public enum UpdateChannel: String, Codable, Sendable, CaseIterable, Identifiable {
+    case stable
+    case beta
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .stable: return "Stable 正式稳定版"
+        case .beta: return "Beta 预览测试版"
+        }
+    }
+}
+
+public enum UpdateSourceMode: String, Codable, Sendable, CaseIterable, Identifiable {
+    case server
+    case github
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .server: return "跟随服务端网关"
+        case .github: return "直连 GitHub 仓库"
+        }
+    }
+}
+
+public enum IosInstallMethod: String, Codable, Sendable, Equatable {
+    case appstore = "appstore"
+    case testflight = "testflight"
+    case otaItms = "ota-itms"
+    case altstore = "altstore"
+    case ipaRelease = "ipa-release"
+    case pwaReload = "pwa-reload"
+}
+
+public struct PlatformReleaseAssetDTO: Codable, Sendable, Equatable {
+    public let platform: String
+    public let version: String
+    public let buildNumber: Int
+    public let minSupportedVersion: String?
+    public let mandatory: Bool?
+    public let fileName: String
+    public let downloadUrl: String
+    public let sha256: String?
+    public let fileSize: Int?
+    public let signingMode: String?
+    public let iosInstallMethod: IosInstallMethod?
+    public let otaManifestUrl: String?
+    public let itmsServicesUrl: String?
+    public let altStoreUrl: String?
+    public let testFlightUrl: String?
+    public let appStoreUrl: String?
+
+    public init(
+        platform: String = "ios",
+        version: String,
+        buildNumber: Int,
+        minSupportedVersion: String? = nil,
+        mandatory: Bool? = nil,
+        fileName: String,
+        downloadUrl: String,
+        sha256: String? = nil,
+        fileSize: Int? = nil,
+        signingMode: String? = nil,
+        iosInstallMethod: IosInstallMethod? = nil,
+        otaManifestUrl: String? = nil,
+        itmsServicesUrl: String? = nil,
+        altStoreUrl: String? = nil,
+        testFlightUrl: String? = nil,
+        appStoreUrl: String? = nil
+    ) {
+        self.platform = platform
+        self.version = version
+        self.buildNumber = buildNumber
+        self.minSupportedVersion = minSupportedVersion
+        self.mandatory = mandatory
+        self.fileName = fileName
+        self.downloadUrl = downloadUrl
+        self.sha256 = sha256
+        self.fileSize = fileSize
+        self.signingMode = signingMode
+        self.iosInstallMethod = iosInstallMethod
+        self.otaManifestUrl = otaManifestUrl
+        self.itmsServicesUrl = itmsServicesUrl
+        self.altStoreUrl = altStoreUrl
+        self.testFlightUrl = testFlightUrl
+        self.appStoreUrl = appStoreUrl
+    }
+}
+
+public struct ServerUpdateConfigResponseDTO: Codable, Sendable, Equatable {
+    public let githubRepo: String
+    public let githubApiBaseUrl: String
+    public let hasGithubTokenConfigured: Bool
+    public let defaultChannel: UpdateChannel
+    public let cacheTtlSeconds: Int
+    public let serverVersion: String
+    public let androidApplicationId: String
+    public let androidMinSupportedVersion: String?
+    public let iosBundleId: String
+    public let iosMinSupportedVersion: String?
+    public let iosAppStoreId: String?
+    public let iosTestFlightUrl: String?
+    public let iosOtaManifestUrl: String?
+}
+
+public struct AppUpdateCheckResponseDTO: Codable, Sendable, Equatable {
+    public let checkedAt: String
+    public let source: String
+    public let repository: String
+    public let channel: UpdateChannel
+    public let platform: String
+    public let currentVersion: String
+    public let currentBuild: Int
+    public let latestVersion: String
+    public let latestBuild: Int
+    public let hasUpdate: Bool
+    public let mandatory: Bool
+    public let prerelease: Bool
+    public let releaseName: String
+    public let releaseNotes: String
+    public let publishedAt: String?
+    public let htmlUrl: String
+    public let asset: PlatformReleaseAssetDTO?
+
+    public init(
+        checkedAt: String,
+        source: String,
+        repository: String,
+        channel: UpdateChannel,
+        platform: String = "ios",
+        currentVersion: String,
+        currentBuild: Int,
+        latestVersion: String,
+        latestBuild: Int,
+        hasUpdate: Bool,
+        mandatory: Bool = false,
+        prerelease: Bool = false,
+        releaseName: String,
+        releaseNotes: String,
+        publishedAt: String? = nil,
+        htmlUrl: String,
+        asset: PlatformReleaseAssetDTO? = nil
+    ) {
+        self.checkedAt = checkedAt
+        self.source = source
+        self.repository = repository
+        self.channel = channel
+        self.platform = platform
+        self.currentVersion = currentVersion
+        self.currentBuild = currentBuild
+        self.latestVersion = latestVersion
+        self.latestBuild = latestBuild
+        self.hasUpdate = hasUpdate
+        self.mandatory = mandatory
+        self.prerelease = prerelease
+        self.releaseName = releaseName
+        self.releaseNotes = releaseNotes
+        self.publishedAt = publishedAt
+        self.htmlUrl = htmlUrl
+        self.asset = asset
+    }
+}
+
 // MARK: - API Error Envelope
 
 public struct ApiErrorBody: Codable, Sendable {

@@ -98,4 +98,27 @@ class PrivateSpaceCryptoHelperTest {
         assertNull(PrivateSpaceCryptoHelper.parsePairingDeepLink("https://example.com"))
         assertNull(PrivateSpaceCryptoHelper.parsePairingDeepLink("privatespace://pair?server=ftp://bad"))
     }
+
+    @Test
+    fun apkUpdateHelpersVerifySha256AndCompareSemverAccurately() {
+        val sampleDigest = PrivateSpaceCryptoHelper.sha256Hex("apk-binary-payload-v0.5.0")
+        assertTrue(PrivateSpaceCryptoHelper.verifyApkSha256(null, sampleDigest))
+        assertTrue(PrivateSpaceCryptoHelper.verifyApkSha256(sampleDigest.uppercase(), sampleDigest))
+        assertFalse(PrivateSpaceCryptoHelper.verifyApkSha256("0".repeat(64), sampleDigest))
+        assertFalse(PrivateSpaceCryptoHelper.verifyApkSha256("not-a-sha256", sampleDigest))
+
+        assertEquals(1, PrivateSpaceCryptoHelper.compareSemver("v0.5.0", "0.4.0"))
+        assertEquals(0, PrivateSpaceCryptoHelper.compareSemver("v0.4.0", "0.4.0"))
+        assertEquals(1, PrivateSpaceCryptoHelper.compareSemver("0.5.0", "0.5.0-beta.2"))
+        assertEquals(-1, PrivateSpaceCryptoHelper.compareSemver("0.5.0-beta.1", "0.5.0-beta.2"))
+
+        assertEquals(
+            "PrivateSpace-v0.5.0-beta.1.apk",
+            PrivateSpaceCryptoHelper.sanitizeApkFileName("v0.5.0-beta.1"),
+        )
+        assertEquals(
+            "PrivateSpace-v0.5.0___evil.apk",
+            PrivateSpaceCryptoHelper.sanitizeApkFileName("0.5.0/../evil"),
+        )
+    }
 }

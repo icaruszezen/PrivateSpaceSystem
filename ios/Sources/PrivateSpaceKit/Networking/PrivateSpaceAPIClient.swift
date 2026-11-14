@@ -1223,4 +1223,46 @@ public actor PrivateSpaceAPIClient {
             }
         }
     }
+
+    // MARK: - 7. Software Version & GitHub Release Auto-Update
+
+    public func getServerUpdateConfig() async throws -> ServerUpdateConfigResponseDTO {
+        try await performJSON(path: "/api/v1/updates/config")
+    }
+
+    public func checkAppUpdate(
+        channel: UpdateChannel = .stable,
+        currentVersion: String,
+        currentBuild: Int,
+        force: Bool = false
+    ) async throws -> AppUpdateCheckResponseDTO {
+        var comps = URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "platform", value: "ios"),
+            URLQueryItem(name: "channel", value: channel.rawValue),
+            URLQueryItem(name: "current_version", value: currentVersion),
+            URLQueryItem(name: "current_build", value: String(currentBuild)),
+            URLQueryItem(name: "force", value: force ? "1" : "0"),
+        ]
+        let query = comps.percentEncodedQuery ?? "platform=ios"
+        return try await performJSON(path: "/api/v1/updates/check?\(query)")
+    }
+
+    public func checkGithubReleasesDirect(
+        repository: String,
+        channel: UpdateChannel = .stable,
+        currentVersion: String,
+        currentBuild: Int,
+        apiBaseURL: String = AppUpdateService.defaultGithubApiBase
+    ) async throws -> AppUpdateCheckResponseDTO {
+        try await AppUpdateService.fetchFromGithubReleases(
+            repository: repository,
+            channel: channel,
+            currentVersion: currentVersion,
+            currentBuild: currentBuild,
+            apiBaseURL: apiBaseURL,
+            urlSession: session
+        )
+    }
 }
+
