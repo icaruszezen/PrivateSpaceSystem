@@ -629,7 +629,9 @@ export const App: React.FC = () => {
   return (
     <div
       className={`workspace-shell ${isGalleryMode ? 'is-gallery-mode' : ''} ${
-        mobileEditorOpen && activeSection === 'notes' ? 'mobile-editor-open' : ''
+        mobileEditorOpen && (activeSection === 'notes' || activeSection === 'passwords')
+          ? 'mobile-editor-open'
+          : ''
       }`}
     >
       <Sidebar
@@ -699,6 +701,8 @@ export const App: React.FC = () => {
             })
           }
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
+          onOpenMobileDetail={() => setMobileEditorOpen(true)}
+          onBackToListMobile={() => setMobileEditorOpen(false)}
           onNotify={notify}
         />
       )}
@@ -795,7 +799,10 @@ export const App: React.FC = () => {
           setSelectedNoteId(id);
           setMobileEditorOpen(true);
         }}
-        onSelectPassword={(id) => setSelectedPasswordId(id)}
+        onSelectPassword={(id) => {
+          setSelectedPasswordId(id);
+          setMobileEditorOpen(true);
+        }}
         onCreateNote={() => void handleCreateNote()}
         onToggleTheme={toggleTheme}
         onOpenSecurity={() =>
