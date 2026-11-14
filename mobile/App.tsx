@@ -12,22 +12,35 @@ import {
   View,
 } from 'react-native';
 import type {
+  AppUpdateCheckResponse,
   CreatePasswordRequest,
   MediaAlbum,
   MediaItem,
+  MobileUpdatePreferences,
   PasswordCategory,
   PasswordItem,
+  ServerUpdateConfigResponse,
   SessionInfo,
+  UpdateChannel,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
+  UpdateSourceMode,
   VaultSecuritySummary,
 } from '@shared/types';
 import {
+  CURRENT_APP_BUILD,
+  CURRENT_APP_VERSION,
+  DEFAULT_GITHUB_REPO,
+  normalizeGithubRepo,
+} from '@shared/appUpdate';
+import {
   EncryptedWebVaultPersistence,
   InMemoryVaultPersistence,
+  loadMobileUpdatePreferences,
   parseMobilePasswordCsv,
   PrivateSpaceMobileClient,
+  saveMobileUpdatePreferences,
   type MobileVaultSnapshot,
 } from './src/syncClient';
 import {
@@ -46,6 +59,7 @@ import {
   pickLocalMediaFiles,
 } from './src/iosNativeBridge';
 import {
+  IosAppUpdateModal,
   IosCipherInspectorModal,
   IosCsvImportModal,
   IosDarkroomPhotoModal,
@@ -355,6 +369,18 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [inspectItemId, setInspectItemId] = useState<string | null>(null);
 
+  // iOS Software Version & GitHub Auto-Update states
+  const [updatePrefs, setUpdatePrefs] = useState<MobileUpdatePreferences>(() =>
+    loadMobileUpdatePreferences('pss_ios_update_prefs_v1'),
+  );
+  const [repoInput, setRepoInput] = useState<string>(
+    () => loadMobileUpdatePreferences('pss_ios_update_prefs_v1').customGithubRepo,
+  );
+  const [serverUpdateCfg, setServerUpdateCfg] = useState<ServerUpdateConfigResponse | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateCheckResponse | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState<boolean>(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState<boolean>(false);
+
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -381,6 +407,91 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
       }),
     [serverUrl, persistence, props.deviceName],
   );
+
+  const patchUpdatePrefs = useCallback(
+    (patch: Partial<MobileUpdatePreferences>) => {
+      setUpdatePrefs((prev) => {
+        const next: MobileUpdatePreferences = { ...prev, ...patch };
+        saveMobileUpdatePreferences(next, 'pss_ios_update_prefs_v1');
+        return next;
+      });
+    },
+    [],
+  );
+
+  const runIosUpdateCheck = useCallback(
+    async (opts?: {
+      manual?: boolean;
+      overridePrefs?: Partial<MobileUpdatePreferences>;
+    }) => {
+      const manual = Boolean(opts?.manual);
+      const effective: MobileUpdatePreferences = {
+        ...updatePrefs,
+        ...(opts?.overridePrefs ?? {}),
+      };
+      setCheckingUpdate(true);
+      try {
+        const [cfgRes, checkRes] = await Promise.allSettled([
+          client.getServerUpdateConfig(),
+          client.checkAppUpdate({
+            platform: 'ios',
+            currentVersion: CURRENT_APP_VERSION,
+            currentBuild: CURRENT_APP_BUILD,
+            channel: effective.channel,
+            sourceMode: effective.sourceMode,
+            customGithubRepo: effective.customGithubRepo,
+            force: manual,
+          }),
+        ]);
+        if (cfgRes.status === 'fulfilled') {
+          setServerUpdateCfg(cfgRes.value);
+        }
+        if (checkRes.status === 'rejected') {
+          throw checkRes.reason;
+        }
+        const info = checkRes.value;
+        setUpdateInfo(info);
+        patchUpdatePrefs({ lastCheckedAt: info.checkedAt });
+
+        if (info.hasUpdate) {
+          if (manual || info.mandatory) {
+            setUpdateModalOpen(true);
+          }
+        } else if (manual) {
+          showToast(`当前已是最新版本 v${info.currentVersion}`);
+        }
+      } catch (err) {
+        if (manual) {
+          showToast(err instanceof Error ? err.message : '检查 iOS 版本更新失败');
+        }
+      } finally {
+        setCheckingUpdate(false);
+      }
+    },
+    [client, updatePrefs, patchUpdatePrefs, showToast],
+  );
+
+  // Automatic version check on unlock & foreground resume
+  useEffect(() => {
+    if (!unlocked || !updatePrefs.autoCheckOnLaunch) return;
+    void runIosUpdateCheck({ manual: false });
+
+    if (typeof document === 'undefined') return;
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && updatePrefs.autoCheckOnLaunch) {
+        void runIosUpdateCheck({ manual: false });
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [
+    unlocked,
+    updatePrefs.autoCheckOnLaunch,
+    updatePrefs.channel,
+    updatePrefs.sourceMode,
+    updatePrefs.customGithubRepo,
+    runIosUpdateCheck,
+  ]);
 
   // 1-second ticker for RFC 6238 live TOTP rings
   useEffect(() => {
@@ -1292,6 +1403,55 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
           </TouchableOpacity>
         </View>
       </View>
+
+      {/* Actionable Software Update Banner */}
+      {updateInfo?.hasUpdate &&
+        (updateInfo.mandatory || updateInfo.latestVersion !== updatePrefs.skippedVersion) && (
+          <TouchableOpacity
+            onPress={() => setUpdateModalOpen(true)}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              paddingHorizontal: 14,
+              paddingVertical: 9,
+              backgroundColor: updateInfo.mandatory ? theme.dangerSoft : theme.accentSoft,
+              borderBottomWidth: 1,
+              borderBottomColor: updateInfo.mandatory ? theme.danger : theme.accentBorder,
+              gap: 8,
+            }}
+            testID="ios-update-banner"
+          >
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontWeight: '800',
+                  color: updateInfo.mandatory ? theme.danger : theme.accent,
+                }}
+                numberOfLines={1}
+              >
+                {updateInfo.mandatory ? '必选安全更新' : '发现 iOS 新版本'} v{updateInfo.latestVersion}{' '}
+                ({updateInfo.channel === 'beta' ? 'Beta' : 'Stable'})
+              </Text>
+              <Text style={{ fontSize: 11, color: theme.textSecondary }} numberOfLines={1}>
+                当前 v{updateInfo.currentVersion} · 支持 OTA 无线安装 / TestFlight / PWA 热更新
+              </Text>
+            </View>
+            <View
+              style={{
+                paddingHorizontal: 10,
+                paddingVertical: 5,
+                borderRadius: 999,
+                backgroundColor: updateInfo.mandatory ? theme.danger : theme.accent,
+              }}
+            >
+              <Text style={{ fontSize: 11, fontWeight: '800', color: theme.textOnAccent }}>
+                立即更新
+              </Text>
+            </View>
+          </TouchableOpacity>
+        )}
 
       {/* Chunked Upload Progress Banner */}
       {uploadProgress && (
@@ -2553,6 +2713,258 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
               </TouchableOpacity>
             </View>
 
+            {/* Software Version & GitHub Release Auto-Update Card */}
+            <View
+              style={{
+                backgroundColor: theme.bgCard,
+                borderRadius: 16,
+                padding: 15,
+                gap: 11,
+                borderWidth: 1,
+                borderColor: updateInfo?.hasUpdate ? theme.accentBorder : theme.border,
+              }}
+              testID="ios-update-settings-card"
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 14, fontWeight: '800', color: theme.textPrimary }}>
+                    软件版本与 GitHub 自动更新
+                  </Text>
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                      color: theme.textSecondary,
+                    }}
+                  >
+                    当前版本 v{CURRENT_APP_VERSION} (Build #{CURRENT_APP_BUILD})
+                    {updateInfo?.hasUpdate ? ` · 可升级 v${updateInfo.latestVersion}` : ' · 已是最新'}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  disabled={checkingUpdate}
+                  onPress={() =>
+                    void runIosUpdateCheck({
+                      manual: true,
+                      overridePrefs: { skippedVersion: null },
+                    })
+                  }
+                  style={{
+                    paddingHorizontal: 11,
+                    paddingVertical: 7,
+                    borderRadius: 999,
+                    backgroundColor: updateInfo?.hasUpdate ? theme.accent : theme.accentSoft,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 5,
+                  }}
+                  testID="ios-check-update-btn"
+                >
+                  {checkingUpdate ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={updateInfo?.hasUpdate ? theme.textOnAccent : theme.accent}
+                    />
+                  ) : null}
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      fontWeight: '800',
+                      color: updateInfo?.hasUpdate ? theme.textOnAccent : theme.accent,
+                    }}
+                  >
+                    {checkingUpdate
+                      ? '检查中...'
+                      : updateInfo?.hasUpdate
+                        ? `升级 v${updateInfo.latestVersion}`
+                        : '检查更新'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Auto-check switch */}
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: theme.textPrimary }}>
+                    启动与切回前台时自动检测新版本
+                  </Text>
+                  <Text style={{ fontSize: 11, color: theme.textSecondary }}>
+                    自动轮询 GitHub Releases 标签与 SHA-256 清单
+                  </Text>
+                </View>
+                <Switch
+                  value={updatePrefs.autoCheckOnLaunch}
+                  onValueChange={(val) => patchUpdatePrefs({ autoCheckOnLaunch: val })}
+                />
+              </View>
+
+              {/* Channel selector */}
+              <View style={{ gap: 5 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
+                  更新通道 (Release Channel)
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  {(
+                    [
+                      ['stable', 'Stable 正式稳定版'],
+                      ['beta', 'Beta 预览测试版'],
+                    ] as Array<[UpdateChannel, string]>
+                  ).map(([ch, label]) => {
+                    const selected = updatePrefs.channel === ch;
+                    return (
+                      <TouchableOpacity
+                        key={ch}
+                        onPress={() => {
+                          patchUpdatePrefs({ channel: ch, skippedVersion: null });
+                          void runIosUpdateCheck({
+                            manual: false,
+                            overridePrefs: { channel: ch, skippedVersion: null },
+                          });
+                        }}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 7,
+                          borderRadius: 9,
+                          alignItems: 'center',
+                          backgroundColor: selected ? theme.accent : theme.bgSubtle,
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: selected ? theme.textOnAccent : theme.textSecondary,
+                          }}
+                        >
+                          {label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Update source mode */}
+              <View style={{ gap: 6 }}>
+                <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
+                  GitHub 仓库分发源模式
+                </Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  {(
+                    [
+                      ['server', '跟随服务端网关 (推荐)'],
+                      ['github', '直连 GitHub 仓库'],
+                    ] as Array<[UpdateSourceMode, string]>
+                  ).map(([mode, label]) => {
+                    const selected = updatePrefs.sourceMode === mode;
+                    return (
+                      <TouchableOpacity
+                        key={mode}
+                        onPress={() => {
+                          patchUpdatePrefs({ sourceMode: mode, skippedVersion: null });
+                        }}
+                        style={{
+                          flex: 1,
+                          paddingVertical: 7,
+                          borderRadius: 9,
+                          alignItems: 'center',
+                          borderWidth: 1,
+                          borderColor: selected ? theme.accent : theme.border,
+                          backgroundColor: selected ? theme.accentSoft : 'transparent',
+                        }}
+                      >
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: '700',
+                            color: selected ? theme.accent : theme.textSecondary,
+                          }}
+                        >
+                          {label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+
+                {updatePrefs.sourceMode === 'github' ? (
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 2 }}>
+                    <TextInput
+                      value={repoInput}
+                      onChangeText={setRepoInput}
+                      autoCapitalize="none"
+                      placeholder={DEFAULT_GITHUB_REPO}
+                      style={{
+                        flex: 1,
+                        backgroundColor: theme.bgInput,
+                        borderWidth: 1,
+                        borderColor: theme.border,
+                        borderRadius: 9,
+                        paddingHorizontal: 10,
+                        paddingVertical: 7,
+                        fontSize: 12,
+                        fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                        color: theme.textPrimary,
+                      }}
+                      testID="ios-github-repo-input"
+                    />
+                    <TouchableOpacity
+                      onPress={() => {
+                        const normalized = normalizeGithubRepo(repoInput);
+                        if (!normalized) {
+                          showToast('请输入合法的 owner/repo，例如 icaruszezen/PrivateSpaceSystem');
+                          return;
+                        }
+                        setRepoInput(normalized);
+                        patchUpdatePrefs({ customGithubRepo: normalized, skippedVersion: null });
+                        showToast(`已绑定 GitHub 仓库 ${normalized}`);
+                        void runIosUpdateCheck({
+                          manual: true,
+                          overridePrefs: { customGithubRepo: normalized, skippedVersion: null },
+                        });
+                      }}
+                      style={{
+                        backgroundColor: theme.accent,
+                        paddingHorizontal: 12,
+                        justifyContent: 'center',
+                        borderRadius: 9,
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textOnAccent }}>
+                        保存并检测
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                      color: theme.textSecondary,
+                      lineHeight: 1.45,
+                    }}
+                  >
+                    服务端绑定仓库：{serverUpdateCfg?.githubRepo ?? updateInfo?.repository ?? DEFAULT_GITHUB_REPO}
+                    {serverUpdateCfg?.hasGithubTokenConfigured ? ' · 已启用私有仓库 Token 代理' : ''}
+                    {'\n'}OTA Manifest：{serverUrl.replace(/\/+$/, '')}/api/v1/updates/ios-manifest.plist
+                  </Text>
+                )}
+              </View>
+            </View>
+
             {/* iOS System Security & AutoFill Integration */}
             <View
               style={{
@@ -2971,6 +3383,19 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         client={client}
         theme={theme}
         onClose={() => setInspectItemId(null)}
+      />
+
+      <IosAppUpdateModal
+        visible={updateModalOpen}
+        updateInfo={updateInfo}
+        theme={theme}
+        onClose={() => setUpdateModalOpen(false)}
+        onSkipVersion={(ver) => {
+          patchUpdatePrefs({ skippedVersion: ver });
+          setUpdateModalOpen(false);
+          showToast(`已忽略 v${ver} 更新提示`);
+        }}
+        onToast={showToast}
       />
     </SafeAreaView>
   );

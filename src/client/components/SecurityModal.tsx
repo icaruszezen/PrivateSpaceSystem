@@ -1,7 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { Copy, KeyRound, Laptop, ShieldCheck, Smartphone, Trash2, X } from 'lucide-react';
+import {
+  Copy,
+  Download,
+  KeyRound,
+  Laptop,
+  RefreshCw,
+  ShieldCheck,
+  Smartphone,
+  Trash2,
+  X,
+} from 'lucide-react';
 import type {
+  AppUpdateCheckResponse,
   CipherEnvelopeInspection,
+  ServerUpdateConfigResponse,
   SessionInfo,
   VaultSecuritySummary,
 } from '@shared/types';
@@ -37,6 +49,10 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   const [summary, setSummary] = useState<VaultSecuritySummary | null>(null);
   const [envelope, setEnvelope] = useState<CipherEnvelopeInspection | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [updateCfg, setUpdateCfg] = useState<ServerUpdateConfigResponse | null>(null);
+  const [androidUpdate, setAndroidUpdate] = useState<AppUpdateCheckResponse | null>(null);
+  const [iosUpdate, setIosUpdate] = useState<AppUpdateCheckResponse | null>(null);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [loading, setLoading] = useState(false);
 
   // Vault name edit
@@ -68,13 +84,19 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
 
     async function load() {
       try {
-        const [sec, sess] = await Promise.all([
+        const [sec, sess, uCfg, uAndroid, uIos] = await Promise.all([
           api.getSecuritySummary(),
           api.listSessions(),
+          api.getUpdateConfig().catch(() => null),
+          api.checkMobileUpdate('android').catch(() => null),
+          api.checkMobileUpdate('ios').catch(() => null),
         ]);
         if (cancelled) return;
         setSummary(sec);
         setSessions(sess.sessions);
+        setUpdateCfg(uCfg);
+        setAndroidUpdate(uAndroid);
+        setIosUpdate(uIos);
 
         if (inspectItemId) {
           const envRes = await api.inspectItemCipher(inspectItemId).catch(() => null);
@@ -413,6 +435,162 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                   </button>
                 </div>
               </div>
+
+              {updateCfg && (
+                <div
+                  className="pss-endpoint-box"
+                  style={{ marginTop: 10, flexDirection: 'column', alignItems: 'stretch', gap: 10 }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 8,
+                      flexWrap: 'wrap',
+                    }}
+                  >
+                    <div>
+                      <div className="pss-field-caption">
+                        Android / iOS 客户端自动更新分发源 (GitHub Releases)
+                      </div>
+                      <div className="mono" style={{ fontSize: '0.84rem', fontWeight: 600 }}>
+                        {updateCfg.githubRepo} · 通道 {updateCfg.defaultChannel.toUpperCase()}
+                        {updateCfg.hasGithubTokenConfigured ? ' · 已启用私有仓库代理' : ''}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      style={{ height: 30 }}
+                      disabled={checkingUpdates}
+                      onClick={async () => {
+                        setCheckingUpdates(true);
+                        try {
+                          const [nextA, nextI] = await Promise.all([
+                            api.checkMobileUpdate('android', updateCfg.defaultChannel, true),
+                            api.checkMobileUpdate('ios', updateCfg.defaultChannel, true),
+                          ]);
+                          setAndroidUpdate(nextA);
+                          setIosUpdate(nextI);
+                          onNotify('已同步最新 GitHub Release 版本元数据');
+                        } catch (err) {
+                          onNotify(err instanceof Error ? err.message : '检查更新失败');
+                        } finally {
+                          setCheckingUpdates(false);
+                        }
+                      }}
+                    >
+                      <RefreshCw size={12} />
+                      <span>{checkingUpdates ? '刷新中...' : '刷新版本'}</span>
+                    </button>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))',
+                      gap: 8,
+                    }}
+                  >
+                    <div
+                      style={{
+                        padding: '9px 11px',
+                        borderRadius: 8,
+                        border: '1px solid var(--border-subtle)',
+                        background: 'var(--bg-surface)',
+                      }}
+                    >
+                      <div style={{ fontSize: '0.76rem', color: 'var(--text-tertiary)' }}>
+                        Android 客户端 ({updateCfg.androidApplicationId})
+                      </div>
+                      <div style={{ fontWeight: 700, fontSize: '0.88rem', marginTop: 2 }}>
+                        最新 v{androidUpdate?.latestVersion ?? updateCfg.serverVersion}
+                        {androidUpdate?.asset?.sha256 && (
+                          <span
+                            className="mono"
+                            style={{
+                              fontSize: '0.7rem',
+                              color: 'var(--text-tertiary)',
+                              marginLeft: 6,
+                            }}
+                          >
+                            SHA256:{androidUpdate.asset.sha256.slice(0, 8)}…
+                          </span>
+                        )}
+                      </div>
+                      {androidUpdate?.asset?.downloadUrl && (
+                        <a
+                          href={androidUpdate.asset.downloadUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            marginTop: 5,
+                            fontSize: '0.76rem',
+                            color: 'var(--accent)',
+                            fontWeight: 600,
+                            textDecoration: 'none',
+                          }}
+                        >
+                          <Download size={12} />
+                          <span>下载最新 APK ({androidUpdate.asset.fileName})</span>
+                        </a>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        padding: '9px 11px',
+                        borderRadius: 8,
+                        border: '1px solid var(--border-subtle)',
+                        background: 'var(--bg-surface)',
+                      }}
+                    >
+                      <div style={{ fontSize: '0.76rem', color: 'var(--text-tertiary)' }}>
+                        iOS 客户端 ({updateCfg.iosBundleId})
+                      </div>
+                      <div style={{ fontWeight: 700, fontSize: '0.88rem', marginTop: 2 }}>
+                        最新 v{iosUpdate?.latestVersion ?? updateCfg.serverVersion}
+                        {iosUpdate?.asset?.iosInstallMethod && (
+                          <span
+                            className="mono"
+                            style={{
+                              fontSize: '0.7rem',
+                              color: 'var(--text-tertiary)',
+                              marginLeft: 6,
+                            }}
+                          >
+                            {iosUpdate.asset.iosInstallMethod.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                      {(iosUpdate?.asset?.itmsServicesUrl || iosUpdate?.asset?.downloadUrl) && (
+                        <a
+                          href={iosUpdate.asset.downloadUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            marginTop: 5,
+                            fontSize: '0.76rem',
+                            color: 'var(--accent)',
+                            fontWeight: 600,
+                            textDecoration: 'none',
+                          }}
+                        >
+                          <Download size={12} />
+                          <span>获取 iOS 安装包 / OTA 分发页</span>
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="session-list">
                 {sessions.map((s) => (

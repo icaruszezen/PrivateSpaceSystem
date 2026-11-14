@@ -16,6 +16,7 @@ import { createMediaRoutes } from './routes/media.js';
 import { createNotesRoutes } from './routes/notes.js';
 import { createPasswordsRoutes } from './routes/passwords.js';
 import { createSyncRoutes } from './routes/sync.js';
+import { createUpdateRoutes } from './routes/updates.js';
 import { SyncSseHub } from './sync/sseHub.js';
 
 export interface AppInstance {
@@ -26,6 +27,10 @@ export interface AppInstance {
   sessionCrypto: EphemeralSessionCrypto;
   sseHub: SyncSseHub;
   close: () => void;
+}
+
+export interface CreateAppOptions {
+  updateFetchImpl?: typeof fetch;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -41,6 +46,8 @@ const MIME_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
   '.apk': 'application/vnd.android.package-archive',
+  '.ipa': 'application/octet-stream',
+  '.plist': 'application/xml; charset=utf-8',
 };
 
 const DEFAULT_MOBILE_ORIGINS = [
@@ -50,7 +57,7 @@ const DEFAULT_MOBILE_ORIGINS = [
   'ionic://localhost',
 ];
 
-export function createApp(config: ServerConfig): AppInstance {
+export function createApp(config: ServerConfig, options: CreateAppOptions = {}): AppInstance {
   const db = openVaultDatabase(config.dbPath);
   const chunkStore = new EncryptedChunkStore(config.dataDir);
   const repo = new VaultRepository(db);
@@ -103,6 +110,7 @@ export function createApp(config: ServerConfig): AppInstance {
         'Accept-Ranges',
         'Content-Length',
         'X-PrivateSpace-Cipher',
+        'X-Content-SHA256',
       ],
       allowMethods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     }),
@@ -166,6 +174,7 @@ export function createApp(config: ServerConfig): AppInstance {
   app.route('/api/v1/passwords', createPasswordsRoutes(repo, sessionCrypto));
   app.route('/api/v1/media', createMediaRoutes(repo, sessionCrypto, chunkStore));
   app.route('/api/v1/sync', createSyncRoutes(repo, sessionCrypto, sseHub));
+  app.route('/api/v1/updates', createUpdateRoutes(config, options.updateFetchImpl));
 
   // Unmatched API 404
   app.all('/api/*', (c) =>

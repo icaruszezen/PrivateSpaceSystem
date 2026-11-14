@@ -1,4 +1,6 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { CURRENT_APP_BUILD, CURRENT_APP_VERSION, DEFAULT_ANDROID_APP_ID } from '@shared/appUpdate';
+import { bytesToHex, sha256 } from '@shared/cryptoPrimitives';
 
 export interface NativeDeviceMetadata {
   isNativeAndroid: boolean;
@@ -7,6 +9,10 @@ export interface NativeDeviceMetadata {
   sdkInt: number;
   biometricAvailable: boolean;
   screenshotProtected: boolean;
+  appVersionName: string;
+  appVersionCode: number;
+  packageName: string;
+  canInstallPackages: boolean;
 }
 
 export interface SharedInboundPayload {
@@ -15,12 +21,30 @@ export interface SharedInboundPayload {
   text?: string;
 }
 
+export interface ApkDownloadProgressEvent {
+  status: 'downloading' | 'verifying' | 'installing' | 'permission_required' | 'error';
+  receivedBytes: number;
+  totalBytes: number;
+  percent: number;
+}
+
+export interface ApkInstallResult {
+  status: 'installing' | 'permission_required' | 'browser_downloaded';
+  sha256?: string;
+  bytes?: number;
+  canInstallPackages: boolean;
+}
+
 interface PrivateSpaceNativePluginContract {
   getDeviceMetadata(): Promise<{
     deviceName: string;
     sdkInt: number;
     biometricAvailable: boolean;
     screenshotProtected: boolean;
+    appVersionName?: string;
+    appVersionCode?: number;
+    packageName?: string;
+    canInstallPackages?: boolean;
   }>;
   secureSet(options: { key: string; value: string }): Promise<{ ok: boolean }>;
   secureGet(options: { key: string }): Promise<{ value: string | null }>;
@@ -39,9 +63,29 @@ interface PrivateSpaceNativePluginContract {
   }): Promise<{ ok: boolean; sensitiveMasked: boolean }>;
   triggerHaptic(options: { style: 'light' | 'success' | 'warning' }): Promise<void>;
   consumePendingShare(): Promise<{ shared: SharedInboundPayload | null }>;
+  openUnknownSourcesSettings(): Promise<{ canInstallPackages: boolean }>;
+  installPendingApk(): Promise<{
+    status: 'installing' | 'permission_required';
+    canInstallPackages: boolean;
+  }>;
+  downloadAndInstallApk(options: {
+    url: string;
+    expectedSha256?: string | null;
+    versionName?: string;
+    authorization?: string;
+  }): Promise<{
+    status: 'installing' | 'permission_required';
+    sha256: string;
+    bytes: number;
+    canInstallPackages: boolean;
+  }>;
   addListener(
     eventName: 'shareReceived',
     listenerFunc: (payload: SharedInboundPayload) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'updateDownloadProgress',
+    listenerFunc: (payload: ApkDownloadProgressEvent) => void,
   ): Promise<PluginListenerHandle>;
 }
 
@@ -153,6 +197,18 @@ function inferBrowserAndroidLabel(): string {
 let webClipboardTimer: number | null = null;
 let lastCopiedSecret: string | null = null;
 
+const webUpdateListeners = new Set<(payload: ApkDownloadProgressEvent) => void>();
+
+function emitWebUpdateProgress(payload: ApkDownloadProgressEvent): void {
+  for (const listener of webUpdateListeners) {
+    try {
+      listener(payload);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
 export const androidBridge = {
   async getDeviceMetadata(): Promise<NativeDeviceMetadata> {
     if (isNativeAndroidRuntime()) {
@@ -165,6 +221,10 @@ export const androidBridge = {
           sdkInt: info.sdkInt,
           biometricAvailable: info.biometricAvailable,
           screenshotProtected: info.screenshotProtected,
+          appVersionName: info.appVersionName || CURRENT_APP_VERSION,
+          appVersionCode: info.appVersionCode ?? CURRENT_APP_BUILD,
+          packageName: info.packageName || DEFAULT_ANDROID_APP_ID,
+          canInstallPackages: info.canInstallPackages ?? true,
         };
       } catch {
         // fall through to safe defaults
@@ -183,6 +243,10 @@ export const androidBridge = {
       sdkInt: 35,
       biometricAvailable: false,
       screenshotProtected: savedShield,
+      appVersionName: CURRENT_APP_VERSION,
+      appVersionCode: CURRENT_APP_BUILD,
+      packageName: DEFAULT_ANDROID_APP_ID,
+      canInstallPackages: true,
     };
   },
 
@@ -369,6 +433,180 @@ export const androidBridge = {
       };
     } catch {
       return () => undefined;
+    }
+  },
+
+  async onUpdateDownloadProgress(
+    handler: (payload: ApkDownloadProgressEvent) => void,
+  ): Promise<() => void> {
+    if (isNativeAndroidRuntime()) {
+      try {
+        const sub = await PrivateSpaceNative.addListener('updateDownloadProgress', handler);
+        return () => {
+          void sub.remove();
+        };
+      } catch {
+        return () => undefined;
+      }
+    }
+    webUpdateListeners.add(handler);
+    return () => {
+      webUpdateListeners.delete(handler);
+    };
+  },
+
+  async openUnknownSourcesSettings(): Promise<boolean> {
+    if (!isNativeAndroidRuntime()) return true;
+    try {
+      const res = await PrivateSpaceNative.openUnknownSourcesSettings();
+      return res.canInstallPackages;
+    } catch {
+      return false;
+    }
+  },
+
+  async installPendingApk(): Promise<ApkInstallResult> {
+    if (!isNativeAndroidRuntime()) {
+      return { status: 'browser_downloaded', canInstallPackages: true };
+    }
+    const res = await PrivateSpaceNative.installPendingApk();
+    return {
+      status: res.status,
+      canInstallPackages: res.canInstallPackages,
+    };
+  },
+
+  async downloadAndInstallApk(options: {
+    url: string;
+    expectedSha256?: string | null;
+    versionName?: string;
+    fileName?: string;
+  }): Promise<ApkInstallResult> {
+    if (isNativeAndroidRuntime()) {
+      const res = await PrivateSpaceNative.downloadAndInstallApk({
+        url: options.url,
+        expectedSha256: options.expectedSha256 ?? undefined,
+        versionName: options.versionName,
+      });
+      return {
+        status: res.status,
+        sha256: res.sha256,
+        bytes: res.bytes,
+        canInstallPackages: res.canInstallPackages,
+      };
+    }
+
+    // Companion Web / Browser mode: stream download, verify SHA-256 locally, and trigger APK download
+    emitWebUpdateProgress({
+      status: 'downloading',
+      receivedBytes: 0,
+      totalBytes: -1,
+      percent: 5,
+    });
+
+    try {
+      const res = await fetch(options.url);
+      if (!res.ok) {
+        throw new Error(`APK 下载失败 (HTTP ${res.status})`);
+      }
+
+      const totalBytes = Number.parseInt(res.headers.get('content-length') || '-1', 10);
+      let bytes: Uint8Array;
+
+      if (res.body) {
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            received += value.byteLength;
+            const pct =
+              totalBytes > 0 ? Math.min(99, Math.round((received * 100) / totalBytes)) : 65;
+            emitWebUpdateProgress({
+              status: 'downloading',
+              receivedBytes: received,
+              totalBytes,
+              percent: pct,
+            });
+          }
+        }
+        bytes = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+      } else {
+        bytes = new Uint8Array(await res.arrayBuffer());
+      }
+
+      emitWebUpdateProgress({
+        status: 'verifying',
+        receivedBytes: bytes.byteLength,
+        totalBytes: bytes.byteLength,
+        percent: 100,
+      });
+
+      const actualSha256 = bytesToHex(await sha256(bytes));
+      const expected = options.expectedSha256?.trim().toLowerCase();
+      if (expected && expected.length === 64 && actualSha256 !== expected) {
+        emitWebUpdateProgress({
+          status: 'error',
+          receivedBytes: bytes.byteLength,
+          totalBytes: bytes.byteLength,
+          percent: 0,
+        });
+        throw new Error('APK SHA-256 完整性校验未通过，已拦截保存');
+      }
+
+      emitWebUpdateProgress({
+        status: 'installing',
+        receivedBytes: bytes.byteLength,
+        totalBytes: bytes.byteLength,
+        percent: 100,
+      });
+
+      if (typeof document !== 'undefined') {
+        const blob = new Blob([bytes as BlobPart], {
+          type: 'application/vnd.android.package-archive',
+        });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download =
+          options.fileName || `PrivateSpace-Android-v${options.versionName || 'latest'}.apk`;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 15_000);
+      }
+
+      return {
+        status: 'browser_downloaded',
+        sha256: actualSha256,
+        bytes: bytes.byteLength,
+        canInstallPackages: true,
+      };
+    } catch (err) {
+      // If cross-origin GitHub CDN blocks fetch CORS in desktop browser, open direct download URL
+      if (typeof window !== 'undefined' && err instanceof TypeError) {
+        window.open(options.url, '_blank', 'noopener,noreferrer');
+        return {
+          status: 'browser_downloaded',
+          canInstallPackages: true,
+        };
+      }
+      emitWebUpdateProgress({
+        status: 'error',
+        receivedBytes: 0,
+        totalBytes: -1,
+        percent: 0,
+      });
+      throw err;
     }
   },
 };

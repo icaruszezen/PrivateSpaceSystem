@@ -9,6 +9,7 @@ struct SecuritySyncTabView: View {
     @State private var showingPasswordRotation = false
     @State private var showingRenameAlert = false
     @State private var renamedVault = ""
+    @State private var repoDraft = ""
 
     var body: some View {
         NavigationStack {
@@ -49,6 +50,113 @@ struct SecuritySyncTabView: View {
                         HStack {
                             Label("立即执行增量同步", systemImage: "arrow.triangle.2.circlepath")
                             if store.isSyncing {
+                                Spacer()
+                                ProgressView()
+                            }
+                        }
+                    }
+                }
+
+                // 1.5 Software Version & GitHub Release Auto-Update
+                Section("软件版本与 GitHub 自动更新") {
+                    LabeledContent("当前 iOS 客户端版本") {
+                        Text("v\(store.currentAppVersion) (Build #\(store.currentAppBuild))")
+                            .font(.system(.caption, design: .monospaced).weight(.semibold))
+                    }
+
+                    if let info = store.latestUpdateInfo, info.hasUpdate {
+                        Button {
+                            store.isShowingUpdateSheet = true
+                        } label: {
+                            HStack {
+                                Label(
+                                    info.mandatory
+                                        ? "必选安全升级 v\(info.latestVersion) — 点击立即安装"
+                                        : "发现新版本 v\(info.latestVersion) — 查看更新与安装",
+                                    systemImage: "arrow.down.app.fill"
+                                )
+                                .foregroundStyle(
+                                    info.mandatory
+                                        ? MineralPineTheme.danger
+                                        : MineralPineTheme.primaryAccent(for: colorScheme)
+                                )
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.autoCheckUpdatesEnabled },
+                            set: { store.setAutoCheckUpdatesPreference($0) }
+                        )
+                    ) {
+                        Label("启动与切回前台时自动检查新版本", systemImage: "sparkles")
+                    }
+
+                    Picker(
+                        "版本发布通道",
+                        selection: Binding(
+                            get: { store.updateChannel },
+                            set: { nextChannel in
+                                store.setUpdateChannelPreference(nextChannel)
+                                Task { await store.checkForAppUpdates(manual: false) }
+                            }
+                        )
+                    ) {
+                        ForEach(UpdateChannel.allCases) { channel in
+                            Text(channel.displayName).tag(channel)
+                        }
+                    }
+
+                    Picker(
+                        "GitHub 分发源模式",
+                        selection: Binding(
+                            get: { store.updateSourceMode },
+                            set: { store.setUpdateSourceModePreference($0) }
+                        )
+                    ) {
+                        ForEach(UpdateSourceMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+
+                    if store.updateSourceMode == .github {
+                        HStack {
+                            TextField("owner/repo（如 icaruszezen/PrivateSpaceSystem）", text: $repoDraft)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .font(.system(.caption, design: .monospaced))
+                            Button("保存") {
+                                if store.setCustomGithubRepoPreference(repoDraft) {
+                                    repoDraft = store.customGithubRepo
+                                    store.showToast("已绑定仓库 \(store.customGithubRepo)")
+                                    Task { await store.checkForAppUpdates(manual: true) }
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    } else {
+                        LabeledContent("服务端绑定仓库") {
+                            Text(
+                                store.serverUpdateConfig?.githubRepo
+                                    ?? store.latestUpdateInfo?.repository
+                                    ?? AppUpdateService.defaultGithubRepo
+                            )
+                            .font(.system(.caption, design: .monospaced))
+                        }
+                    }
+
+                    Button {
+                        Task { await store.checkForAppUpdates(manual: true) }
+                    } label: {
+                        HStack {
+                            Label("立即检查 GitHub 最新版本", systemImage: "arrow.clockwise.icloud")
+                            if store.isCheckingUpdate {
                                 Spacer()
                                 ProgressView()
                             }
@@ -213,11 +321,13 @@ struct SecuritySyncTabView: View {
             }
             .navigationTitle("安全与同步")
             .task {
+                repoDraft = store.customGithubRepo
                 await store.refreshSecurityDashboard()
             }
             .refreshable {
                 await store.syncDelta()
                 await store.refreshSecurityDashboard()
+                await store.checkForAppUpdates(manual: false)
             }
             .sheet(isPresented: $showingPasswordRotation) {
                 MasterPasswordRotationSheet(store: store)
@@ -382,3 +492,122 @@ private struct MonoHexField: View {
         }
     }
 }
+
+// MARK: - iOS Software Auto-Update & GitHub Release Prompt Sheet
+
+struct AppUpdatePromptSheet: View {
+    @Bindable var store: VaultStore
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        NavigationStack {
+            if let info = store.latestUpdateInfo {
+                let actions = AppUpdateService.resolveInstallActions(from: info)
+                List {
+                    Section("新版本摘要") {
+                        LabeledContent("发布标题", value: info.releaseName)
+                        LabeledContent("版本演进") {
+                            Text("v\(info.currentVersion) (#\(info.currentBuild)) → v\(info.latestVersion) (#\(info.latestBuild))")
+                                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                                .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
+                        }
+                        LabeledContent("GitHub 仓库") {
+                            Text(info.repository)
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        LabeledContent("发布通道", value: info.channel.displayName)
+                        if info.mandatory {
+                            Label("此版本包含关键安全更新，需升级后继续使用", systemImage: "exclamationmark.shield.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(MineralPineTheme.danger)
+                        }
+                    }
+
+                    Section("更新说明 (Release Notes)") {
+                        Text(info.releaseNotes.isEmpty ? "包含端到端加密同步稳定性优化与安全修复。" : info.releaseNotes)
+                            .font(.subheadline)
+                            .textSelection(.enabled)
+                    }
+
+                    if let asset = info.asset {
+                        Section("iOS 安装包与 SHA-256 完整性指纹") {
+                            LabeledContent("文件名") {
+                                Text(asset.fileName)
+                                    .font(.system(.caption, design: .monospaced))
+                            }
+                            if let size = asset.fileSize, size > 0 {
+                                LabeledContent("安装包大小", value: VaultFormatters.formatBytes(size))
+                            }
+                            if let sha = asset.sha256, !sha.isEmpty {
+                                MonoHexField(label: "SHA-256 校验摘要", hex: sha)
+                                Button {
+                                    IOSPlatformActions.copySecret(sha, expireSeconds: 120)
+                                    store.showToast("已复制安装包 SHA-256 校验值")
+                                } label: {
+                                    Label("复制 SHA-256 校验值", systemImage: "doc.on.doc")
+                                        .font(.caption.weight(.semibold))
+                                }
+                            }
+                        }
+                    }
+
+                    Section("选择安装方式") {
+                        ForEach(Array(actions.enumerated()), id: \.offset) { idx, action in
+                            Button {
+                                openURL(action.url)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: action.systemImage)
+                                        .font(.title3)
+                                        .foregroundStyle(
+                                            idx == 0
+                                                ? MineralPineTheme.primaryAccent(for: colorScheme)
+                                                : .secondary
+                                        )
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(action.title)
+                                            .font(.subheadline.weight(idx == 0 ? .bold : .medium))
+                                            .foregroundStyle(.primary)
+                                        Text(action.subtitle)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.vertical, 3)
+                            }
+                        }
+
+                        if !info.mandatory && info.hasUpdate {
+                            Button(role: .cancel) {
+                                store.skipUpdateVersion(info.latestVersion)
+                                dismiss()
+                            } label: {
+                                Label("忽略 v\(info.latestVersion) 版本提醒", systemImage: "eye.slash")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("发现新版本 v\(info.latestVersion)")
+                .navigationBarTitleDisplayMode(.inline)
+                .interactiveDismissDisabled(info.mandatory)
+                .toolbar {
+                    if !info.mandatory {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("稍后") { dismiss() }
+                        }
+                    }
+                }
+            } else {
+                ContentUnavailableView("暂无可用更新信息", systemImage: "checkmark.seal")
+            }
+        }
+    }
+}
+

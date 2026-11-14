@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
   CheckCircle2,
+  Download,
   Film,
   FileText,
   Image as ImageIcon,
@@ -10,15 +11,23 @@ import {
   Moon,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Sun,
 } from 'lucide-react';
+import {
+  CURRENT_APP_BUILD,
+  CURRENT_APP_VERSION,
+  DEFAULT_ANDROID_APP_ID,
+} from '@shared/appUpdate';
 import type {
+  AppUpdateCheckResponse,
   CreateNoteRequest,
   CreatePasswordRequest,
   ImportPasswordEntryInput,
   MediaAlbum,
   MediaItem,
   MediaKind,
+  MobileUpdatePreferences,
   NoteItem,
   PasswordItem,
   UpdateMediaRequest,
@@ -31,6 +40,7 @@ import { MobilePasswordsTab } from './src/components/MobilePasswordsTab';
 import { MobilePhotosTab } from './src/components/MobilePhotosTab';
 import { MobilePinLockScreen } from './src/components/MobilePinLockScreen';
 import { MobileSecurityTab } from './src/components/MobileSecurityTab';
+import { MobileUpdateModal } from './src/components/MobileUpdateModal';
 import { MobileVideosTab } from './src/components/MobileVideosTab';
 import {
   androidBridge,
@@ -41,9 +51,11 @@ import {
 import {
   createEmptySnapshot,
   IndexedDbVaultPersistence,
+  loadMobileUpdatePreferences,
   normalizeServerUrl,
   parsePairingInput,
   PrivateSpaceMobileClient,
+  saveMobileUpdatePreferences,
   type MobileVaultSnapshot,
 } from './src/syncClient';
 
@@ -54,6 +66,7 @@ const LS_SERVER_URL = 'pss_android_server_url';
 const LS_VAULT_NAME = 'pss_android_vault_name';
 const LS_THEME = 'pss_android_theme';
 const LS_CLIP_CLEAR = 'pss_android_clip_autoclear';
+const LS_UPDATE_PREFS = 'pss_android_update_prefs_v1';
 
 function resolveDefaultServerUrl(): string {
   if (typeof localStorage !== 'undefined') {
@@ -96,9 +109,21 @@ export default function PrivateSpaceMobileApp() {
     sdkInt: 35,
     biometricAvailable: false,
     screenshotProtected: true,
+    appVersionName: CURRENT_APP_VERSION,
+    appVersionCode: CURRENT_APP_BUILD,
+    packageName: DEFAULT_ANDROID_APP_ID,
+    canInstallPackages: true,
   });
   const [quickLockCfg, setQuickLockCfg] = useState<StoredQuickLockMeta | null>(null);
   const [hasOfflineCache, setHasOfflineCache] = useState(false);
+
+  // Software Auto-Update State
+  const [updatePrefs, setUpdatePrefs] = useState<MobileUpdatePreferences>(() =>
+    loadMobileUpdatePreferences(LS_UPDATE_PREFS),
+  );
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateCheckResponse | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
   // Unlocked Workspace State
   const [activeTab, setActiveTab] = useState<MobileTabId>('passwords');
@@ -601,6 +626,76 @@ export default function PrivateSpaceMobileApp() {
     [passwordList, photoList, videoList, noteList],
   );
 
+  const handleUpdatePrefsChange = useCallback((next: MobileUpdatePreferences) => {
+    setUpdatePrefs(next);
+    saveMobileUpdatePreferences(next, LS_UPDATE_PREFS);
+  }, []);
+
+  const performUpdateCheck = useCallback(
+    async (manual = false, prefsOverride?: MobileUpdatePreferences) => {
+      const effectivePrefs = prefsOverride ?? updatePrefs;
+      setCheckingUpdate(true);
+      try {
+        const res = await client.checkAppUpdate({
+          platform: 'android',
+          currentVersion: deviceMeta.appVersionName,
+          currentBuild: deviceMeta.appVersionCode,
+          channel: effectivePrefs.channel,
+          sourceMode: effectivePrefs.sourceMode,
+          customGithubRepo: effectivePrefs.customGithubRepo,
+          force: manual,
+        });
+        setUpdateInfo(res);
+        const stamped: MobileUpdatePreferences = {
+          ...effectivePrefs,
+          lastCheckedAt: res.checkedAt,
+        };
+        setUpdatePrefs(stamped);
+        saveMobileUpdatePreferences(stamped, LS_UPDATE_PREFS);
+
+        if (res.hasUpdate && res.mandatory) {
+          setUpdateModalOpen(true);
+        } else if (manual) {
+          if (res.hasUpdate) {
+            setUpdateModalOpen(true);
+          } else {
+            notify(`当前已是最新版本 v${res.currentVersion}`);
+          }
+        }
+      } catch (err) {
+        if (manual) {
+          notify(err instanceof Error ? err.message : '检查新版本失败');
+        }
+      } finally {
+        setCheckingUpdate(false);
+      }
+    },
+    [client, deviceMeta.appVersionCode, deviceMeta.appVersionName, notify, updatePrefs],
+  );
+
+  // Automatic background update check on unlock & app foreground resume
+  useEffect(() => {
+    if (stage !== 'unlocked' || !updatePrefs.autoCheckOnLaunch) return;
+    void performUpdateCheck(false);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && updatePrefs.autoCheckOnLaunch) {
+        const lastMs = updatePrefs.lastCheckedAt ? Date.parse(updatePrefs.lastCheckedAt) : 0;
+        if (!lastMs || Date.now() - lastMs > 30 * 60 * 1000) {
+          void performUpdateCheck(false);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, updatePrefs.autoCheckOnLaunch, updatePrefs.channel, updatePrefs.sourceMode]);
+
+  const showUpdateBanner = Boolean(
+    updateInfo?.hasUpdate &&
+      (updateInfo.mandatory || updateInfo.latestVersion !== updatePrefs.skippedVersion),
+  );
+
   // ==================== Stage Views ====================
 
   if (stage === 'booting') {
@@ -755,6 +850,44 @@ export default function PrivateSpaceMobileApp() {
         </div>
       </header>
 
+      {/* Non-intrusive Auto-Update Notification Banner */}
+      {showUpdateBanner && updateInfo && (
+        <div
+          className={`m-update-banner ${updateInfo.mandatory ? 'is-mandatory' : ''}`}
+          data-testid="android-update-banner"
+        >
+          <div className="m-update-banner-info">
+            <Sparkles
+              size={15}
+              style={{
+                color: updateInfo.mandatory ? 'var(--m-amber)' : 'var(--m-accent)',
+                flexShrink: 0,
+              }}
+            />
+            <span
+              style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              发现新版本 <strong>v{updateInfo.latestVersion}</strong>
+              {updateInfo.asset?.sha256 ? ' · SHA-256 已签名' : ''}
+            </span>
+          </div>
+          <button
+            id="m-banner-update-btn"
+            type="button"
+            className="m-btn m-btn-primary m-btn-sm"
+            style={{ flexShrink: 0 }}
+            onClick={() => setUpdateModalOpen(true)}
+          >
+            <Download size={12} />
+            <span>立即更新</span>
+          </button>
+        </div>
+      )}
+
       {/* Active Tab Content */}
       <main className="m-viewport">
         {activeTab === 'passwords' && (
@@ -835,6 +968,12 @@ export default function PrivateSpaceMobileApp() {
             notes={noteList}
             passwords={passwordList}
             media={mediaList}
+            updatePrefs={updatePrefs}
+            updateInfo={updateInfo}
+            checkingUpdate={checkingUpdate}
+            onUpdatePrefsChange={handleUpdatePrefsChange}
+            onCheckUpdate={(force) => performUpdateCheck(Boolean(force))}
+            onOpenUpdateModal={() => setUpdateModalOpen(true)}
             onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
             onToggleClipboardAutoClear={() =>
               setClipboardAutoClear((prev) => {
@@ -931,10 +1070,23 @@ export default function PrivateSpaceMobileApp() {
         >
           <span className="m-tab-pill">
             <ShieldCheck size={18} />
+            {showUpdateBanner && <span className="m-tab-badge">新</span>}
           </span>
           <span className="m-tab-label">安全</span>
         </button>
       </nav>
+
+      <MobileUpdateModal
+        open={updateModalOpen}
+        updateInfo={updateInfo}
+        deviceMeta={deviceMeta}
+        onClose={() => setUpdateModalOpen(false)}
+        onSkipVersion={(ver) => {
+          handleUpdatePrefsChange({ ...updatePrefs, skippedVersion: ver });
+          notify(`已忽略 v${ver} 更新提示`);
+        }}
+        onNotify={notify}
+      />
 
       {toast && (
         <div className="m-toast" role="status">

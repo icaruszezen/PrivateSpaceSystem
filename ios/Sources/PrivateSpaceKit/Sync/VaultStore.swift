@@ -60,6 +60,11 @@ public final class VaultStore {
     private static let keychainBiometricEnabledKey = "biometric_unlock_enabled"
     private static let keychainAutoLockTimeoutKey = "auto_lock_timeout_seconds"
     private static let keychainThemeKey = "app_theme_preference"
+    private static let keychainAutoCheckUpdateKey = "auto_check_updates_enabled"
+    private static let keychainUpdateChannelKey = "app_update_channel"
+    private static let keychainUpdateSourceModeKey = "app_update_source_mode"
+    private static let keychainCustomGithubRepoKey = "app_custom_github_repo"
+    private static let keychainSkippedVersionKey = "app_skipped_update_version"
 
     public var phase: VaultLifecyclePhase = .launching
     public var serverURL: String
@@ -82,6 +87,17 @@ public final class VaultStore {
     public var clipboardAutoExpireSeconds: Int = 30
     public var themePreference: AppThemePreference = .system
     public var isPrivacyShieldVisible: Bool = false
+
+    // Software Version & GitHub Release Auto-Update State
+    public var autoCheckUpdatesEnabled: Bool = true
+    public var updateChannel: UpdateChannel = .stable
+    public var updateSourceMode: UpdateSourceMode = .server
+    public var customGithubRepo: String = AppUpdateService.defaultGithubRepo
+    public var skippedUpdateVersion: String?
+    public var latestUpdateInfo: AppUpdateCheckResponseDTO?
+    public var serverUpdateConfig: ServerUpdateConfigResponseDTO?
+    public var isCheckingUpdate: Bool = false
+    public var isShowingUpdateSheet: Bool = false
 
     // Security Dashboard Cache
     public var securitySummary: VaultSecuritySummary?
@@ -131,6 +147,25 @@ public final class VaultStore {
         if let themeStr = try? secretStore.readString(forKey: Self.keychainThemeKey),
            let parsedTheme = AppThemePreference(rawValue: themeStr) {
             self.themePreference = parsedTheme
+        }
+        if let autoUpdateStr = try? secretStore.readString(forKey: Self.keychainAutoCheckUpdateKey) {
+            self.autoCheckUpdatesEnabled = (autoUpdateStr != "false")
+        }
+        if let channelStr = try? secretStore.readString(forKey: Self.keychainUpdateChannelKey),
+           let parsedChannel = UpdateChannel(rawValue: channelStr) {
+            self.updateChannel = parsedChannel
+        }
+        if let modeStr = try? secretStore.readString(forKey: Self.keychainUpdateSourceModeKey),
+           let parsedMode = UpdateSourceMode(rawValue: modeStr) {
+            self.updateSourceMode = parsedMode
+        }
+        if let savedRepo = try? secretStore.readString(forKey: Self.keychainCustomGithubRepoKey),
+           let normalizedRepo = AppUpdateService.normalizeGithubRepo(savedRepo) {
+            self.customGithubRepo = normalizedRepo
+        }
+        if let savedSkipped = try? secretStore.readString(forKey: Self.keychainSkippedVersionKey),
+           !savedSkipped.isEmpty {
+            self.skippedUpdateVersion = savedSkipped
         }
     }
 
@@ -272,6 +307,9 @@ public final class VaultStore {
         self.snapshot.keyFingerprint = auth.keyFingerprint
         try localStore.saveSnapshot(self.snapshot)
         self.phase = .unlocked
+        if autoCheckUpdatesEnabled {
+            Task { await checkForAppUpdates(manual: false) }
+        }
     }
 
     private func unlockFromCachedAndSync() async throws {
@@ -289,6 +327,9 @@ public final class VaultStore {
         self.phase = .unlocked
         await syncDelta()
         startRealtimeSyncStream()
+        if autoCheckUpdatesEnabled {
+            Task { await checkForAppUpdates(manual: false) }
+        }
     }
 
     // MARK: - Scene Lifecycle, App Switcher Privacy Blur & Auto-Lock
@@ -311,6 +352,9 @@ public final class VaultStore {
                 backgroundedAt = nil
                 await syncDelta()
                 startRealtimeSyncStream()
+                if autoCheckUpdatesEnabled {
+                    Task { await checkForAppUpdates(manual: false) }
+                }
             }
         }
     }
@@ -360,6 +404,121 @@ public final class VaultStore {
     public func setThemePreference(_ pref: AppThemePreference) {
         themePreference = pref
         try? secretStore.writeString(pref.rawValue, forKey: Self.keychainThemeKey)
+    }
+
+    // MARK: - Software Version & GitHub Auto-Update Coordinator
+
+    public var currentAppVersion: String {
+        AppUpdateService.currentAppVersionAndBuild().version
+    }
+
+    public var currentAppBuild: Int {
+        AppUpdateService.currentAppVersionAndBuild().build
+    }
+
+    public var hasPendingVisibleUpdate: Bool {
+        guard let info = latestUpdateInfo, info.hasUpdate else { return false }
+        return info.mandatory || info.latestVersion != skippedUpdateVersion
+    }
+
+    public func setAutoCheckUpdatesPreference(_ enabled: Bool) {
+        autoCheckUpdatesEnabled = enabled
+        try? secretStore.writeString(enabled ? "true" : "false", forKey: Self.keychainAutoCheckUpdateKey)
+    }
+
+    public func setUpdateChannelPreference(_ channel: UpdateChannel) {
+        updateChannel = channel
+        skippedUpdateVersion = nil
+        try? secretStore.writeString(channel.rawValue, forKey: Self.keychainUpdateChannelKey)
+        try? secretStore.deleteData(forKey: Self.keychainSkippedVersionKey)
+    }
+
+    public func setUpdateSourceModePreference(_ mode: UpdateSourceMode) {
+        updateSourceMode = mode
+        skippedUpdateVersion = nil
+        try? secretStore.writeString(mode.rawValue, forKey: Self.keychainUpdateSourceModeKey)
+        try? secretStore.deleteData(forKey: Self.keychainSkippedVersionKey)
+    }
+
+    @discardableResult
+    public func setCustomGithubRepoPreference(_ raw: String) -> Bool {
+        guard let normalized = AppUpdateService.normalizeGithubRepo(raw) else {
+            errorBanner = "GitHub 仓库格式无效，请填写 owner/repo（例如 icaruszezen/PrivateSpaceSystem）"
+            return false
+        }
+        customGithubRepo = normalized
+        skippedUpdateVersion = nil
+        try? secretStore.writeString(normalized, forKey: Self.keychainCustomGithubRepoKey)
+        try? secretStore.deleteData(forKey: Self.keychainSkippedVersionKey)
+        return true
+    }
+
+    public func skipUpdateVersion(_ version: String?) {
+        skippedUpdateVersion = version
+        if let version, !version.isEmpty {
+            try? secretStore.writeString(version, forKey: Self.keychainSkippedVersionKey)
+        } else {
+            try? secretStore.deleteData(forKey: Self.keychainSkippedVersionKey)
+        }
+    }
+
+    public func checkForAppUpdates(manual: Bool = false) async {
+        guard !isCheckingUpdate else { return }
+        isCheckingUpdate = true
+        defer { isCheckingUpdate = false }
+
+        if manual {
+            skipUpdateVersion(nil)
+        }
+
+        let (curVer, curBuild) = AppUpdateService.currentAppVersionAndBuild()
+
+        do {
+            if let cfg = try? await apiClient.getServerUpdateConfig() {
+                self.serverUpdateConfig = cfg
+            }
+
+            let info: AppUpdateCheckResponseDTO
+            if updateSourceMode == .server {
+                do {
+                    info = try await apiClient.checkAppUpdate(
+                        channel: updateChannel,
+                        currentVersion: curVer,
+                        currentBuild: curBuild,
+                        force: manual
+                    )
+                } catch {
+                    let fallbackRepo = AppUpdateService.normalizeGithubRepo(customGithubRepo)
+                        ?? AppUpdateService.defaultGithubRepo
+                    info = try await apiClient.checkGithubReleasesDirect(
+                        repository: fallbackRepo,
+                        channel: updateChannel,
+                        currentVersion: curVer,
+                        currentBuild: curBuild
+                    )
+                }
+            } else {
+                info = try await apiClient.checkGithubReleasesDirect(
+                    repository: customGithubRepo,
+                    channel: updateChannel,
+                    currentVersion: curVer,
+                    currentBuild: curBuild
+                )
+            }
+
+            self.latestUpdateInfo = info
+            if info.hasUpdate {
+                if manual || info.mandatory {
+                    self.isShowingUpdateSheet = true
+                }
+            } else if manual {
+                showToast("当前已是最新版本 v\(info.currentVersion)")
+            }
+        } catch {
+            if manual {
+                errorBanner = error.localizedDescription
+            }
+        }
     }
 
     // MARK: - Monotonic `since_seq` Delta Sync + Offline Outbox Replay + SSE Stream

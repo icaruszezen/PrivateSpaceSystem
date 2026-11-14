@@ -1,20 +1,51 @@
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
+def resolvedAppId = project.hasProperty('applicationId')
+    ? project.property('applicationId').toString()
+    : (System.getenv('ANDROID_APPLICATION_ID') ?: "com.privatespace.mobile")
+
+def resolvedVersionName = project.hasProperty('versionName')
+    ? project.property('versionName').toString()
+    : (System.getenv('ANDROID_VERSION_NAME') ?: "0.4.0")
+
+def resolvedVersionCode = (project.hasProperty('versionCode')
+    ? project.property('versionCode').toString()
+    : (System.getenv('ANDROID_VERSION_CODE') ?: "400")).toInteger()
+
+def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
+def keystorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')
+def keyAliasEnv = System.getenv('ANDROID_KEY_ALIAS')
+def keyPasswordEnv = System.getenv('ANDROID_KEY_PASSWORD')
+def hasReleaseKeystore = keystorePath && file(keystorePath).exists() && keystorePassword && keyAliasEnv && keyPasswordEnv
+
 android {
     namespace "com.privatespace.mobile"
     compileSdk rootProject.ext.compileSdkVersion
     defaultConfig {
-        applicationId "com.privatespace.mobile"
+        applicationId resolvedAppId
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "0.2.0"
+        versionCode resolvedVersionCode
+        versionName resolvedVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile file(keystorePath)
+                storePassword keystorePassword
+                keyAlias keyAliasEnv
+                keyPassword keyPasswordEnv
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+            }
         }
     }
     compileOptions {
@@ -29,6 +60,9 @@ android {
     }
     buildTypes {
         release {
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

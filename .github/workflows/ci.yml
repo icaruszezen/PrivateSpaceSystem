@@ -1,4 +1,4 @@
-name: CI, Android APK, iOS & Docker Build
+name: CI, Android APK, iOS IPA & GitHub Auto-Release
 
 on:
   push:
@@ -7,6 +7,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Optional SemVer override (e.g. 0.5.0) for manual build test'
+        required: false
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,11 +19,11 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/icaruszezen/privatespacesystem
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/privatespacesystem
 
 jobs:
   verify:
-    name: Typecheck, Crypto Tests & Container Smoke Test
+    name: Typecheck, Crypto/Update Tests & Container Smoke Test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,7 +43,7 @@ jobs:
       - name: Typecheck Web, Server, Android & iOS clients
         run: npm run typecheck
 
-      - name: Run cryptographic, API, Android & iOS SDK tests
+      - name: Run cryptographic, API, Auto-Update, Android & iOS SDK tests
         run: npm test
 
       - name: Build production bundles (Web + /ios MPA + /mobile Android + Server)
@@ -50,12 +55,16 @@ jobs:
           docker run -d --name pss-ci \
             -p 18080:8080 \
             -e ADMIN_PASSWORD=CiTestMasterPass!2026 \
+            -e GITHUB_REPO=${{ github.repository }} \
             privatespace-system:ci
 
           for i in $(seq 1 20); do
             if curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"initialized":true'; then
               echo "Container healthcheck & headless bootstrap verified!"
               curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"ZERO_KNOWLEDGE_E2EE_V2"'
+              curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"mobile-auto-update"'
+              curl -sf http://127.0.0.1:18080/api/v1/updates/config | grep -q '"githubRepo"'
+              curl -sf "http://127.0.0.1:18080/api/v1/updates/ios-manifest.plist?ipa_url=https://example.com/PrivateSpace.ipa&version=0.4.0" | grep -q 'software-package'
               curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
               curl -sf http://127.0.0.1:18080/ios | grep -q 'ios-root'
               curl -sf http://127.0.0.1:18080/mobile/ | grep -q 'PrivateSpace'
@@ -157,7 +166,7 @@ jobs:
           assert.equal(decNote.title, 'CI E2EE Note');
           assert.equal(decPw.password, 'Str0ng#Vault!Password99');
           EOF
-              echo "Zero-Knowledge E2EE v2 notes, passwords, /mobile, /ios, AASA, and blind sync verified inside Docker container!"
+              echo "Zero-Knowledge E2EE v2 notes, passwords, /mobile, /ios, auto-update gateway, AASA, and blind sync verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi
@@ -169,7 +178,7 @@ jobs:
           exit 1
 
   android-apk:
-    name: Build Android APK & Kotlin Unit Tests
+    name: Build Signed/Debug Android APK & Kotlin Unit Tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -190,6 +199,22 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      - name: Resolve Semantic Version & Android Build Code
+        id: ver
+        env:
+          INPUT_VERSION: ${{ inputs.release_version }}
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const refName = process.env.GITHUB_REF_NAME || '';
+          const raw = (process.env.INPUT_VERSION || (refName.startsWith('v') ? refName.slice(1) : pkg.version)).trim().replace(/^v/i, '');
+          const core = raw.split('+')[0].split('-')[0];
+          const [maj = 0, min = 4, pat = 0] = core.split('.').map((n) => Number.parseInt(n, 10) || 0);
+          const buildCode = Math.max(1, maj * 10000 + min * 100 + pat);
+          fs.appendFileSync(process.env.GITHUB_ENV, `APP_VERSION=${raw}\nAPP_BUILD=${buildCode}\n`);
+          EOF
+
       - name: Configure Android SDK (Platform 34)
         run: |
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
@@ -205,23 +230,71 @@ jobs:
             "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
           fi
 
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Sync Capacitor Android, run Kotlin JUnit tests & assemble Debug APK
+      - name: Install npm dependencies & sync Capacitor Android
         run: |
+          npm ci
           npm run android:sync
-          cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleDebug
 
-      - name: Upload Android APK artifact
+      - name: Run Kotlin JUnit tests & assemble APK (Release-Signed if Keystore configured, else Debug)
+        env:
+          ANDROID_APP_ID: ${{ vars.ANDROID_APPLICATION_ID || 'com.privatespace.mobile' }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p dist-release/android
+          GRADLE_PROPS="-PversionName=${APP_VERSION} -PversionCode=${APP_BUILD} -PapplicationId=${ANDROID_APP_ID}"
+
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            echo "Detected Android Release Keystore secret — building release-signed APK for seamless in-place upgrades..."
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d ' \n\r\t' | base64 -d > /tmp/pss-android-release.jks
+            export ANDROID_KEYSTORE_PATH="/tmp/pss-android-release.jks"
+            export ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            (cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleRelease $GRADLE_PROPS)
+            APK_SRC=$(ls mobile/android/app/build/outputs/apk/release/*.apk | head -n 1)
+            APK_NAME="PrivateSpace-Android-v${APP_VERSION}.apk"
+            SIGN_MODE="release-signed"
+          else
+            echo "No ANDROID_KEYSTORE_BASE64 secret configured — falling back to Debug-signed APK..."
+            (cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleDebug $GRADLE_PROPS)
+            APK_SRC="mobile/android/app/build/outputs/apk/debug/app-debug.apk"
+            APK_NAME="PrivateSpace-Android-v${APP_VERSION}-debug.apk"
+            SIGN_MODE="debug-signed"
+          fi
+
+          cp "$APK_SRC" "dist-release/android/${APK_NAME}"
+          (cd dist-release/android && sha256sum "${APK_NAME}" > "${APK_NAME}.sha256")
+          APK_SHA=$(awk '{print $1}' "dist-release/android/${APK_NAME}.sha256")
+          APK_SIZE=$(wc -c < "dist-release/android/${APK_NAME}" | tr -d ' ')
+
+          node -e '
+            const fs = require("node:fs");
+            fs.writeFileSync("dist-release/android/android-meta.json", JSON.stringify({
+              platform: "android",
+              version: process.env.APP_VERSION,
+              buildNumber: Number(process.env.APP_BUILD),
+              fileName: process.argv[1],
+              sha256: process.argv[2],
+              fileSize: Number(process.argv[3]),
+              signingMode: process.argv[4],
+              minSupportedVersion: "${{ vars.ANDROID_MIN_SUPPORTED_VERSION }}" || null
+            }, null, 2));
+          ' "$APK_NAME" "$APK_SHA" "$APK_SIZE" "$SIGN_MODE"
+
+      - name: Shred temporary Android Keystore
+        if: always()
+        run: rm -f /tmp/pss-android-release.jks
+
+      - name: Upload Android APK & SHA-256 bundle
         uses: actions/upload-artifact@v4
         with:
-          name: PrivateSpace-Android-debug-apk
-          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          name: PrivateSpace-Android-apk
+          path: dist-release/android/*
           if-no-files-found: error
 
   ios-verify:
-    name: Native iOS SwiftKit XCTest & Xcode Simulator Build
+    name: Native iOS SwiftKit XCTest, Simulator Build & Release IPA
     runs-on: macos-15
     permissions:
       contents: read
@@ -235,6 +308,21 @@ jobs:
           node-version: '24'
           cache: 'npm'
 
+      - name: Resolve Semantic Version & iOS Build Number
+        env:
+          INPUT_VERSION: ${{ inputs.release_version }}
+        run: |
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const refName = process.env.GITHUB_REF_NAME || '';
+          const raw = (process.env.INPUT_VERSION || (refName.startsWith('v') ? refName.slice(1) : pkg.version)).trim().replace(/^v/i, '');
+          const core = raw.split('+')[0].split('-')[0];
+          const [maj = 0, min = 4, pat = 0] = core.split('.').map((n) => Number.parseInt(n, 10) || 0);
+          const buildCode = Math.max(1, maj * 10000 + min * 100 + pat);
+          fs.appendFileSync(process.env.GITHUB_ENV, `APP_VERSION=${raw}\nAPP_BUILD=${buildCode}\n`);
+          EOF
+
       - name: Install & build PrivateSpace backend
         run: |
           npm ci
@@ -243,7 +331,8 @@ jobs:
       - name: Run SwiftPM PrivateSpaceKitTests against live PrivateSpace server
         run: |
           mkdir -p /tmp/pss-ios-ci-data
-          PORT=18080 DATA_DIR=/tmp/pss-ios-ci-data node dist/server/server/index.js > /tmp/pss-ios-ci-server.log 2>&1 &
+          PORT=18080 DATA_DIR=/tmp/pss-ios-ci-data GITHUB_REPO=${{ github.repository }} \
+            node dist/server/server/index.js > /tmp/pss-ios-ci-server.log 2>&1 &
           SERVER_PID=$!
           trap "kill $SERVER_PID 2>/dev/null || true" EXIT
 
@@ -256,8 +345,10 @@ jobs:
 
           PRIVATESPACE_TEST_SERVER_URL=http://127.0.0.1:18080 swift test --package-path ios
 
-      - name: Generate Xcode project & build PrivateSpaceIOS + AutoFill Extension
+      - name: Generate Xcode project & build PrivateSpaceIOS + AutoFill Extension (Simulator)
         working-directory: ios
+        env:
+          IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'io.privatespace.ios' }}
         run: |
           command -v xcodegen >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
           xcodegen generate
@@ -267,10 +358,269 @@ jobs:
             -configuration Debug \
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
+            MARKETING_VERSION="${APP_VERSION}" \
+            CURRENT_PROJECT_VERSION="${APP_BUILD}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
+
+      - name: Package iOS Release IPA + OTA Manifest (Tag Release or Manual Dispatch)
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        env:
+          IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'io.privatespace.ios' }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          IOS_EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD || 'ad-hoc' }}
+          IOS_OTA_BASE_URL: ${{ vars.IOS_OTA_BASE_URL }}
+          IOS_TESTFLIGHT_URL: ${{ vars.IOS_TESTFLIGHT_URL }}
+          IOS_APP_STORE_ID: ${{ vars.IOS_APP_STORE_ID }}
+          IOS_MIN_SUPPORTED_VERSION: ${{ vars.IOS_MIN_SUPPORTED_VERSION }}
+          IOS_BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_BUILD_CERTIFICATE_BASE64 }}
+          IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+          IOS_AUTOFILL_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_AUTOFILL_PROVISION_PROFILE_BASE64 }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+        run: |
+          mkdir -p dist-release/ios
+          TAG_NAME="${GITHUB_REF_NAME:-v${APP_VERSION}}"
+          case "$TAG_NAME" in v*) ;; *) TAG_NAME="v${APP_VERSION}" ;; esac
+
+          if [ -n "$IOS_BUILD_CERTIFICATE_BASE64" ] && [ -n "$IOS_PROVISION_PROFILE_BASE64" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "Detected Apple signing certificate & provisioning profile — building signed iOS IPA..."
+            KEYCHAIN_PATH="$RUNNER_TEMP/pss-ios-signing.keychain-db"
+            KEYCHAIN_PASS=$(uuidgen)
+            security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+            printf '%s' "$IOS_BUILD_CERTIFICATE_BASE64" | tr -d ' \n\r\t' | base64 -D > "$RUNNER_TEMP/cert.p12"
+            security import "$RUNNER_TEMP/cert.p12" -P "$IOS_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+            security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+            mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+            printf '%s' "$IOS_PROVISION_PROFILE_BASE64" | tr -d ' \n\r\t' | base64 -D > "$RUNNER_TEMP/main.mobileprovision"
+            MAIN_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/main.mobileprovision")")
+            cp "$RUNNER_TEMP/main.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${MAIN_UUID}.mobileprovision"
+
+            if [ -n "$IOS_AUTOFILL_PROVISION_PROFILE_BASE64" ]; then
+              printf '%s' "$IOS_AUTOFILL_PROVISION_PROFILE_BASE64" | tr -d ' \n\r\t' | base64 -D > "$RUNNER_TEMP/autofill.mobileprovision"
+              EXT_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/autofill.mobileprovision")")
+              cp "$RUNNER_TEMP/autofill.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${EXT_UUID}.mobileprovision"
+            fi
+
+            xcodebuild archive \
+              -project ios/PrivateSpaceIOS.xcodeproj \
+              -scheme PrivateSpaceIOS \
+              -configuration Release \
+              -sdk iphoneos \
+              -archivePath "$RUNNER_TEMP/PrivateSpaceIOS.xcarchive" \
+              DEVELOPMENT_TEAM="${APPLE_TEAM_ID}" \
+              MARKETING_VERSION="${APP_VERSION}" \
+              CURRENT_PROJECT_VERSION="${APP_BUILD}"
+
+            cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${IOS_EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+          </dict>
+          </plist>
+          PLIST
+
+            xcodebuild -exportArchive \
+              -archivePath "$RUNNER_TEMP/PrivateSpaceIOS.xcarchive" \
+              -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+              -exportPath "$RUNNER_TEMP/ipa-export"
+
+            IPA_SRC=$(ls "$RUNNER_TEMP/ipa-export"/*.ipa | head -n 1)
+            IPA_NAME="PrivateSpace-iOS-v${APP_VERSION}.ipa"
+            cp "$IPA_SRC" "dist-release/ios/${IPA_NAME}"
+            SIGN_MODE="adhoc-ota"
+
+            if [ -n "$APPSTORE_ISSUER_ID" ] && [ -n "$APPSTORE_KEY_ID" ] && [ -n "$APPSTORE_PRIVATE_KEY" ]; then
+              echo "Uploading signed IPA to Apple TestFlight / App Store Connect..."
+              mkdir -p "$HOME/.appstoreconnect/private_keys"
+              printf '%s\n' "$APPSTORE_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
+              xcrun altool --upload-app --type ios \
+                -f "dist-release/ios/${IPA_NAME}" \
+                --apiKey "${APPSTORE_KEY_ID}" \
+                --apiIssuer "${APPSTORE_ISSUER_ID}"
+              SIGN_MODE="release-signed"
+            fi
+          else
+            echo "No Apple P12 signing secrets configured — packaging unsigned IPA for AltStore / SideStore / Sideloadly..."
+            xcodebuild \
+              -project ios/PrivateSpaceIOS.xcodeproj \
+              -scheme PrivateSpaceIOS \
+              -configuration Release \
+              -sdk iphoneos \
+              -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+              MARKETING_VERSION="${APP_VERSION}" \
+              CURRENT_PROJECT_VERSION="${APP_BUILD}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              build
+
+            mkdir -p "$RUNNER_TEMP/payload-stage/Payload"
+            cp -R "$RUNNER_TEMP/ios-derived/Build/Products/Release-iphoneos/PrivateSpaceIOS.app" "$RUNNER_TEMP/payload-stage/Payload/"
+            IPA_NAME="PrivateSpace-iOS-v${APP_VERSION}-unsigned.ipa"
+            (cd "$RUNNER_TEMP/payload-stage" && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/dist-release/ios/${IPA_NAME}")
+            SIGN_MODE="unsigned-sideload"
+          fi
+
+          (cd dist-release/ios && shasum -a 256 "${IPA_NAME}" > "${IPA_NAME}.sha256")
+          IPA_SHA=$(awk '{print $1}' "dist-release/ios/${IPA_NAME}.sha256")
+          IPA_SIZE=$(wc -c < "dist-release/ios/${IPA_NAME}" | tr -d ' ')
+          IPA_DL_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG_NAME}/${IPA_NAME}"
+
+          node --input-type=module - "$IPA_NAME" "$IPA_SHA" "$IPA_SIZE" "$SIGN_MODE" "$IPA_DL_URL" "$TAG_NAME" <<'EOF'
+          import fs from 'node:fs';
+          import { buildAppleOtaManifestPlist, buildItmsServicesUrl, buildAltStoreInstallUrl, buildAppStoreUrl } from './dist/server/shared/appUpdate.js';
+
+          const [, , ipaName, ipaSha, ipaSize, signMode, ipaDlUrl, tagName] = process.argv;
+          const version = process.env.APP_VERSION;
+          const buildNumber = Number(process.env.APP_BUILD);
+          const bundleId = process.env.IOS_BUNDLE_ID || 'io.privatespace.ios';
+          const otaBase = (process.env.IOS_OTA_BASE_URL || '').replace(/\/+$/, '');
+          const releasePlistUrl = `https://github.com/${process.env.GITHUB_REPOSITORY}/releases/download/${tagName}/ios-ota-manifest.plist`;
+          const otaManifestUrl = otaBase
+            ? `${otaBase}/api/v1/updates/ios-manifest.plist`
+            : (signMode !== 'unsigned-sideload' ? releasePlistUrl : null);
+
+          const plistXml = buildAppleOtaManifestPlist({
+            ipaUrl: ipaDlUrl,
+            bundleId,
+            bundleVersion: version,
+            buildNumber,
+            title: 'PrivateSpace',
+          });
+          fs.writeFileSync('dist-release/ios/ios-ota-manifest.plist', plistXml, 'utf8');
+
+          const testFlightUrl = process.env.IOS_TESTFLIGHT_URL || null;
+          const appStoreUrl = process.env.IOS_APP_STORE_ID ? buildAppStoreUrl(process.env.IOS_APP_STORE_ID) : null;
+          const itmsServicesUrl = otaManifestUrl ? buildItmsServicesUrl(otaManifestUrl) : null;
+
+          fs.writeFileSync('dist-release/ios/ios-meta.json', JSON.stringify({
+            platform: 'ios',
+            version,
+            buildNumber,
+            minSupportedVersion: process.env.IOS_MIN_SUPPORTED_VERSION || null,
+            fileName: ipaName,
+            sha256: ipaSha,
+            fileSize: Number(ipaSize),
+            signingMode: signMode,
+            iosInstallMethod: testFlightUrl ? 'testflight' : appStoreUrl ? 'appstore' : itmsServicesUrl ? 'ota-itms' : 'altstore',
+            otaManifestUrl,
+            itmsServicesUrl,
+            altStoreUrl: buildAltStoreInstallUrl(ipaDlUrl),
+            testFlightUrl,
+            appStoreUrl,
+          }, null, 2));
+          EOF
+
+      - name: Clean temporary iOS signing keychain & certificates
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/pss-ios-signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP"/*.mobileprovision "$HOME/.appstoreconnect/private_keys" 2>/dev/null || true
+
+      - name: Upload iOS IPA & OTA Manifest bundle
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PrivateSpace-iOS-ipa
+          path: dist-release/ios/*
+          if-no-files-found: error
+
+  mobile-release:
+    name: Publish Android APK, iOS IPA & Auto-Update Manifest to GitHub Releases
+    needs: [verify, android-apk, ios-verify]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Download Android & iOS build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-stage
+
+      - name: Generate release-manifest.json & SHA256SUMS.txt
+        run: |
+          mkdir -p release-publish
+          cp release-stage/PrivateSpace-Android-apk/*.apk release-publish/
+          cp release-stage/PrivateSpace-Android-apk/*.sha256 release-publish/
+          cp release-stage/PrivateSpace-iOS-ipa/*.ipa release-publish/
+          cp release-stage/PrivateSpace-iOS-ipa/*.sha256 release-publish/
+          cp release-stage/PrivateSpace-iOS-ipa/ios-ota-manifest.plist release-publish/
+
+          (cd release-publish && sha256sum *.apk *.ipa ios-ota-manifest.plist > SHA256SUMS.txt)
+
+          node --input-type=module <<'EOF'
+          import fs from 'node:fs';
+
+          const repo = process.env.GITHUB_REPOSITORY;
+          const tagName = process.env.GITHUB_REF_NAME;
+          const version = tagName.replace(/^v/i, '');
+          const prerelease = version.includes('-');
+          const androidMeta = JSON.parse(fs.readFileSync('release-stage/PrivateSpace-Android-apk/android-meta.json', 'utf8'));
+          const iosMeta = JSON.parse(fs.readFileSync('release-stage/PrivateSpace-iOS-ipa/ios-meta.json', 'utf8'));
+
+          const dlBase = `https://github.com/${repo}/releases/download/${tagName}`;
+          const manifest = {
+            schemaVersion: 1,
+            repository: repo,
+            tagName,
+            version,
+            buildNumber: androidMeta.buildNumber,
+            prerelease,
+            publishedAt: new Date().toISOString(),
+            htmlUrl: `https://github.com/${repo}/releases/tag/${tagName}`,
+            android: {
+              ...androidMeta,
+              downloadUrl: `${dlBase}/${androidMeta.fileName}`,
+            },
+            ios: {
+              ...iosMeta,
+              downloadUrl: `${dlBase}/${iosMeta.fileName}`,
+            },
+          };
+
+          fs.writeFileSync('release-publish/release-manifest.json', JSON.stringify(manifest, null, 2));
+          EOF
+
+      - name: Publish GitHub Release with APK, IPA, OTA Manifest & SHA256SUMS
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PrivateSpace ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            release-publish/*.apk
+            release-publish/*.ipa
+            release-publish/*.sha256
+            release-publish/ios-ota-manifest.plist
+            release-publish/release-manifest.json
+            release-publish/SHA256SUMS.txt
 
   docker-publish:
     name: Multi-Arch Docker Build & Push (GHCR)

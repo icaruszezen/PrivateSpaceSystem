@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Copy,
+  Download,
   Fingerprint,
   KeyRound,
   Lock,
@@ -9,13 +10,17 @@ import {
   RefreshCw,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Sun,
   Trash2,
   X,
 } from 'lucide-react';
+import { normalizeGithubRepo } from '@shared/appUpdate';
 import type {
+  AppUpdateCheckResponse,
   CipherEnvelopeInspection,
   MediaItem,
+  MobileUpdatePreferences,
   NoteItem,
   PasswordItem,
   SessionInfo,
@@ -45,6 +50,12 @@ interface MobileSecurityTabProps {
   notes: NoteItem[];
   passwords: PasswordItem[];
   media: MediaItem[];
+  updatePrefs: MobileUpdatePreferences;
+  updateInfo: AppUpdateCheckResponse | null;
+  checkingUpdate: boolean;
+  onUpdatePrefsChange: (next: MobileUpdatePreferences) => void;
+  onCheckUpdate: (force?: boolean) => Promise<void>;
+  onOpenUpdateModal: () => void;
   onToggleTheme: () => void;
   onToggleClipboardAutoClear: () => void;
   onToggleScreenshotShield: (next: boolean) => Promise<void>;
@@ -71,6 +82,12 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   notes,
   passwords,
   media,
+  updatePrefs,
+  updateInfo,
+  checkingUpdate,
+  onUpdatePrefsChange,
+  onCheckUpdate,
+  onOpenUpdateModal,
   onToggleTheme,
   onToggleClipboardAutoClear,
   onToggleScreenshotShield,
@@ -86,6 +103,11 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   const [selectedCipherId, setSelectedCipherId] = useState<string>(inspectTargetId ?? '');
   const [envelope, setEnvelope] = useState<CipherEnvelopeInspection | null>(null);
   const [loading, setLoading] = useState(false);
+  const [repoDraft, setRepoDraft] = useState<string>(updatePrefs.customGithubRepo);
+
+  useEffect(() => {
+    setRepoDraft(updatePrefs.customGithubRepo);
+  }, [updatePrefs.customGithubRepo]);
 
   // PIN Setup Modal
   const [pinModalOpen, setPinModalOpen] = useState(false);
@@ -210,6 +232,209 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
 
   return (
     <>
+      {/* 0. Software Version & GitHub Auto-Update Configuration */}
+      <section className="m-card" data-testid="android-auto-update-card">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            marginBottom: 8,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <Sparkles size={16} style={{ color: 'var(--m-accent)', flexShrink: 0 }} />
+            <span style={{ fontWeight: 700, fontSize: '0.92rem' }}>
+              软件版本与 GitHub 自动更新
+            </span>
+          </div>
+          <span
+            className="m-crypto-badge mono"
+            style={{
+              fontSize: '0.68rem',
+              padding: '2px 8px',
+              background: updateInfo?.hasUpdate ? 'var(--m-accent-soft)' : undefined,
+              color: updateInfo?.hasUpdate ? 'var(--m-accent)' : undefined,
+            }}
+          >
+            v{deviceMeta.appVersionName} ({deviceMeta.appVersionCode})
+          </span>
+        </div>
+
+        <div
+          className="m-probe-box"
+          style={{
+            marginBottom: 10,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: '0.84rem' }}>
+              {updateInfo?.hasUpdate
+                ? `发现新版本 v${updateInfo.latestVersion} (${updateInfo.releaseName})`
+                : `当前已是最新版本 v${deviceMeta.appVersionName}`}
+            </div>
+            <div
+              className="mono"
+              style={{
+                fontSize: '0.7rem',
+                color: 'var(--m-text-tertiary)',
+                marginTop: 2,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              源：{updateInfo?.repository ?? updatePrefs.customGithubRepo} ·{' '}
+              {updatePrefs.channel === 'beta' ? '预览通道' : '正式通道'}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            {updateInfo?.hasUpdate && (
+              <button
+                id="m-sec-open-update-btn"
+                type="button"
+                className="m-btn m-btn-primary m-btn-sm"
+                onClick={onOpenUpdateModal}
+              >
+                <Download size={13} />
+                <span>立即升级</span>
+              </button>
+            )}
+            <button
+              id="m-sec-check-update-btn"
+              type="button"
+              className="m-btn m-btn-soft m-btn-sm"
+              disabled={checkingUpdate}
+              onClick={() => void onCheckUpdate(true)}
+            >
+              <RefreshCw size={13} />
+              <span>{checkingUpdate ? '检测中' : '检查更新'}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="m-switch-row">
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '0.86rem' }}>启动时自动检测新版本</div>
+            <div style={{ fontSize: '0.73rem', color: 'var(--m-text-tertiary)' }}>
+              后台静默比对 SemVer 版本号并校验 APK SHA-256 指纹
+            </div>
+          </div>
+          <button
+            id="m-sec-autocheck-toggle"
+            type="button"
+            className={`m-toggle ${updatePrefs.autoCheckOnLaunch ? 'is-on' : ''}`}
+            onClick={() =>
+              onUpdatePrefsChange({
+                ...updatePrefs,
+                autoCheckOnLaunch: !updatePrefs.autoCheckOnLaunch,
+              })
+            }
+            aria-label="切换启动时自动检测更新"
+          />
+        </div>
+
+        <div style={{ paddingTop: 8 }}>
+          <div
+            style={{
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              color: 'var(--m-text-secondary)',
+              marginBottom: 5,
+            }}
+          >
+            版本发布通道 (Release Channel)
+          </div>
+          <div className="m-seg-row" style={{ marginBottom: 10 }}>
+            <button
+              type="button"
+              className={`m-seg-btn ${updatePrefs.channel === 'stable' ? 'is-active' : ''}`}
+              onClick={() =>
+                onUpdatePrefsChange({ ...updatePrefs, channel: 'stable', skippedVersion: null })
+              }
+            >
+              正式版 (Stable)
+            </button>
+            <button
+              type="button"
+              className={`m-seg-btn ${updatePrefs.channel === 'beta' ? 'is-active' : ''}`}
+              onClick={() =>
+                onUpdatePrefsChange({ ...updatePrefs, channel: 'beta', skippedVersion: null })
+              }
+            >
+              含预览版 (Beta)
+            </button>
+          </div>
+
+          <div
+            style={{
+              fontSize: '0.75rem',
+              fontWeight: 600,
+              color: 'var(--m-text-secondary)',
+              marginBottom: 5,
+            }}
+          >
+            更新源模式 (GitHub 仓库连接方式)
+          </div>
+          <div className="m-seg-row" style={{ marginBottom: 8 }}>
+            <button
+              type="button"
+              className={`m-seg-btn ${updatePrefs.sourceMode === 'server' ? 'is-active' : ''}`}
+              onClick={() => onUpdatePrefsChange({ ...updatePrefs, sourceMode: 'server' })}
+            >
+              跟随服务端网关 (推荐)
+            </button>
+            <button
+              type="button"
+              className={`m-seg-btn ${updatePrefs.sourceMode === 'github' ? 'is-active' : ''}`}
+              onClick={() => onUpdatePrefsChange({ ...updatePrefs, sourceMode: 'github' })}
+            >
+              直连 GitHub 仓库
+            </button>
+          </div>
+
+          {updatePrefs.sourceMode === 'github' && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                const normalized = normalizeGithubRepo(repoDraft);
+                if (!normalized) {
+                  onNotify('请输入有效的 GitHub 仓库 owner/repo，例如 icaruszezen/PrivateSpaceSystem');
+                  return;
+                }
+                onUpdatePrefsChange({
+                  ...updatePrefs,
+                  customGithubRepo: normalized,
+                  skippedVersion: null,
+                });
+                onNotify(`已绑定 GitHub 更新仓库：${normalized}`);
+              }}
+              style={{ marginTop: 6 }}
+            >
+              <div className="m-input-group">
+                <input
+                  type="text"
+                  className="m-input mono"
+                  style={{ fontSize: '0.8rem' }}
+                  placeholder="owner/repo (如 icaruszezen/PrivateSpaceSystem)"
+                  value={repoDraft}
+                  onChange={(e) => setRepoDraft(e.target.value)}
+                />
+                <button type="submit" className="m-btn m-btn-soft m-btn-sm">
+                  保存仓库
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </section>
+
       {/* 1. Android Native Privacy & Hardware Controls */}
       <section className="m-card">
         <div

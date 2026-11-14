@@ -23,6 +23,7 @@ export function createHealthRoutes(repo: VaultRepository): Hono {
         'resumable-upload',
         'sse-sync',
         'ios-autofill',
+        'mobile-auto-update',
       ],
       timestamp: new Date().toISOString(),
     });
