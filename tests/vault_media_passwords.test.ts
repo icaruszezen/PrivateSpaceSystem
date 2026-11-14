@@ -9,7 +9,16 @@ import {
   DEFAULT_MEDIA_CHUNK_SIZE,
   EncryptedChunkStore,
 } from '../src/server/crypto/chunkStore.js';
-import { createMasterKeyEnvelope } from '../src/server/crypto/vaultCrypto.js';
+import { randomUuid } from '../src/shared/cryptoPrimitives.js';
+import {
+  computeEncryptedRangeForPlainRange,
+  createZeroKnowledgeMasterBundle,
+  decryptPsencRangeSlice,
+  encryptItemPayload,
+  encryptMediaBytesToPsenc,
+  hydrateDecryptedMedia,
+  unlockZeroKnowledgeMasterBundle,
+} from '../src/shared/e2ee.js';
 import { generateTotp, parseTotpInput } from '../src/shared/totp.js';
 import {
   auditPasswordVault,
@@ -17,7 +26,12 @@ import {
   generateMemorablePassphrase,
   generateSecurePassword,
 } from '../src/shared/passwordGenerator.js';
-import type { PasswordItem } from '../src/shared/types.js';
+import type {
+  EncryptedMediaUploadMetadata,
+  EncryptedVaultRecordDto,
+  MediaDecryptedPayload,
+  PasswordItem,
+} from '../src/shared/types.js';
 import { PrivateSpaceMobileClient } from '../mobile/src/syncClient.js';
 
 /**
@@ -122,7 +136,7 @@ function collectAllFilesRecursive(dirPath: string): string[] {
   return out;
 }
 
-describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile Multi-Device Sync', () => {
+describe('Passwords, TOTP, Client-Side PSENC001 Chunked Media, Blind HTTP 206 Streaming & Multi-Device Sync', () => {
   const tempDirs: string[] = [];
   const instances: AppInstance[] = [];
 
@@ -141,6 +155,19 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     return { inst, dir, dbPath };
   }
 
+  function makeInProcessFetch(app: AppInstance['app']): typeof fetch {
+    return async (input, init) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url;
+      const parsedUrl = new URL(url);
+      return app.request(`${parsedUrl.pathname}${parsedUrl.search}`, init);
+    };
+  }
+
   afterEach(() => {
     while (instances.length > 0) {
       const inst = instances.pop()!;
@@ -157,15 +184,12 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
   });
 
   it('computes RFC 6238 TOTP codes accurately for Base32 secrets and otpauth:// URIs', () => {
-    // RFC 6238 ASCII seed "12345678901234567890" -> Base32 "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
-    // At t = 59s, 8-digit SHA1 RFC 6238 test vector is "94287082"
     const rfcUri =
       'otpauth://totp/RFC6238:test?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&digits=8&period=30&algorithm=SHA1';
     const res59 = generateTotp(rfcUri, 59_000);
     expect(res59.code).toBe('94287082');
     expect(res59.remainingSeconds).toBe(1);
 
-    // Parse full otpauth:// URI with SHA256
     const uri =
       'otpauth://totp/GitHub:icarus%40privatespace.dev?secret=JBSWY3DPEHPK3PXP&issuer=GitHub&algorithm=SHA256&digits=6&period=30';
     const parsed = parseTotpInput(uri);
@@ -252,148 +276,184 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     expect(audit.healthScore).toBeLessThan(85);
   });
 
-  it('encrypts multi-chunk PSENC001 blobs, streams arbitrary byte ranges in O(1), and detects bit tampering', async () => {
+  it('validates blind PSENC001 ciphertext storage, streams encrypted ranges in O(1), detects bit tampering, and shreds on delete', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pss-chunk-unit-'));
     tempDirs.push(tmpDir);
 
     const store = new EncryptedChunkStore(tmpDir);
-    const { dek } = createMasterKeyEnvelope('ChunkStoreSecret!2026');
+    const { dek } = await createZeroKnowledgeMasterBundle('ChunkStoreSecret!2026', {
+      iterations: 12_000,
+    });
     // 180 KiB spans 3 chunks (64 KiB + 64 KiB + 52 KiB)
-    const original = crypto.randomBytes(DEFAULT_MEDIA_CHUNK_SIZE * 2 + 53_248);
+    const original = new Uint8Array(crypto.randomBytes(DEFAULT_MEDIA_CHUNK_SIZE * 2 + 53_248));
+    const { encryptedBytes, meta } = await encryptMediaBytesToPsenc(dek, original);
 
-    const meta = await store.encryptBuffer(dek, original);
     expect(meta.chunkCount).toBe(3);
-    expect(meta.encryptedSize).toBeGreaterThan(original.length);
+    expect(meta.encryptedSize).toBeGreaterThan(original.byteLength);
+
+    // Blind store MUST reject non-PSENC001 plaintext buffers!
+    await expect(
+      store.storeEncryptedBuffer('deadbeefdeadbeefdeadbeef0001', Buffer.from(original), {
+        plainSize: original.byteLength,
+        chunkSize: DEFAULT_MEDIA_CHUNK_SIZE,
+        encryptedSize: original.byteLength,
+      }),
+    ).rejects.toThrow();
+
+    await store.storeEncryptedBuffer(meta.blobId, Buffer.from(encryptedBytes), {
+      plainSize: meta.plainSize,
+      chunkSize: meta.chunkSize,
+      encryptedSize: meta.encryptedSize,
+    });
 
     const blobPath = store.getBlobPath(meta.blobId);
     expect(fs.readFileSync(blobPath).subarray(0, 8).toString('ascii')).toBe('PSENC001');
 
-    // Stream a cross-boundary slice from middle of chunk 0 to middle of chunk 2
-    const rangeStart = 30_000;
-    const rangeEnd = 150_000;
-    const fek = store.unwrapFek(dek, meta);
-    const chunks: Buffer[] = [];
-    for await (const part of store.createDecryptedRangeStreamWithFek(
-      fek,
-      meta,
-      rangeStart,
-      rangeEnd,
-    )) {
-      chunks.push(Buffer.from(part));
+    // Stream encrypted byte range corresponding to plaintext [30_000, 150_000] and decrypt on client
+    const range = computeEncryptedRangeForPlainRange(meta, 30_000, 150_000);
+    const sliceStream = store.createEncryptedRangeStream(
+      meta.blobId,
+      meta.encryptedSize,
+      range.diskStart,
+      range.diskEnd,
+    );
+    const encryptedParts: Buffer[] = [];
+    for await (const part of sliceStream.stream) {
+      encryptedParts.push(Buffer.from(part));
     }
-    const streamed = Buffer.concat(chunks);
-    expect(streamed.length).toBe(rangeEnd - rangeStart + 1);
-    expect(Buffer.compare(streamed, original.subarray(rangeStart, rangeEnd + 1))).toBe(0);
+    const encryptedSlice = new Uint8Array(Buffer.concat(encryptedParts));
+    const decryptedSlice = await decryptPsencRangeSlice({
+      dek,
+      encryptedSlice,
+      meta,
+      clampedStart: range.clampedStart,
+      clampedEnd: range.clampedEnd,
+      firstChunkIdx: range.firstChunkIdx,
+      lastChunkIdx: range.lastChunkIdx,
+    });
+    expect(decryptedSlice.byteLength).toBe(150_000 - 30_000 + 1);
+    expect(
+      Buffer.compare(Buffer.from(decryptedSlice), Buffer.from(original.subarray(30_000, 150_001))),
+    ).toBe(0);
 
-    // Flip 1 bit inside chunk 0 ciphertext on disk -> stream decryption MUST throw GCM auth error
+    // Flip 1 bit inside chunk 0 ciphertext on disk -> client GCM decryption MUST throw
     const corrupted = fs.readFileSync(blobPath);
     corrupted[4096] ^= 0x80;
     fs.writeFileSync(blobPath, corrupted);
 
-    const fek2 = store.unwrapFek(dek, meta);
-    await expect(async () => {
-      for await (const _ of store.createDecryptedRangeStreamWithFek(fek2, meta, 0, 5000)) {
-        // consume chunk 0
-      }
-    }).rejects.toThrow();
+    const range0 = computeEncryptedRangeForPlainRange(meta, 0, 5000);
+    const corruptedStream = store.createEncryptedRangeStream(
+      meta.blobId,
+      meta.encryptedSize,
+      range0.diskStart,
+      range0.diskEnd,
+    );
+    const corruptedParts: Buffer[] = [];
+    for await (const part of corruptedStream.stream) {
+      corruptedParts.push(Buffer.from(part));
+    }
+    await expect(
+      decryptPsencRangeSlice({
+        dek,
+        encryptedSlice: new Uint8Array(Buffer.concat(corruptedParts)),
+        meta,
+        clampedStart: range0.clampedStart,
+        clampedEnd: range0.clampedEnd,
+        firstChunkIdx: range0.firstChunkIdx,
+        lastChunkIdx: range0.lastChunkIdx,
+      }),
+    ).rejects.toThrow();
 
     store.shredBlobSync(meta.blobId);
     expect(fs.existsSync(blobPath)).toBe(false);
   });
 
-  it('stores passwords, TOTP secrets, history & CSV imports with zero cleartext in SQLite on disk', async () => {
-    const { inst, dbPath } = bootTestApp('MasterVaultAdmin#2026');
+  it('stores E2EE passwords, TOTP secrets, rotation history & CSV imports with zero cleartext in SQLite on disk', async () => {
+    const { inst, dbPath } = bootTestApp();
     const { app } = inst;
 
-    const loginRes = await app.request('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: 'MasterVaultAdmin#2026', deviceName: 'Web Workstation' }),
+    const webClient = new PrivateSpaceMobileClient({
+      baseUrl: 'http://privatespace.local',
+      platform: 'android',
+      deviceName: 'Web Workstation SDK',
+      fetchImpl: makeInProcessFetch(app),
     });
-    expect(loginRes.status).toBe(200);
-    const { token } = await loginRes.json();
-    const authHeader = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const session = await webClient.setupAdmin({
+      password: 'MasterVaultAdmin#2026',
+      vaultName: 'ZeroKnowledgePasswords',
+    });
 
     const secretPwValue = 'SUPER_SECRET_PROD_DB_PASS_998877!';
     const secretTotpValue = 'JBSWY3DPEHPK3PXP';
     const secretRecoveryPin = 'RECOVERY_PIN_445566';
 
-    // 1. Create encrypted password entry
-    const createRes = await app.request('/api/v1/passwords', {
-      method: 'POST',
-      headers: authHeader,
-      body: JSON.stringify({
-        title: 'AWS Root Console_SECRET_TITLE',
-        username: 'root-admin@corp-vault.internal',
-        password: secretPwValue,
-        url: 'https://console.aws.amazon.com',
-        totpSecret: secretTotpValue,
-        category: 'server',
-        notes: '主生产账号根凭据',
-        tags: ['生产核心', 'AWS'],
-        isPinned: true,
-        customFields: [
-          { id: 'cf-1', label: '硬件恢复PIN', value: secretRecoveryPin, hidden: true },
-        ],
-      }),
+    // 1. Create client-encrypted password entry
+    const created = await webClient.createPassword({
+      title: 'AWS Root Console_SECRET_TITLE',
+      username: 'root-admin@corp-vault.internal',
+      password: secretPwValue,
+      url: 'https://console.aws.amazon.com',
+      totpSecret: secretTotpValue,
+      category: 'server',
+      notes: '主生产账号根凭据',
+      tags: ['生产核心', 'AWS'],
+      isPinned: true,
+      customFields: [
+        { id: 'cf-1', label: '硬件恢复PIN', value: secretRecoveryPin, hidden: true },
+      ],
     });
-    expect(createRes.status).toBe(201);
-    const { password: created } = await createRes.json();
     expect(created.password).toBe(secretPwValue);
     expect(created.totpSecret).toBe(secretTotpValue);
     expect(created.history).toHaveLength(0);
 
-    // 2. Rotate the stored password -> old password must be preserved inside encrypted history!
+    // 2. Rotate the stored password -> old password is preserved inside client-encrypted history!
     const rotatedPwValue = 'ROTATED_PROD_DB_PASS_2027_XY!';
-    const updateRes = await app.request(`/api/v1/passwords/${created.id}`, {
-      method: 'PATCH',
-      headers: authHeader,
-      body: JSON.stringify({
-        password: rotatedPwValue,
-        expectedRevision: 1,
-      }),
+    const updated = await webClient.updatePassword(created.id, {
+      password: rotatedPwValue,
+      expectedRevision: 1,
     });
-    expect(updateRes.status).toBe(200);
-    const { password: updated } = await updateRes.json();
     expect(updated.revision).toBe(2);
     expect(updated.password).toBe(rotatedPwValue);
     expect(updated.history).toHaveLength(1);
     expect(updated.history[0].password).toBe(secretPwValue);
 
-    // Stale revision must be rejected with 409 Conflict
+    // Stale expectedRevision=1 on server MUST be rejected with 409 Conflict
+    const rawCurrentRes = await app.request(`/api/v1/passwords/${created.id}`, {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+    const { item: rawCurrent } = (await rawCurrentRes.json()) as { item: EncryptedVaultRecordDto };
     const staleRes = await app.request(`/api/v1/passwords/${created.id}`, {
       method: 'PATCH',
-      headers: authHeader,
-      body: JSON.stringify({ title: 'Stale overwrite', expectedRevision: 1 }),
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        revision: 2,
+        envelope: rawCurrent.envelope,
+      }),
     });
     expect(staleRes.status).toBe(409);
 
-    // 3. Batch import CSV entries
-    const importRes = await app.request('/api/v1/passwords/import', {
-      method: 'POST',
-      headers: authHeader,
-      body: JSON.stringify({
-        entries: [
-          {
-            title: 'GitHub Enterprise',
-            username: 'dev@privatespace.io',
-            password: 'ImportedGhPassword!42',
-            url: 'https://github.com',
-            category: 'dev',
-          },
-          {
-            title: 'Cloudflare DNS',
-            username: 'dns@privatespace.io',
-            password: 'ImportedCfPassword!84',
-            url: 'https://dash.cloudflare.com',
-            category: 'work',
-          },
-        ],
-      }),
-    });
-    expect(importRes.status).toBe(201);
-    const importJson = await importRes.json();
-    expect(importJson.count).toBe(2);
+    // 3. Batch import client-encrypted CSV entries
+    const imported = await webClient.importPasswords([
+      {
+        title: 'GitHub Enterprise',
+        username: 'dev@privatespace.io',
+        password: 'ImportedGhPassword!42',
+        url: 'https://github.com',
+        category: 'dev',
+      },
+      {
+        title: 'Cloudflare DNS',
+        username: 'dns@privatespace.io',
+        password: 'ImportedCfPassword!84',
+        url: 'https://dash.cloudflare.com',
+        category: 'work',
+      },
+    ]);
+    expect(imported).toHaveLength(2);
 
     // 4. ZERO-PLAINTEXT AT-REST PROOF on raw SQLite database!
     inst.db.exec('PRAGMA wal_checkpoint(FULL);');
@@ -407,60 +467,84 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     expect(rawDb).not.toContain('ImportedGhPassword!42');
   });
 
-  it('handles encrypted images, resumable chunked MP4 videos, HTTP 206 streaming, and Android + iOS SDK delta sync', async () => {
-    const { inst, dir, dbPath } = bootTestApp('MultiDeviceMediaPass!2026');
+  it('handles client-encrypted multipart images, resumable PSENC001 MP4 videos, HTTP 206 range decryption, and Android + iOS delta sync', async () => {
+    const { inst, dir, dbPath } = bootTestApp();
     const { app } = inst;
+    const inProcessFetch = makeInProcessFetch(app);
 
-    const inProcessFetch: typeof fetch = async (input, init) => {
-      const url =
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input.url;
-      const parsedUrl = new URL(url);
-      return app.request(`${parsedUrl.pathname}${parsedUrl.search}`, init);
-    };
-
-    // 1. Android client logs in via Mobile SDK
+    // 1. Android client initializes vault via Zero-Knowledge E2EE
     const androidClient = new PrivateSpaceMobileClient({
       baseUrl: 'http://privatespace.local',
       platform: 'android',
       deviceName: 'Pixel 9 Pro',
       fetchImpl: inProcessFetch,
     });
-    const androidAuth = await androidClient.login('MultiDeviceMediaPass!2026');
+    const androidAuth = await androidClient.setupAdmin({
+      password: 'MultiDeviceMediaPass!2026',
+      vaultName: '极客影像零知识库',
+    });
     expect(androidAuth.token).toMatch(/^pss_/);
 
-    // 2. Create an encrypted album
-    const albumRes = await app.request('/api/v1/media/albums', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${androidAuth.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        name: '冰岛极光私密相册_ALBUM_SECRET',
-        description: '2026 冬季航拍原片与 4K 视频',
-        kind: 'mixed',
-      }),
+    // 2. Create a client-encrypted album
+    const album = await androidClient.createAlbum({
+      name: '冰岛极光私密相册_ALBUM_SECRET',
+      description: '2026 冬季航拍原片与 4K 视频',
+      kind: 'mixed',
     });
-    expect(albumRes.status).toBe(201);
-    const { album } = await albumRes.json();
 
-    // 3. Upload an image via multipart form-data and verify dimensions + zero-plaintext .psenc
+    // 3. Upload an encrypted PNG + encrypted thumbnail via multipart /api/v1/media/upload
     const imageSecretMarker = 'RAW_PNG_EXIF_GPS_SECRET_MARKER_889900';
-    const pngBytes = buildTestPngBuffer(1920, 1080, imageSecretMarker);
+    const pngBytes = new Uint8Array(buildTestPngBuffer(1920, 1080, imageSecretMarker));
+    const thumbBytes = new Uint8Array(buildTestPngBuffer(320, 180, 'THUMB_MARKER_SECRET'));
+
+    // Unlock DEK from setup response envelope to exercise raw multipart /api/v1/media/upload endpoint
+    const { dek: dekBytes } = await unlockZeroKnowledgeMasterBundle(
+      'MultiDeviceMediaPass!2026',
+      androidAuth,
+    );
+
+    const mainEnc = await encryptMediaBytesToPsenc(dekBytes, pngBytes);
+    const thumbEnc = await encryptMediaBytesToPsenc(dekBytes, thumbBytes);
+    const imgId = randomUuid();
+    const imgPayload: MediaDecryptedPayload = {
+      title: '雷克雅未克极光原片_IMG_SECRET',
+      originalFilename: 'iceland-aurora.png',
+      mimeType: 'image/png',
+      albumId: album.id,
+      tags: ['极光', 'RAW原图'],
+      description: '冰岛南岸极光延时原片',
+      width: 1920,
+      height: 1080,
+      durationMs: null,
+      videoCodec: null,
+      audioCodec: null,
+      bitrate: null,
+      sha256: mainEnc.meta.sha256,
+      thumbnailMimeType: 'image/png',
+      takenAt: new Date().toISOString(),
+    };
+    const imgEnvelope = await encryptItemPayload(dekBytes, imgId, 'image', 1, imgPayload);
+    const uploadMeta: EncryptedMediaUploadMetadata = {
+      id: imgId,
+      kind: 'image',
+      revision: 1,
+      envelope: imgEnvelope,
+      mainBlob: mainEnc.meta,
+      thumbBlob: thumbEnc.meta,
+    };
 
     const form = new FormData();
     form.append(
-      'file',
-      new Blob([new Uint8Array(pngBytes)], { type: 'image/png' }),
-      'iceland-aurora.png',
+      'encryptedFile',
+      new Blob([new Uint8Array(mainEnc.encryptedBytes)], { type: 'application/octet-stream' }),
+      `${mainEnc.meta.blobId}.psenc`,
     );
-    form.append('title', '雷克雅未克极光原片_IMG_SECRET');
-    form.append('albumId', album.id);
-    form.append('tags', '极光,RAW原图');
+    form.append(
+      'encryptedThumbnail',
+      new Blob([new Uint8Array(thumbEnc.encryptedBytes)], { type: 'application/octet-stream' }),
+      `${thumbEnc.meta.blobId}.psenc`,
+    );
+    form.append('metadata', JSON.stringify(uploadMeta));
 
     const imgUploadRes = await app.request('/api/v1/media/upload', {
       method: 'POST',
@@ -468,20 +552,24 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
       body: form,
     });
     expect(imgUploadRes.status).toBe(201);
-    const { media: uploadedImage } = await imgUploadRes.json();
+    const { item: rawUploadedImg } = (await imgUploadRes.json()) as {
+      item: EncryptedVaultRecordDto;
+    };
+    const uploadedImage = await hydrateDecryptedMedia(dekBytes, rawUploadedImg);
     expect(uploadedImage.itemType).toBe('image');
     expect(uploadedImage.width).toBe(1920);
     expect(uploadedImage.height).toBe(1080);
     expect(uploadedImage.albumId).toBe(album.id);
+    expect(uploadedImage.hasThumbnail).toBe(true);
 
-    // 4. Upload a 165 KiB MP4 video from Android SDK via resumable 64 KiB chunks with SHA-256 verification!
+    // 4. Upload a 165 KiB MP4 video from Android SDK via resumable 64 KiB encrypted PSENC001 parts!
     const videoSecretMarker = 'PRIVATE_MP4_VIDEO_FRAME_PAYLOAD_SECRET_776655';
     const mp4Bytes = buildTestMp4Buffer(1920, 1080, 12.5, 165 * 1024, videoSecretMarker);
     const mp4Sha256 = crypto.createHash('sha256').update(mp4Bytes).digest('hex');
 
     let progressCalls = 0;
     const uploadedVideo = await androidClient.uploadMediaResumable({
-      bytes: mp4Bytes,
+      bytes: new Uint8Array(mp4Bytes),
       filename: 'glacier-flight-1080p.mp4',
       mimeType: 'video/mp4',
       sha256Hex: mp4Sha256,
@@ -506,7 +594,7 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     expect(rawDb).not.toContain('glacier-flight-1080p.mp4');
 
     const blobFiles = collectAllFilesRecursive(path.join(dir, 'blobs'));
-    expect(blobFiles.length).toBeGreaterThanOrEqual(2);
+    expect(blobFiles.length).toBeGreaterThanOrEqual(3); // image + thumbnail + video
     for (const filePath of blobFiles) {
       expect(filePath.endsWith('.psenc')).toBe(true);
       const rawBlob = fs.readFileSync(filePath);
@@ -522,11 +610,11 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     expect(cipherRes.status).toBe(200);
     const { envelope } = await cipherRes.json();
     expect(envelope.itemType).toBe('video');
-    expect(envelope.chunkStore).toBeDefined();
+    expect(envelope.cipherVersion).toBe(2);
     expect(envelope.chunkStore.formatMagic).toBe('PSENC001');
     expect(envelope.chunkStore.chunkCount).toBe(3);
 
-    // 7. iOS client logs in, pulls incremental sync, and streams HTTP 206 byte range via ?token=...
+    // 7. iOS client logs in, pulls encrypted sync, verifies raw /stream is ciphertext, and decrypts HTTP 206 byte range!
     const iosClient = new PrivateSpaceMobileClient({
       baseUrl: 'http://privatespace.local',
       platform: 'ios',
@@ -536,23 +624,36 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     await iosClient.login('MultiDeviceMediaPass!2026');
     const { snapshot: iosSnap1 } = await iosClient.syncDelta();
     expect(Object.keys(iosSnap1.albums)).toHaveLength(1);
+    expect(iosSnap1.albums[album.id].name).toBe('冰岛极光私密相册_ALBUM_SECRET');
     expect(Object.keys(iosSnap1.media)).toHaveLength(2);
     expect(iosSnap1.media[uploadedVideo.id].sha256).toBe(mp4Sha256);
 
-    // HTTP 206 Range request spanning across chunk 0 -> chunk 1 -> chunk 2 using query token (like iOS AVPlayer)
+    // Raw /stream endpoint serves PSENC001 ciphertext (never plaintext!)
     const streamUrl = new URL(iosClient.getStreamUrl(uploadedVideo.id));
+    const rawHeaderRes = await app.request(`${streamUrl.pathname}${streamUrl.search}`, {
+      headers: { Range: 'bytes=0-19' },
+    });
+    expect(rawHeaderRes.status).toBe(206);
+    expect(rawHeaderRes.headers.get('X-PrivateSpace-Cipher')).toBe('PSENC001');
+    const rawHeaderBytes = Buffer.from(await rawHeaderRes.arrayBuffer());
+    expect(rawHeaderBytes.subarray(0, 8).toString('ascii')).toBe('PSENC001');
+
+    // Client-side O(1) HTTP 206 range decryption spanning across chunk 0 -> chunk 1 -> chunk 2
     const rangeStart = 50_000;
     const rangeEnd = 140_000;
-    const rangeRes = await app.request(`${streamUrl.pathname}${streamUrl.search}`, {
-      headers: { Range: `bytes=${rangeStart}-${rangeEnd}` },
-    });
-    expect(rangeRes.status).toBe(206);
-    expect(rangeRes.headers.get('Content-Range')).toBe(
-      `bytes ${rangeStart}-${rangeEnd}/${mp4Bytes.length}`,
+    const decryptedSlice = await iosClient.decryptMediaByteRange(
+      uploadedVideo.id,
+      rangeStart,
+      rangeEnd,
     );
-    const streamedSlice = Buffer.from(await rangeRes.arrayBuffer());
-    expect(streamedSlice.length).toBe(rangeEnd - rangeStart + 1);
-    expect(Buffer.compare(streamedSlice, mp4Bytes.subarray(rangeStart, rangeEnd + 1))).toBe(0);
+    expect(decryptedSlice.byteLength).toBe(rangeEnd - rangeStart + 1);
+    expect(
+      Buffer.compare(Buffer.from(decryptedSlice), mp4Bytes.subarray(rangeStart, rangeEnd + 1)),
+    ).toBe(0);
+
+    // Also verify full image decryption on iOS matches original PNG bytes
+    const decryptedImg = await iosClient.decryptMediaBytes(uploadedImage.id);
+    expect(Buffer.compare(Buffer.from(decryptedImg), Buffer.from(pngBytes))).toBe(0);
 
     // 8. Check 4-pillar security summary breakdown
     const secRes = await app.request('/api/v1/auth/security', {
@@ -560,11 +661,12 @@ describe('Passwords, TOTP, PSENC001 Chunked Media, HTTP 206 Streaming & Mobile M
     });
     expect(secRes.status).toBe(200);
     const secJson = await secRes.json();
+    expect(secJson.encryption.zeroKnowledge).toBe(true);
     expect(secJson.activeImages).toBe(1);
     expect(secJson.activeVideos).toBe(1);
     expect(secJson.videosEncryptedBytes).toBeGreaterThan(mp4Bytes.length);
 
-    // 9. Permanently delete video on Android -> .psenc blob is shredded & iOS receives deletion tombstone on delta sync!
+    // 9. Permanently delete video on Android -> .psenc blob is shredded & iOS receives deletion tombstone!
     const delRes = await app.request(`/api/v1/media/${uploadedVideo.id}`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${androidAuth.token}` },

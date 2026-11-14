@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Download,
   Edit3,
@@ -111,6 +111,81 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
     [videos, playingId],
   );
 
+  const [activeVideoSrc, setActiveVideoSrc] = useState<string | null>(null);
+  const [activePosterSrc, setActivePosterSrc] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!activeVideo) {
+      setActiveVideoSrc(null);
+      setActivePosterSrc(undefined);
+      return;
+    }
+    let cancelled = false;
+    setActiveVideoSrc(null);
+    setActivePosterSrc(undefined);
+
+    client
+      .loadMediaObjectUrl(activeVideo)
+      .then((url) => {
+        if (!cancelled) setActiveVideoSrc(url);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveVideoSrc(null);
+      });
+
+    if (activeVideo.hasThumbnail) {
+      client
+        .loadThumbnailObjectUrl(activeVideo)
+        .then((url) => {
+          if (!cancelled) setActivePosterSrc(url);
+        })
+        .catch(() => {
+          if (!cancelled) setActivePosterSrc(undefined);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeVideo, client]);
+
+  const VideoPosterThumb: React.FC<{ vid: MediaItem }> = ({ vid }) => {
+    const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+    useEffect(() => {
+      if (!vid.hasThumbnail) return;
+      let cancelled = false;
+      client
+        .loadThumbnailObjectUrl(vid)
+        .then((u) => {
+          if (!cancelled) setThumbUrl(u);
+        })
+        .catch(() => undefined);
+      return () => {
+        cancelled = true;
+      };
+    }, [vid]);
+
+    if (vid.hasThumbnail && thumbUrl) {
+      return <img src={thumbUrl} alt={vid.title} loading="lazy" />;
+    }
+    return (
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 6,
+          color: 'rgba(255,255,255,0.55)',
+        }}
+      >
+        <Film size={28} />
+        <span className="mono" style={{ fontSize: '0.7rem' }}>
+          PSENC001 E2EE
+        </span>
+      </div>
+    );
+  };
+
   const currentAlbumId =
     filter !== 'all' && filter !== 'starred' && filter !== 'trash' ? filter : null;
 
@@ -150,7 +225,7 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
               fontWeight: 600,
             }}
           >
-            <span>512KiB 断点续传加密中：{task.name}</span>
+            <span>512KiB 断点续传本地加密中：{task.name}</span>
             <span className="mono">{Math.round(task.progress * 100)}%</span>
           </div>
           <div className="m-progress-track">
@@ -318,7 +393,7 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
           </div>
           <div style={{ fontWeight: 700, color: 'var(--m-text)' }}>私密视频影院为空</div>
           <div style={{ fontSize: '0.82rem', marginTop: 4 }}>
-            支持 4K/1080P 视频断点续传与 HTTP 206 随机分块实时解密流播，拖动进度条秒开
+            支持 4K/1080P 视频断点续传与客户端本地 PSENC001 零知识解密流播
           </div>
         </div>
       ) : (
@@ -332,28 +407,7 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
             }}
           >
             <div className="m-video-poster">
-              {vid.hasThumbnail ? (
-                <img
-                  src={client.getThumbnailUrl(vid.id, vid.revision)}
-                  alt={vid.title}
-                  loading="lazy"
-                />
-              ) : (
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: 6,
-                    color: 'rgba(255,255,255,0.55)',
-                  }}
-                >
-                  <Film size={28} />
-                  <span className="mono" style={{ fontSize: '0.7rem' }}>
-                    PSENC001 STREAM
-                  </span>
-                </div>
-              )}
+              <VideoPosterThumb vid={vid} />
 
               <span className="m-video-res-pill">
                 {vid.width && vid.height ? `${vid.width}×${vid.height}` : 'HTTP 206'}
@@ -441,7 +495,7 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
                 {activeVideo.title}
               </div>
               <div className="mono" style={{ fontSize: '0.7rem', opacity: 0.75 }}>
-                HTTP 206 流式解密 · {formatBytes(activeVideo.byteSize)}
+                客户端 PSENC001 本地解密 · {formatBytes(activeVideo.byteSize)}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 4 }}>
@@ -467,20 +521,22 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
           </div>
 
           <div className="m-darkroom-stage" style={{ background: '#000' }}>
-            <video
-              ref={videoElRef}
-              src={client.getStreamUrl(activeVideo.id, activeVideo.revision)}
-              poster={
-                activeVideo.hasThumbnail
-                  ? client.getThumbnailUrl(activeVideo.id, activeVideo.revision)
-                  : undefined
-              }
-              controls
-              playsInline
-              autoPlay
-              loop={loopEnabled}
-              style={{ width: '100%', maxHeight: '100%', outline: 'none' }}
-            />
+            {activeVideoSrc ? (
+              <video
+                ref={videoElRef}
+                src={activeVideoSrc}
+                poster={activePosterSrc}
+                controls
+                playsInline
+                autoPlay
+                loop={loopEnabled}
+                style={{ width: '100%', maxHeight: '100%', outline: 'none' }}
+              />
+            ) : (
+              <div style={{ color: 'rgba(255,255,255,0.75)', fontSize: '0.84rem' }}>
+                正在本地校验并解密 PSENC001 视频流…
+              </div>
+            )}
           </div>
 
           <div className="m-darkroom-bottom">
@@ -543,15 +599,15 @@ export const MobileVideosTab: React.FC<MobileVideosTabProps> = ({
                 <span>+10s</span>
                 <FastForward size={14} />
               </button>
-              <a
-                href={client.getDownloadUrl(activeVideo.id)}
-                download={activeVideo.originalFilename}
+              <button
+                type="button"
                 className="m-icon-btn"
-                style={{ color: '#fff', textDecoration: 'none' }}
-                aria-label="下载原片"
+                style={{ color: '#fff' }}
+                aria-label="本地解密导出原片"
+                onClick={() => void client.downloadDecryptedMedia(activeVideo)}
               >
                 <Download size={18} />
-              </a>
+              </button>
             </div>
 
             <div style={{ display: 'flex', gap: 8 }}>

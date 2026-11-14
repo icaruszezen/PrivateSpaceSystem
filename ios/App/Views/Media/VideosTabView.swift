@@ -238,6 +238,7 @@ struct VideoCinemaPlayerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var player: AVPlayer?
+    @State private var resourceLoader: EncryptedMediaResourceLoader?
     @State private var playbackRate: Float = 1.0
     @State private var streamError: String?
 
@@ -301,7 +302,7 @@ struct VideoCinemaPlayerSheet: View {
                     }
                 }
 
-                Section("加密流式媒体参数") {
+                Section("端到端加密流式媒体参数") {
                     LabeledContent("原始文件名", value: video.originalFilename)
                     if video.width > 0 {
                         LabeledContent("分辨率", value: "\(video.width) × \(video.height)")
@@ -335,6 +336,7 @@ struct VideoCinemaPlayerSheet: View {
                     Button(role: .destructive) {
                         Task {
                             player?.pause()
+                            resourceLoader?.cancelAllRequests()
                             if video.isTrashed {
                                 await store.deleteMediaPermanently(id: video.id)
                             } else {
@@ -356,22 +358,20 @@ struct VideoCinemaPlayerSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("完成") {
                         player?.pause()
+                        resourceLoader?.cancelAllRequests()
                         dismiss()
                     }
                 }
             }
             .task {
                 do {
-                    let (url, headers) = try await store.apiClient.makeAuthenticatedStreamDescriptor(
-                        mediaId: video.id,
-                        revision: video.revision
-                    )
-                    let asset = AVURLAsset(
-                        url: url,
-                        options: ["AVURLAssetHTTPHeaderFieldsKey": headers]
+                    let (asset, loader) = try EncryptedMediaResourceLoader.makeStreamingAsset(
+                        for: video,
+                        apiClient: store.apiClient
                     )
                     let item = AVPlayerItem(asset: asset)
                     let avPlayer = AVPlayer(playerItem: item)
+                    self.resourceLoader = loader
                     self.player = avPlayer
                     avPlayer.play()
                 } catch {
@@ -380,6 +380,8 @@ struct VideoCinemaPlayerSheet: View {
             }
             .onDisappear {
                 player?.pause()
+                resourceLoader?.cancelAllRequests()
+                resourceLoader = nil
                 player = nil
             }
         }

@@ -1,8 +1,10 @@
 /**
- * Shared API contracts between PrivateSpace server and Web / Mobile (iOS & Android) clients.
+ * Shared API contracts between PrivateSpace blind ciphertext server and
+ * Zero-Knowledge E2EE clients (Web, Safari /ios, Capacitor Android, and Native Swift iOS).
  */
 
 export type VaultItemType = 'note' | 'password' | 'image' | 'video';
+export type VaultCipherDomain = VaultItemType | 'album' | 'upload';
 export type NoteFormat = 'markdown' | 'plain';
 export type MediaKind = 'image' | 'video';
 
@@ -16,12 +18,28 @@ export type PasswordCategory =
   | 'other';
 
 export interface EncryptionSpecInfo {
+  architecture: 'ZERO_KNOWLEDGE_E2EE_V2';
+  zeroKnowledge: true;
   cipher: 'AES-256-GCM';
-  keyWrap: 'AES-256-GCM Envelope (DEK + KEK)';
+  keyWrap: 'Client-Side AES-256-GCM Envelope (DEK + KEK)';
   itemKdf: 'HKDF-SHA256';
-  passwordKdf: 'scrypt (N=32768, r=8, p=1)';
-  mediaStreamCipher?: 'PSENC001 64KiB Chunked AES-256-GCM';
+  passwordKdf: 'PBKDF2-HMAC-SHA256 (310,000 iterations)';
+  authProof: 'HKDF-SHA256 Split AuthKey → Server scrypt Verifier';
+  mediaStreamCipher: 'Client-Side PSENC001 64KiB Chunked AES-256-GCM';
   aadBound: true;
+}
+
+export interface E2EEKdfParams {
+  algorithm: 'PBKDF2-HMAC-SHA256';
+  iterations: number;
+  hash: 'SHA-256';
+  dkLen: 64;
+}
+
+export interface WrappedDekDto {
+  iv: string; // Base64 (12B)
+  tag: string; // Base64 (16B)
+  ciphertext: string; // Base64 (32B)
 }
 
 export interface SessionInfo {
@@ -35,15 +53,37 @@ export interface SessionInfo {
   current: boolean;
 }
 
+export interface AuthParamsResponse {
+  initialized: boolean;
+  vaultName: string;
+  keyFingerprint: string | null;
+  kdfSalt: string | null;
+  kdfParams: E2EEKdfParams | null;
+  encryption: EncryptionSpecInfo;
+}
+
+export interface AuthEnvelopeResponse {
+  vaultName: string;
+  keyFingerprint: string;
+  kdfSalt: string;
+  kdfParams: E2EEKdfParams;
+  wrappedDek: WrappedDekDto;
+}
+
 export interface AuthStatusResponse {
   initialized: boolean;
   authenticated: boolean;
   vaultName: string;
   keyFingerprint: string | null;
+  kdfSalt?: string | null;
+  kdfParams?: E2EEKdfParams | null;
+  /** Returned ONLY when session is authenticated; never exposed unauthenticated */
+  wrappedDek?: WrappedDekDto | null;
   encryption: EncryptionSpecInfo;
   session: SessionInfo | null;
 }
 
+/** Client-local SDK input (password never transmitted over HTTP) */
 export interface SetupRequest {
   password: string;
   vaultName?: string;
@@ -51,8 +91,28 @@ export interface SetupRequest {
   platform?: 'web' | 'ios' | 'android' | 'api';
 }
 
+/** Client-local SDK input (password never transmitted over HTTP) */
 export interface LoginRequest {
   password: string;
+  deviceName?: string;
+  platform?: 'web' | 'ios' | 'android' | 'api';
+}
+
+/** Zero-Knowledge HTTP wire payload for POST /api/v1/auth/setup */
+export interface ZeroKnowledgeSetupRequest {
+  vaultName?: string;
+  kdfSalt: string; // Base64 (32B)
+  kdfParams: E2EEKdfParams;
+  authKey: string; // Base64 (32B) derived from auth half of PBKDF2 output
+  wrappedDek: WrappedDekDto;
+  keyFingerprint: string;
+  deviceName?: string;
+  platform?: 'web' | 'ios' | 'android' | 'api';
+}
+
+/** Zero-Knowledge HTTP wire payload for POST /api/v1/auth/login */
+export interface ZeroKnowledgeLoginRequest {
+  authKey: string; // Base64 (32B)
   deviceName?: string;
   platform?: 'web' | 'ios' | 'android' | 'api';
 }
@@ -62,12 +122,27 @@ export interface AuthSessionResponse {
   expiresAt: string;
   vaultName: string;
   keyFingerprint: string;
+  kdfSalt: string;
+  kdfParams: E2EEKdfParams;
+  wrappedDek: WrappedDekDto;
   session: SessionInfo;
 }
 
+/** Client-local SDK input (passwords never transmitted over HTTP) */
 export interface ChangePasswordRequest {
   currentPassword: string;
   newPassword: string;
+  revokeOtherSessions?: boolean;
+}
+
+/** Zero-Knowledge HTTP wire payload for POST /api/v1/auth/change-password */
+export interface ZeroKnowledgeChangePasswordRequest {
+  currentAuthKey: string; // Base64 (32B)
+  newAuthKey: string; // Base64 (32B)
+  newKdfSalt: string; // Base64 (32B)
+  newKdfParams: E2EEKdfParams;
+  newWrappedDek: WrappedDekDto;
+  keyFingerprint: string;
   revokeOtherSessions?: boolean;
 }
 
@@ -75,7 +150,147 @@ export interface UpdateVaultSettingsRequest {
   vaultName: string;
 }
 
-// ==================== 1. Encrypted Text Notes ====================
+// ==================== Zero-Knowledge Wire Ciphertext Envelopes ====================
+
+export interface CipherEnvelopeDto {
+  cipherVersion: number;
+  itemSalt: string; // Base64 (16B)
+  nonce: string; // Base64 (12B)
+  authTag: string; // Base64 (16B)
+  ciphertext: string; // Base64
+}
+
+export interface EncryptedBlobKeyMetaDto {
+  blobId: string;
+  fekSalt: string; // Base64 (16B)
+  fekNonce: string; // Base64 (12B)
+  fekTag: string; // Base64 (16B)
+  wrappedFek: string; // Base64 (32B)
+  baseNonce: string; // Base64 (12B)
+  chunkSize: number;
+  chunkCount: number;
+  plainSize: number;
+  encryptedSize: number;
+  sha256: string;
+}
+
+export interface MediaBlobKeyBundleDto {
+  main: EncryptedBlobKeyMetaDto;
+  thumbnail: EncryptedBlobKeyMetaDto | null;
+}
+
+export interface EncryptedVaultRecordDto {
+  id: string;
+  itemType: VaultItemType;
+  isPinned: boolean;
+  isArchived: boolean;
+  isTrashed: boolean;
+  revision: number;
+  syncSeq: number;
+  byteSize: number;
+  createdAt: string;
+  updatedAt: string;
+  trashedAt: string | null;
+  envelope: CipherEnvelopeDto;
+  mediaBlobs?: MediaBlobKeyBundleDto;
+}
+
+export interface EncryptedAlbumRecordDto {
+  id: string;
+  revision: number;
+  syncSeq: number;
+  createdAt: string;
+  updatedAt: string;
+  envelope: CipherEnvelopeDto;
+}
+
+export interface CreateEncryptedItemRequest {
+  id: string;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+}
+
+export interface BatchCreateEncryptedItemsRequest {
+  items: CreateEncryptedItemRequest[];
+}
+
+export interface UpdateEncryptedItemRequest {
+  isPinned?: boolean;
+  isArchived?: boolean;
+  isTrashed?: boolean;
+  expectedRevision?: number;
+  revision: number;
+  envelope: CipherEnvelopeDto;
+}
+
+export interface CreateEncryptedAlbumRequest {
+  id: string;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedMediaUploadMetadata {
+  id: string;
+  kind: MediaKind;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+  mainBlob: EncryptedBlobKeyMetaDto;
+  thumbBlob?: EncryptedBlobKeyMetaDto | null;
+}
+
+export interface EncryptedResumableUploadInitRequest {
+  uploadId?: string;
+  kind: MediaKind;
+  totalPlainBytes: number;
+  totalEncryptedBytes: number;
+  partPlainBytes: number;
+  totalParts: number;
+  metaEnvelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedResumableUploadInitResponse {
+  uploadId: string;
+  partPlainBytes: number;
+  totalParts: number;
+  totalPlainBytes: number;
+  totalEncryptedBytes: number;
+  expiresAt: string;
+}
+
+export interface EncryptedResumableUploadStatusResponse {
+  uploadId: string;
+  kind: MediaKind;
+  receivedChunks: number[];
+  totalChunks: number;
+  totalBytes: number;
+  totalEncryptedBytes: number;
+  chunkBytes: number;
+  metaEnvelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedResumableUploadCompleteRequest {
+  id: string;
+  kind: MediaKind;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+  mainBlob: EncryptedBlobKeyMetaDto;
+  thumbBlob?: EncryptedBlobKeyMetaDto | null;
+  encryptedThumbnailBase64?: string | null;
+}
+
+export interface EncryptedSyncPullResponse {
+  serverTime: string;
+  latestSyncSeq: number;
+  sinceSeq: number;
+  items: EncryptedVaultRecordDto[];
+  albums: EncryptedAlbumRecordDto[];
+  deleted: SyncTombstone[];
+}
+
+// ==================== 1. Decrypted Client Domain: Text Notes ====================
 
 export interface NoteDecryptedPayload {
   title: string;
@@ -120,7 +335,7 @@ export interface UpdateNoteRequest {
   expectedRevision?: number;
 }
 
-// ==================== 2. Encrypted Passwords & 2FA TOTP ====================
+// ==================== 2. Decrypted Client Domain: Passwords & 2FA TOTP ====================
 
 export interface PasswordCustomField {
   id: string;
@@ -203,7 +418,7 @@ export interface ImportPasswordEntryInput {
   tags?: string[];
 }
 
-// ==================== 3. Encrypted Images & Streaming Videos ====================
+// ==================== 3. Decrypted Client Domain: Images & Streaming Videos ====================
 
 export interface MediaDecryptedPayload {
   title: string;
@@ -236,6 +451,7 @@ export interface MediaItem extends MediaDecryptedPayload {
   chunkSize: number;
   chunkCount: number;
   hasThumbnail: boolean;
+  blobKeyBundle?: MediaBlobKeyBundleDto;
   createdAt: string;
   updatedAt: string;
   trashedAt: string | null;
@@ -250,6 +466,7 @@ export interface MediaAlbumDecryptedPayload {
 
 export interface MediaAlbum extends MediaAlbumDecryptedPayload {
   id: string;
+  revision?: number;
   itemCount: number;
   syncSeq: number;
   createdAt: string;
@@ -380,7 +597,7 @@ export interface SyncPullResponse {
   serverTime: string;
   latestSyncSeq: number;
   sinceSeq: number;
-  /** Unified changed items ordered by syncSeq (backward-compatible with NoteItem consumers) */
+  /** Unified changed items ordered by syncSeq */
   items: VaultSyncItem[];
   notes: NoteItem[];
   passwords: PasswordItem[];

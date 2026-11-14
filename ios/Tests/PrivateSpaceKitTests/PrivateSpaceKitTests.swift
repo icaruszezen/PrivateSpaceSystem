@@ -151,7 +151,6 @@ final class PrivateSpaceKitTests: XCTestCase {
 
         try store.saveSnapshot(snap)
 
-        // Verify zero cleartext on disk inside both .pscache and .psautofill
         let rawCacheBytes = try Data(contentsOf: store.snapshotFileURL)
         let rawAutoFillBytes = try Data(contentsOf: store.autoFillFileURL)
         XCTAssertEqual(rawCacheBytes.subdata(in: 0..<8), Data("PSCACHE1".utf8))
@@ -160,29 +159,114 @@ final class PrivateSpaceKitTests: XCTestCase {
         XCTAssertNil(rawCacheBytes.range(of: Data(secretPasswordVal.utf8)))
         XCTAssertNil(rawAutoFillBytes.range(of: Data(secretPasswordVal.utf8)))
 
-        // Round-trip decryption
         let restored = try store.loadSnapshot()
         XCTAssertEqual(restored?.notes["n1"]?.content, secretNoteBody)
         XCTAssertEqual(restored?.passwords["p1"]?.password, secretPasswordVal)
 
-        // Domain-matched AutoFill lookup
         let matched = try store.loadAutoFillCredentials(matching: ["https://gist.github.com"])
         XCTAssertEqual(matched.count, 1)
         XCTAssertEqual(matched.first?.password, secretPasswordVal)
 
-        // Flip 1 bit in ciphertext -> AES-GCM authentication MUST reject
         var tampered = rawCacheBytes
         tampered[tampered.count - 4] ^= 0x80
         try tampered.write(to: store.snapshotFileURL)
         XCTAssertThrowsError(try store.loadSnapshot())
 
-        // File shredding removes files cleanly
         store.shredLocalCache()
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.snapshotFileURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: store.autoFillFileURL.path))
     }
 
-    // MARK: - 4. Live PrivateSpace Server End-to-End Integration Test (CI Automated)
+    // MARK: - 4. Cross-Language Zero-Knowledge E2EE v2 & PSENC001 Parity Vectors
+
+    func testZeroKnowledgeCrossLanguageVectorsAndPsencChunking() throws {
+        // Exact deterministic vectors generated from `src/shared/e2ee.ts`
+        let saltB64 = "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw="
+        let expectedKekHex = "7b3c95e650de1d796b9ce386aa821846fe0b829d2d6169580390d1bb9c6db41e"
+        let expectedAuthKeyB64 = "BUdAo3rUoqtEVmxB0AGl5xE9+EXLlNYUccqAZBoM5l4="
+        let expectedDekB64 = "CRYjMD1KV2RxfouYpbK/zNnm8wANGic0QU5baHWCj5w="
+
+        let derived = try VaultE2EECrypto.deriveMasterKeysFromPassword(
+            password: "SwiftCrossVector!2026",
+            kdfSaltBase64: saltB64,
+            kdfParams: E2EEKdfParams(iterations: 12_000)
+        )
+        XCTAssertEqual(VaultE2EECrypto.bytesToHex(derived.kek), expectedKekHex)
+        XCTAssertEqual(derived.authKeyBase64, expectedAuthKeyB64)
+
+        let wrappedFromTs = WrappedDekDto(
+            iv: "AQIDBAUGBwgJCgsM",
+            tag: "GisJGMLfw8gAUufU7AoFVg==",
+            ciphertext: "ZkJJvIlf/1OVK4thy9HUT/RJOEMSRp8HdoaLGCm9pNc="
+        )
+        let unwrappedDek = try VaultE2EECrypto.unwrapMasterDek(wrappedDek: wrappedFromTs, kek: derived.kek)
+        XCTAssertEqual(unwrappedDek.base64EncodedString(), expectedDekB64)
+        XCTAssertEqual(try VaultE2EECrypto.computeKeyFingerprint(dek: unwrappedDek), "B9EE-F980-A7AB")
+
+        // Decrypt Note envelope encrypted by TypeScript `src/shared/e2ee.ts`
+        let tsNoteEnvelope = CipherEnvelopeDto(
+            cipherVersion: 2,
+            itemSalt: "AgcMERYbICUqLzQ5PkNITQ==",
+            nonce: "Cw4RFBcaHSAjJiks",
+            authTag: "yePmpgUvOllEyGItFeW+Cw==",
+            ciphertext: "lpTTl5SaUD82vjTUchuM7JF2SsiL3EseDUZ35K5X52Ps2I3CEMTkCoaDXSlN1YppPlrDF/YeF+OG9hEzbSyANzEm991OVg7w/wsxWsA4eqpO85G1FLjAtzQXc2vbSAFuraLxYH3G8J42rl8ogOc4i6UVeQEWr5wccbzoK0qA"
+        )
+        let decryptedTsNote = try VaultE2EECrypto.decryptItemPayload(
+            NoteDecryptedPayload.self,
+            dek: unwrappedDek,
+            itemId: "vec-note-001",
+            itemType: .note,
+            revision: 1,
+            envelope: tsNoteEnvelope
+        )
+        XCTAssertEqual(decryptedTsNote.title, "Vector")
+        XCTAssertEqual(decryptedTsNote.content, "Hello Swift E2EE")
+        XCTAssertEqual(decryptedTsNote.tags, ["e2ee"])
+
+        // Verify PSENC001 20B header & chunk nonce derivation match TypeScript byte-for-byte
+        let headerHex = VaultE2EECrypto.bytesToHex(
+            VaultE2EECrypto.encodePsencHeader(plainSize: 150_000, chunkPlainSize: 65_536)
+        )
+        XCTAssertEqual(headerHex, "5053454e433030310001000000000000000249f0")
+
+        let baseIv = try XCTUnwrap(Data(base64Encoded: "AQIDBAUGBwgJCgsM"))
+        let nonce2Hex = VaultE2EECrypto.bytesToHex(
+            try VaultE2EECrypto.derivePsencChunkNonce(baseNonce: baseIv, chunkIndex: 2)
+        )
+        XCTAssertEqual(nonce2Hex, "0102030405060708090a0b0e")
+
+        // Multi-chunk PSENC001 full + arbitrary cross-chunk HTTP 206 range decryption + tamper rejection
+        var plainMedia = Data(count: 145_000)
+        for i in 0..<plainMedia.count {
+            plainMedia[i] = UInt8((i * 31 + 17) & 0xff)
+        }
+        let (psencData, meta) = try VaultE2EECrypto.encryptMediaBytesToPsenc(dek: unwrappedDek, plainData: plainMedia)
+        XCTAssertEqual(meta.chunkCount, 3)
+        XCTAssertEqual(psencData.subdata(in: 0..<8), Data("PSENC001".utf8))
+        XCTAssertEqual(try VaultE2EECrypto.decryptPsencFullBuffer(dek: unwrappedDek, encryptedData: psencData, meta: meta), plainMedia)
+
+        let range = VaultE2EECrypto.computeEncryptedRangeForPlainRange(
+            meta: meta,
+            startPlainByte: 50_000,
+            endPlainByte: 132_000
+        )
+        let cipherRangeSlice = psencData.subdata(in: range.diskStart..<(range.diskEnd + 1))
+        let decryptedRange = try VaultE2EECrypto.decryptPsencRangeSlice(
+            dek: unwrappedDek,
+            encryptedSlice: cipherRangeSlice,
+            meta: meta,
+            range: range
+        )
+        XCTAssertEqual(decryptedRange, plainMedia.subdata(in: 50_000..<132_001))
+
+        var tamperedPsenc = psencData
+        tamperedPsenc[tamperedPsenc.count - 5] ^= 0x01
+        XCTAssertThrowsError(
+            try VaultE2EECrypto.decryptPsencFullBuffer(dek: unwrappedDek, encryptedData: tamperedPsenc, meta: meta)
+        )
+    }
+
+    // MARK: - 5. Live PrivateSpace Zero-Knowledge Server End-to-End Integration Test (CI Automated)
 
     func testLiveServerEndToEndSyncAndStreamingWhenConfigured() async throws {
         guard let serverURL = ProcessInfo.processInfo.environment["PRIVATESPACE_TEST_SERVER_URL"],
@@ -199,73 +283,125 @@ final class PrivateSpaceKitTests: XCTestCase {
 
         let status = try await client.getAuthStatus()
         if !status.initialized {
-            _ = try await client.setupAdmin(password: adminPassword, vaultName: "iOS CI Vault")
+            _ = try await client.setupAdmin(
+                password: adminPassword,
+                vaultName: "iOS Zero-Knowledge CI Vault",
+                iterations: 20_000
+            )
         } else {
             _ = try await client.login(password: adminPassword)
         }
 
-        // 1. Create encrypted note & password
+        // Verify unauthenticated `/api/v1/auth/params` NEVER leaks `wrappedDek` and legacy plaintext login is rejected
+        var paramsReq = URLRequest(url: try XCTUnwrap(URL(string: "\(serverURL)/api/v1/auth/params")))
+        paramsReq.httpMethod = "GET"
+        let (paramsRaw, _) = try await URLSession.shared.data(for: paramsReq)
+        let paramsJsonStr = String(decoding: paramsRaw, as: UTF8.self)
+        XCTAssertFalse(paramsJsonStr.contains("wrappedDek"))
+
+        var legacyLoginReq = URLRequest(url: try XCTUnwrap(URL(string: "\(serverURL)/api/v1/auth/login")))
+        legacyLoginReq.httpMethod = "POST"
+        legacyLoginReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        legacyLoginReq.httpBody = Data("{\"password\":\"\(adminPassword)\"}".utf8)
+        let (_, legacyResp) = try await URLSession.shared.data(for: legacyLoginReq)
+        XCTAssertEqual((legacyResp as? HTTPURLResponse)?.statusCode, 400)
+
+        // 1. Create client-encrypted note, password & album
         let note = try await client.createNote(
             CreateNoteRequest(
-                title: "SwiftUI E2E Note",
-                content: "- [ ] Verify CryptoKit & Server Sync",
-                tags: ["ios", "ci"]
+                title: "SwiftUI Zero-Knowledge Note",
+                content: "- [x] Verify Client-Side E2EE v2 & Server Blindness",
+                tags: ["ios", "e2ee"]
             )
         )
         XCTAssertEqual(note.revision, 1)
+        XCTAssertEqual(note.title, "SwiftUI Zero-Knowledge Note")
 
+        let secretCredential = PasswordSecurityEngine.generateSecurePassword()
         let pw = try await client.createPassword(
             CreatePasswordRequest(
                 title: "Apple Developer Portal",
                 username: "ios-ci@privatespace.io",
-                password: PasswordSecurityEngine.generateSecurePassword(),
+                password: secretCredential,
                 url: "https://developer.apple.com",
                 totpSecret: "JBSWY3DPEHPK3PXP",
                 category: .dev
             )
         )
         XCTAssertEqual(pw.category, .dev)
+        XCTAssertEqual(pw.password, secretCredential)
 
-        // 2. Upload multi-chunk synthetic MP4 via 64 KiB resumable protocol with SHA-256 integrity
+        let album = try await client.createAlbum(CreateAlbumRequest(name: "iOS 零知识相册", kind: "video"))
+        XCTAssertEqual(album.name, "iOS 零知识相册")
+
+        // 2. Upload multi-chunk synthetic MP4 via client-side PSENC001 64 KiB resumable protocol
         var syntheticVideo = Data(count: 150 * 1024)
         for i in 0..<syntheticVideo.count {
-            syntheticVideo[i] = UInt8(i & 0xff)
+            syntheticVideo[i] = UInt8((i * 7 + 13) & 0xff)
         }
         let media = try await client.uploadMediaResumable(
             data: syntheticVideo,
-            filename: "ios-cinema-test.mp4",
+            filename: "ios-e2ee-cinema.mp4",
             mimeType: "video/mp4",
             kind: .video,
-            title: "iOS AVPlayer Range Stream Test",
+            title: "iOS AVPlayer E2EE Range Stream Test",
+            albumId: album.id,
             chunkBytes: 64 * 1024
         )
         XCTAssertEqual(media.byteSize, syntheticVideo.count)
         XCTAssertEqual(media.chunkCount, 3)
 
-        // 3. Verify HTTP 206 Partial Content Range request matching iOS AVPlayer behavior
+        // 3. Prove raw server stream serves PSENC001 ciphertext (NOT plaintext) AND client range decryption recovers exact bytes
         let (streamURL, headers) = try await client.makeAuthenticatedStreamDescriptor(
             mediaId: media.id,
             revision: media.revision
         )
-        var rangeReq = URLRequest(url: streamURL)
-        for (k, v) in headers { rangeReq.setValue(v, forHTTPHeaderField: k) }
-        rangeReq.setValue("bytes=40000-110000", forHTTPHeaderField: "Range")
+        var rawHeadReq = URLRequest(url: streamURL)
+        for (k, v) in headers { rawHeadReq.setValue(v, forHTTPHeaderField: k) }
+        rawHeadReq.setValue("bytes=0-31", forHTTPHeaderField: "Range")
+        let (rawCipherHead, rawResp) = try await URLSession.shared.data(for: rawHeadReq)
+        XCTAssertEqual((rawResp as? HTTPURLResponse)?.statusCode, 206)
+        XCTAssertEqual(rawCipherHead.subdata(in: 0..<8), Data("PSENC001".utf8))
 
-        let (sliceData, resp) = try await URLSession.shared.data(for: rangeReq)
-        let http = try XCTUnwrap(resp as? HTTPURLResponse)
-        XCTAssertEqual(http.statusCode, 206)
-        XCTAssertEqual(sliceData, syntheticVideo.subdata(in: 40000..<110001))
+        let decryptedRangeSlice = try await client.fetchDecryptedMediaByteRange(
+            mediaId: media.id,
+            startPlainByte: 40_000,
+            endPlainByte: 110_000,
+            blobMeta: media.blobKeyBundle?.main
+        )
+        XCTAssertEqual(decryptedRangeSlice, syntheticVideo.subdata(in: 40_000..<110_001))
 
-        // 4. Verify incremental `since_seq` sync, cipher inspection & active sessions
+        // 4. Verify incremental `since_seq` sync, cipher v2 inspection & Zero-Knowledge KEK password rotation
         let syncDelta = try await client.pullSync(sinceSeq: 0)
-        XCTAssertTrue(syncDelta.notes.contains(where: { $0.id == note.id }))
-        XCTAssertTrue(syncDelta.passwords.contains(where: { $0.id == pw.id }))
+        XCTAssertTrue(syncDelta.notes.contains(where: { $0.id == note.id && $0.title == "SwiftUI Zero-Knowledge Note" }))
+        XCTAssertTrue(syncDelta.passwords.contains(where: { $0.id == pw.id && $0.password == secretCredential }))
         XCTAssertTrue(syncDelta.media.contains(where: { $0.id == media.id }))
+        XCTAssertTrue(syncDelta.albums.contains(where: { $0.id == album.id && $0.name == "iOS 零知识相册" }))
 
         let cipher = try await client.inspectCipherEnvelope(itemId: media.id)
+        XCTAssertEqual(cipher.cipherVersion, 2)
         XCTAssertEqual(cipher.chunkStore?.formatMagic, "PSENC001")
 
         let sessions = try await client.listSessions()
         XCTAssertTrue(sessions.contains(where: { $0.platform == .ios }))
+
+        // Rotate master password without re-encrypting media, then verify a second iOS client can unlock and decrypt
+        let rotatedPassword = "\(adminPassword)#Rotated99"
+        let rotResp = try await client.changeMasterPassword(
+            ChangePasswordRequest(
+                currentPassword: adminPassword,
+                newPassword: rotatedPassword,
+                revokeOtherSessions: false
+            )
+        )
+        XCTAssertTrue(rotResp.ok)
+
+        let secondClient = PrivateSpaceAPIClient(
+            baseURLString: serverURL,
+            deviceName: "iPad Pro · XCTest Verify"
+        )
+        _ = try await secondClient.login(password: rotatedPassword)
+        let fullDecryptedFromSecondDevice = try await secondClient.fetchFullMediaData(mediaId: media.id)
+        XCTAssertEqual(fullDecryptedFromSecondDevice, syntheticVideo)
     }
 }

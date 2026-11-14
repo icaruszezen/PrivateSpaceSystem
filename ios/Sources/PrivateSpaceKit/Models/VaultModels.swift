@@ -9,6 +9,15 @@ public enum VaultItemType: String, Codable, Sendable, CaseIterable {
     case video
 }
 
+public enum VaultCipherDomain: String, Codable, Sendable, CaseIterable {
+    case note
+    case password
+    case image
+    case video
+    case album
+    case upload
+}
+
 public enum NoteFormat: String, Codable, Sendable, CaseIterable {
     case markdown
     case plain
@@ -62,15 +71,49 @@ public enum PasswordCategory: String, Codable, Sendable, CaseIterable, Identifia
     }
 }
 
-// MARK: - Auth & Session Contracts
+// MARK: - Zero-Knowledge Auth, KDF & Envelope Contracts
 
 public struct EncryptionSpecInfo: Codable, Sendable, Equatable {
+    public let architecture: String?
+    public let zeroKnowledge: Bool?
     public let cipher: String
     public let keyWrap: String
     public let itemKdf: String
     public let passwordKdf: String
+    public let authProof: String?
     public let mediaStreamCipher: String?
     public let aadBound: Bool
+}
+
+public struct E2EEKdfParams: Codable, Sendable, Equatable, Hashable {
+    public let algorithm: String
+    public let iterations: Int
+    public let hash: String
+    public let dkLen: Int
+
+    public init(
+        algorithm: String = "PBKDF2-HMAC-SHA256",
+        iterations: Int = 310_000,
+        hash: String = "SHA-256",
+        dkLen: Int = 64
+    ) {
+        self.algorithm = algorithm
+        self.iterations = iterations
+        self.hash = hash
+        self.dkLen = dkLen
+    }
+}
+
+public struct WrappedDekDto: Codable, Sendable, Equatable, Hashable {
+    public let iv: String
+    public let tag: String
+    public let ciphertext: String
+
+    public init(iv: String, tag: String, ciphertext: String) {
+        self.iv = iv
+        self.tag = tag
+        self.ciphertext = ciphertext
+    }
 }
 
 public struct SessionInfo: Codable, Sendable, Identifiable, Equatable, Hashable {
@@ -84,15 +127,36 @@ public struct SessionInfo: Codable, Sendable, Identifiable, Equatable, Hashable 
     public let current: Bool
 }
 
+public struct AuthParamsResponse: Codable, Sendable, Equatable {
+    public let initialized: Bool
+    public let vaultName: String
+    public let keyFingerprint: String?
+    public let kdfSalt: String?
+    public let kdfParams: E2EEKdfParams?
+    public let encryption: EncryptionSpecInfo
+}
+
+public struct AuthEnvelopeResponse: Codable, Sendable, Equatable {
+    public let vaultName: String
+    public let keyFingerprint: String
+    public let kdfSalt: String
+    public let kdfParams: E2EEKdfParams
+    public let wrappedDek: WrappedDekDto
+}
+
 public struct AuthStatusResponse: Codable, Sendable, Equatable {
     public let initialized: Bool
     public let authenticated: Bool
     public let vaultName: String
     public let keyFingerprint: String?
+    public let kdfSalt: String?
+    public let kdfParams: E2EEKdfParams?
+    public let wrappedDek: WrappedDekDto?
     public let encryption: EncryptionSpecInfo
     public let session: SessionInfo?
 }
 
+/// Client-local setup input (master password is never sent over HTTP).
 public struct SetupRequest: Codable, Sendable {
     public let password: String
     public let vaultName: String?
@@ -112,6 +176,7 @@ public struct SetupRequest: Codable, Sendable {
     }
 }
 
+/// Client-local login input (master password is never sent over HTTP).
 public struct LoginRequest: Codable, Sendable {
     public let password: String
     public let deviceName: String?
@@ -128,14 +193,63 @@ public struct LoginRequest: Codable, Sendable {
     }
 }
 
+/// Zero-Knowledge wire payload for `POST /api/v1/auth/setup`.
+public struct ZeroKnowledgeSetupRequest: Codable, Sendable {
+    public let vaultName: String?
+    public let kdfSalt: String
+    public let kdfParams: E2EEKdfParams
+    public let authKey: String
+    public let wrappedDek: WrappedDekDto
+    public let keyFingerprint: String
+    public let deviceName: String?
+    public let platform: DevicePlatform?
+
+    public init(
+        vaultName: String?,
+        kdfSalt: String,
+        kdfParams: E2EEKdfParams,
+        authKey: String,
+        wrappedDek: WrappedDekDto,
+        keyFingerprint: String,
+        deviceName: String?,
+        platform: DevicePlatform? = .ios
+    ) {
+        self.vaultName = vaultName
+        self.kdfSalt = kdfSalt
+        self.kdfParams = kdfParams
+        self.authKey = authKey
+        self.wrappedDek = wrappedDek
+        self.keyFingerprint = keyFingerprint
+        self.deviceName = deviceName
+        self.platform = platform
+    }
+}
+
+/// Zero-Knowledge wire payload for `POST /api/v1/auth/login`.
+public struct ZeroKnowledgeLoginRequest: Codable, Sendable {
+    public let authKey: String
+    public let deviceName: String?
+    public let platform: DevicePlatform?
+
+    public init(authKey: String, deviceName: String?, platform: DevicePlatform? = .ios) {
+        self.authKey = authKey
+        self.deviceName = deviceName
+        self.platform = platform
+    }
+}
+
 public struct AuthSessionResponse: Codable, Sendable, Equatable {
     public let token: String
     public let expiresAt: String
     public let vaultName: String
     public let keyFingerprint: String
+    public let kdfSalt: String
+    public let kdfParams: E2EEKdfParams
+    public let wrappedDek: WrappedDekDto
     public let session: SessionInfo
 }
 
+/// Client-local master password rotation input (passwords never sent over HTTP).
 public struct ChangePasswordRequest: Codable, Sendable {
     public let currentPassword: String
     public let newPassword: String
@@ -144,6 +258,35 @@ public struct ChangePasswordRequest: Codable, Sendable {
     public init(currentPassword: String, newPassword: String, revokeOtherSessions: Bool = true) {
         self.currentPassword = currentPassword
         self.newPassword = newPassword
+        self.revokeOtherSessions = revokeOtherSessions
+    }
+}
+
+/// Zero-Knowledge wire payload for `POST /api/v1/auth/change-password`.
+public struct ZeroKnowledgeChangePasswordRequest: Codable, Sendable {
+    public let currentAuthKey: String
+    public let newAuthKey: String
+    public let newKdfSalt: String
+    public let newKdfParams: E2EEKdfParams
+    public let newWrappedDek: WrappedDekDto
+    public let keyFingerprint: String
+    public let revokeOtherSessions: Bool
+
+    public init(
+        currentAuthKey: String,
+        newAuthKey: String,
+        newKdfSalt: String,
+        newKdfParams: E2EEKdfParams,
+        newWrappedDek: WrappedDekDto,
+        keyFingerprint: String,
+        revokeOtherSessions: Bool
+    ) {
+        self.currentAuthKey = currentAuthKey
+        self.newAuthKey = newAuthKey
+        self.newKdfSalt = newKdfSalt
+        self.newKdfParams = newKdfParams
+        self.newWrappedDek = newWrappedDek
+        self.keyFingerprint = keyFingerprint
         self.revokeOtherSessions = revokeOtherSessions
     }
 }
@@ -159,6 +302,385 @@ public struct UpdateVaultSettingsRequest: Codable, Sendable {
 
     public init(vaultName: String) {
         self.vaultName = vaultName
+    }
+}
+
+// MARK: - Zero-Knowledge Wire Ciphertext Envelopes
+
+public struct CipherEnvelopeDto: Codable, Sendable, Equatable, Hashable {
+    public let cipherVersion: Int
+    public let itemSalt: String
+    public let nonce: String
+    public let authTag: String
+    public let ciphertext: String
+
+    public init(
+        cipherVersion: Int = 2,
+        itemSalt: String,
+        nonce: String,
+        authTag: String,
+        ciphertext: String
+    ) {
+        self.cipherVersion = cipherVersion
+        self.itemSalt = itemSalt
+        self.nonce = nonce
+        self.authTag = authTag
+        self.ciphertext = ciphertext
+    }
+}
+
+public struct EncryptedBlobKeyMetaDto: Codable, Sendable, Equatable, Hashable {
+    public let blobId: String
+    public let fekSalt: String
+    public let fekNonce: String
+    public let fekTag: String
+    public let wrappedFek: String
+    public let baseNonce: String
+    public let chunkSize: Int
+    public let chunkCount: Int
+    public let plainSize: Int
+    public let encryptedSize: Int
+    public let sha256: String
+
+    public init(
+        blobId: String,
+        fekSalt: String,
+        fekNonce: String,
+        fekTag: String,
+        wrappedFek: String,
+        baseNonce: String,
+        chunkSize: Int,
+        chunkCount: Int,
+        plainSize: Int,
+        encryptedSize: Int,
+        sha256: String
+    ) {
+        self.blobId = blobId
+        self.fekSalt = fekSalt
+        self.fekNonce = fekNonce
+        self.fekTag = fekTag
+        self.wrappedFek = wrappedFek
+        self.baseNonce = baseNonce
+        self.chunkSize = chunkSize
+        self.chunkCount = chunkCount
+        self.plainSize = plainSize
+        self.encryptedSize = encryptedSize
+        self.sha256 = sha256
+    }
+}
+
+public struct MediaBlobKeyBundleDto: Codable, Sendable, Equatable, Hashable {
+    public let main: EncryptedBlobKeyMetaDto
+    public let thumbnail: EncryptedBlobKeyMetaDto?
+
+    public init(main: EncryptedBlobKeyMetaDto, thumbnail: EncryptedBlobKeyMetaDto? = nil) {
+        self.main = main
+        self.thumbnail = thumbnail
+    }
+}
+
+public struct EncryptedVaultRecordDto: Codable, Sendable, Equatable {
+    public let id: String
+    public let itemType: VaultItemType
+    public let isPinned: Bool
+    public let isArchived: Bool
+    public let isTrashed: Bool
+    public let revision: Int
+    public let syncSeq: Int
+    public let byteSize: Int
+    public let createdAt: String
+    public let updatedAt: String
+    public let trashedAt: String?
+    public let envelope: CipherEnvelopeDto
+    public let mediaBlobs: MediaBlobKeyBundleDto?
+}
+
+public struct EncryptedAlbumRecordDto: Codable, Sendable, Equatable {
+    public let id: String
+    public let revision: Int
+    public let syncSeq: Int
+    public let createdAt: String
+    public let updatedAt: String
+    public let envelope: CipherEnvelopeDto
+}
+
+public struct CreateEncryptedItemRequest: Codable, Sendable {
+    public let id: String
+    public let isPinned: Bool?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+
+    public init(id: String, isPinned: Bool? = nil, revision: Int = 1, envelope: CipherEnvelopeDto) {
+        self.id = id
+        self.isPinned = isPinned
+        self.revision = revision
+        self.envelope = envelope
+    }
+}
+
+public struct BatchCreateEncryptedItemsRequest: Codable, Sendable {
+    public let items: [CreateEncryptedItemRequest]
+
+    public init(items: [CreateEncryptedItemRequest]) {
+        self.items = items
+    }
+}
+
+public struct UpdateEncryptedItemRequest: Codable, Sendable {
+    public let isPinned: Bool?
+    public let isArchived: Bool?
+    public let isTrashed: Bool?
+    public let expectedRevision: Int?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+
+    public init(
+        isPinned: Bool? = nil,
+        isArchived: Bool? = nil,
+        isTrashed: Bool? = nil,
+        expectedRevision: Int? = nil,
+        revision: Int,
+        envelope: CipherEnvelopeDto
+    ) {
+        self.isPinned = isPinned
+        self.isArchived = isArchived
+        self.isTrashed = isTrashed
+        self.expectedRevision = expectedRevision
+        self.revision = revision
+        self.envelope = envelope
+    }
+}
+
+public struct CreateEncryptedAlbumRequest: Codable, Sendable {
+    public let id: String
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+
+    public init(id: String, revision: Int = 1, envelope: CipherEnvelopeDto) {
+        self.id = id
+        self.revision = revision
+        self.envelope = envelope
+    }
+}
+
+public struct EncryptedResumableUploadInitRequest: Codable, Sendable {
+    public let uploadId: String?
+    public let kind: MediaKind
+    public let totalPlainBytes: Int
+    public let totalEncryptedBytes: Int
+    public let partPlainBytes: Int
+    public let totalParts: Int
+    public let metaEnvelope: CipherEnvelopeDto
+
+    public init(
+        uploadId: String? = nil,
+        kind: MediaKind,
+        totalPlainBytes: Int,
+        totalEncryptedBytes: Int,
+        partPlainBytes: Int,
+        totalParts: Int,
+        metaEnvelope: CipherEnvelopeDto
+    ) {
+        self.uploadId = uploadId
+        self.kind = kind
+        self.totalPlainBytes = totalPlainBytes
+        self.totalEncryptedBytes = totalEncryptedBytes
+        self.partPlainBytes = partPlainBytes
+        self.totalParts = totalParts
+        self.metaEnvelope = metaEnvelope
+    }
+}
+
+public struct EncryptedResumableUploadInitResponse: Codable, Sendable {
+    public let uploadId: String
+    public let partPlainBytes: Int
+    public let totalParts: Int
+    public let totalPlainBytes: Int
+    public let totalEncryptedBytes: Int
+    public let expiresAt: String
+}
+
+public struct EncryptedResumableUploadStatusResponse: Codable, Sendable {
+    public let uploadId: String
+    public let kind: MediaKind
+    public let receivedChunks: [Int]
+    public let totalChunks: Int
+    public let totalBytes: Int
+    public let totalEncryptedBytes: Int
+    public let chunkBytes: Int
+    public let metaEnvelope: CipherEnvelopeDto
+}
+
+public struct EncryptedResumableUploadCompleteRequest: Codable, Sendable {
+    public let id: String
+    public let kind: MediaKind
+    public let isPinned: Bool?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+    public let mainBlob: EncryptedBlobKeyMetaDto
+    public let thumbBlob: EncryptedBlobKeyMetaDto?
+    public let encryptedThumbnailBase64: String?
+
+    public init(
+        id: String,
+        kind: MediaKind,
+        isPinned: Bool? = nil,
+        revision: Int = 1,
+        envelope: CipherEnvelopeDto,
+        mainBlob: EncryptedBlobKeyMetaDto,
+        thumbBlob: EncryptedBlobKeyMetaDto? = nil,
+        encryptedThumbnailBase64: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.isPinned = isPinned
+        self.revision = revision
+        self.envelope = envelope
+        self.mainBlob = mainBlob
+        self.thumbBlob = thumbBlob
+        self.encryptedThumbnailBase64 = encryptedThumbnailBase64
+    }
+}
+
+public struct EncryptedSyncPullResponse: Codable, Sendable {
+    public let serverTime: String
+    public let latestSyncSeq: Int
+    public let sinceSeq: Int
+    public let items: [EncryptedVaultRecordDto]
+    public let albums: [EncryptedAlbumRecordDto]
+    public let deleted: [SyncTombstone]
+}
+
+// MARK: - Decrypted Client Payloads
+
+public struct NoteDecryptedPayload: Codable, Sendable, Equatable {
+    public var title: String
+    public var content: String
+    public var excerpt: String
+    public var tags: [String]
+    public var format: NoteFormat
+    public var wordCount: Int
+
+    public init(
+        title: String,
+        content: String,
+        excerpt: String,
+        tags: [String],
+        format: NoteFormat,
+        wordCount: Int
+    ) {
+        self.title = title
+        self.content = content
+        self.excerpt = excerpt
+        self.tags = tags
+        self.format = format
+        self.wordCount = wordCount
+    }
+}
+
+public struct PasswordDecryptedPayload: Codable, Sendable, Equatable {
+    public var title: String
+    public var username: String
+    public var password: String
+    public var url: String
+    public var totpSecret: String
+    public var category: PasswordCategory
+    public var notes: String
+    public var tags: [String]
+    public var customFields: [PasswordCustomField]
+    public var history: [PasswordHistoryEntry]
+    public var passwordChangedAt: String
+
+    public init(
+        title: String,
+        username: String,
+        password: String,
+        url: String,
+        totpSecret: String,
+        category: PasswordCategory,
+        notes: String,
+        tags: [String],
+        customFields: [PasswordCustomField],
+        history: [PasswordHistoryEntry],
+        passwordChangedAt: String
+    ) {
+        self.title = title
+        self.username = username
+        self.password = password
+        self.url = url
+        self.totpSecret = totpSecret
+        self.category = category
+        self.notes = notes
+        self.tags = tags
+        self.customFields = customFields
+        self.history = history
+        self.passwordChangedAt = passwordChangedAt
+    }
+}
+
+public struct MediaDecryptedPayload: Codable, Sendable, Equatable {
+    public var title: String
+    public var originalFilename: String
+    public var mimeType: String
+    public var albumId: String?
+    public var tags: [String]
+    public var description: String
+    public var width: Int
+    public var height: Int
+    public var durationMs: Double?
+    public var videoCodec: String?
+    public var audioCodec: String?
+    public var bitrate: Int?
+    public var sha256: String
+    public var thumbnailMimeType: String?
+    public var takenAt: String
+
+    public init(
+        title: String,
+        originalFilename: String,
+        mimeType: String,
+        albumId: String?,
+        tags: [String],
+        description: String,
+        width: Int,
+        height: Int,
+        durationMs: Double?,
+        videoCodec: String?,
+        audioCodec: String?,
+        bitrate: Int?,
+        sha256: String,
+        thumbnailMimeType: String?,
+        takenAt: String
+    ) {
+        self.title = title
+        self.originalFilename = originalFilename
+        self.mimeType = mimeType
+        self.albumId = albumId
+        self.tags = tags
+        self.description = description
+        self.width = width
+        self.height = height
+        self.durationMs = durationMs
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+        self.bitrate = bitrate
+        self.sha256 = sha256
+        self.thumbnailMimeType = thumbnailMimeType
+        self.takenAt = takenAt
+    }
+}
+
+public struct MediaAlbumDecryptedPayload: Codable, Sendable, Equatable {
+    public var name: String
+    public var description: String
+    public var kind: String
+    public var coverMediaId: String?
+
+    public init(name: String, description: String, kind: String, coverMediaId: String?) {
+        self.name = name
+        self.description = description
+        self.kind = kind
+        self.coverMediaId = coverMediaId
     }
 }
 
@@ -297,6 +819,11 @@ public struct PasswordCustomField: Codable, Sendable, Identifiable, Equatable, H
 public struct PasswordHistoryEntry: Codable, Sendable, Equatable, Hashable {
     public let password: String
     public let changedAt: String
+
+    public init(password: String, changedAt: String) {
+        self.password = password
+        self.changedAt = changedAt
+    }
 }
 
 public struct PasswordItem: Codable, Sendable, Identifiable, Equatable, Hashable {
@@ -519,6 +1046,7 @@ public struct MediaItem: Codable, Sendable, Identifiable, Equatable, Hashable {
     public var chunkSize: Int
     public var chunkCount: Int
     public var hasThumbnail: Bool
+    public var blobKeyBundle: MediaBlobKeyBundleDto?
     public var createdAt: String
     public var updatedAt: String
     public var trashedAt: String?
@@ -526,10 +1054,77 @@ public struct MediaItem: Codable, Sendable, Identifiable, Equatable, Hashable {
     public var isVideo: Bool {
         itemType == .video
     }
+
+    public init(
+        id: String,
+        itemType: VaultItemType,
+        title: String,
+        originalFilename: String,
+        mimeType: String,
+        albumId: String? = nil,
+        tags: [String] = [],
+        description: String = "",
+        width: Int = 0,
+        height: Int = 0,
+        durationMs: Double? = nil,
+        videoCodec: String? = nil,
+        audioCodec: String? = nil,
+        bitrate: Int? = nil,
+        sha256: String,
+        thumbnailMimeType: String? = nil,
+        takenAt: String,
+        isPinned: Bool = false,
+        isArchived: Bool = false,
+        isTrashed: Bool = false,
+        revision: Int = 1,
+        syncSeq: Int = 0,
+        byteSize: Int,
+        encryptedSize: Int,
+        chunkSize: Int = 65_536,
+        chunkCount: Int = 1,
+        hasThumbnail: Bool = false,
+        blobKeyBundle: MediaBlobKeyBundleDto? = nil,
+        createdAt: String,
+        updatedAt: String,
+        trashedAt: String? = nil
+    ) {
+        self.id = id
+        self.itemType = itemType
+        self.title = title
+        self.originalFilename = originalFilename
+        self.mimeType = mimeType
+        self.albumId = albumId
+        self.tags = tags
+        self.description = description
+        self.width = width
+        self.height = height
+        self.durationMs = durationMs
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+        self.bitrate = bitrate
+        self.sha256 = sha256
+        self.thumbnailMimeType = thumbnailMimeType
+        self.takenAt = takenAt
+        self.isPinned = isPinned
+        self.isArchived = isArchived
+        self.isTrashed = isTrashed
+        self.revision = revision
+        self.syncSeq = syncSeq
+        self.byteSize = byteSize
+        self.encryptedSize = encryptedSize
+        self.chunkSize = chunkSize
+        self.chunkCount = chunkCount
+        self.hasThumbnail = hasThumbnail
+        self.blobKeyBundle = blobKeyBundle
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.trashedAt = trashedAt
+    }
 }
 
 public struct MediaAlbum: Codable, Sendable, Identifiable, Equatable, Hashable {
     public let id: String
+    public var revision: Int?
     public var name: String
     public var description: String
     public var kind: String
@@ -538,6 +1133,30 @@ public struct MediaAlbum: Codable, Sendable, Identifiable, Equatable, Hashable {
     public var syncSeq: Int
     public var createdAt: String
     public var updatedAt: String
+
+    public init(
+        id: String,
+        revision: Int? = 1,
+        name: String,
+        description: String = "",
+        kind: String = "mixed",
+        coverMediaId: String? = nil,
+        itemCount: Int = 0,
+        syncSeq: Int = 0,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.id = id
+        self.revision = revision
+        self.name = name
+        self.description = description
+        self.kind = kind
+        self.coverMediaId = coverMediaId
+        self.itemCount = itemCount
+        self.syncSeq = syncSeq
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
 }
 
 public struct CreateAlbumRequest: Codable, Sendable {
@@ -610,61 +1229,6 @@ public struct UpdateMediaRequest: Encodable, Sendable {
         try container.encodeIfPresent(isTrashed, forKey: .isTrashed)
         try container.encodeIfPresent(expectedRevision, forKey: .expectedRevision)
     }
-}
-
-public struct ResumableUploadInitRequest: Codable, Sendable {
-    public let filename: String
-    public let mimeType: String
-    public let kind: MediaKind?
-    public let totalBytes: Int
-    public let chunkBytes: Int?
-    public let title: String?
-    public let albumId: String?
-    public let tags: [String]?
-    public let description: String?
-    public let sha256: String?
-    public let takenAt: String?
-
-    public init(
-        filename: String,
-        mimeType: String,
-        kind: MediaKind? = nil,
-        totalBytes: Int,
-        chunkBytes: Int? = nil,
-        title: String? = nil,
-        albumId: String? = nil,
-        tags: [String]? = nil,
-        description: String? = nil,
-        sha256: String? = nil,
-        takenAt: String? = nil
-    ) {
-        self.filename = filename
-        self.mimeType = mimeType
-        self.kind = kind
-        self.totalBytes = totalBytes
-        self.chunkBytes = chunkBytes
-        self.title = title
-        self.albumId = albumId
-        self.tags = tags
-        self.description = description
-        self.sha256 = sha256
-        self.takenAt = takenAt
-    }
-}
-
-public struct ResumableUploadInitResponse: Codable, Sendable {
-    public let uploadId: String
-    public let chunkBytes: Int
-    public let totalChunks: Int
-    public let expiresAt: String
-}
-
-public struct ResumableUploadStatusResponse: Codable, Sendable {
-    public let uploadId: String
-    public let receivedChunks: [Int]
-    public let totalChunks: Int
-    public let totalBytes: Int
-    public let chunkBytes: Int
 }
 
 // MARK: - 4. Cipher Envelope Inspection & Security Summary
@@ -875,6 +1439,8 @@ public enum PrivateSpaceClientError: LocalizedError, Sendable, Equatable {
     case invalidServerURL(String)
     case unauthorized(String)
     case vaultNotInitialized(String)
+    case vaultLocked
+    case e2eeDecryptionFailed(String)
     case conflict(String)
     case rateLimited(String)
     case serverError(status: Int, code: String, message: String)
@@ -889,6 +1455,10 @@ public enum PrivateSpaceClientError: LocalizedError, Sendable, Equatable {
             return msg
         case .vaultNotInitialized(let msg):
             return msg
+        case .vaultLocked:
+            return "私密空间主密钥尚未在本地解锁，请输入管理员主密码"
+        case .e2eeDecryptionFailed(let msg):
+            return "端到端零知识加解密校验失败：\(msg)"
         case .conflict(let msg):
             return msg
         case .rateLimited(let msg):

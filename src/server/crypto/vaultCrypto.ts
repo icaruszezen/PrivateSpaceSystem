@@ -1,304 +1,367 @@
 import crypto from 'node:crypto';
-import type { EncryptionSpecInfo, NoteDecryptedPayload, VaultItemType } from '../../shared/types.js';
+import {
+  buildItemAad,
+  buildItemHkdfInfo,
+  computePsencEncryptedSize,
+  DEFAULT_E2EE_KDF_PARAMS,
+  DEFAULT_PBKDF2_ITERATIONS,
+  E2EE_CIPHER_VERSION,
+  E2EE_ENCRYPTION_SPEC,
+  MAX_PBKDF2_ITERATIONS,
+  MIN_PBKDF2_ITERATIONS,
+  summarizeNoteText,
+} from '../../shared/e2ee.js';
+import type {
+  CipherEnvelopeDto,
+  E2EEKdfParams,
+  EncryptedBlobKeyMetaDto,
+  WrappedDekDto,
+} from '../../shared/types.js';
 
-export const ENCRYPTION_SPEC: EncryptionSpecInfo = {
-  cipher: 'AES-256-GCM',
-  keyWrap: 'AES-256-GCM Envelope (DEK + KEK)',
-  itemKdf: 'HKDF-SHA256',
-  passwordKdf: 'scrypt (N=32768, r=8, p=1)',
-  mediaStreamCipher: 'PSENC001 64KiB Chunked AES-256-GCM',
-  aadBound: true,
-};
+export { buildItemAad, buildItemHkdfInfo, E2EE_CIPHER_VERSION, summarizeNoteText };
+export const ENCRYPTION_SPEC = E2EE_ENCRYPTION_SPEC;
 
-export interface ScryptParams {
-  N: number;
-  r: number;
-  p: number;
-}
-
-export const DEFAULT_SCRYPT_PARAMS: ScryptParams = {
-  N: 32768, // 2^15 CPU/memory cost
+const SERVER_VERIFIER_SCRYPT_OPTS = {
+  N: 16384,
   r: 8,
   p: 1,
+  maxmem: 64 * 1024 * 1024,
 };
 
-const DEK_AAD = Buffer.from('privatespace:dek:v1', 'utf8');
-const CIPHER_VERSION = 1;
-
-export interface WrappedMasterKeyEnvelope {
-  kdfSalt: Buffer;
-  kdfParamsJson: string;
-  authVerifier: Buffer;
-  wrappedDekIv: Buffer;
-  wrappedDekTag: Buffer;
-  wrappedDekCiphertext: Buffer;
+export interface ZeroKnowledgeAdminEnvelope {
+  kdfSalt: Buffer; // 32B client KDF salt
+  kdfParamsJson: string; // JSON of E2EEKdfParams
+  verifierSalt: Buffer; // 32B server-only scrypt salt for hashing clientAuthKey
+  authVerifier: Buffer; // 32B scrypt(clientAuthKey, verifierSalt)
+  wrappedDekIv: Buffer; // 12B
+  wrappedDekTag: Buffer; // 16B
+  wrappedDekCiphertext: Buffer; // 32B (encrypted DEK — server never possesses KEK!)
   keyFingerprint: string;
 }
 
-export interface EncryptedItemEnvelope {
+export interface ValidatedCipherEnvelope {
   cipherVersion: number;
-  itemSalt: Buffer;
-  nonce: Buffer;
-  authTag: Buffer;
+  itemSalt: Buffer; // 16B
+  nonce: Buffer; // 12B
+  authTag: Buffer; // 16B
   ciphertext: Buffer;
   byteSize: number;
 }
 
-/**
- * Derives a 64-byte master secret from the admin password using scrypt:
- * - First 32 bytes: Key Encryption Key (KEK) used to wrap/unwrap the 256-bit DEK
- * - Next 32 bytes: hashed with SHA-256 to create an authentication verifier
- */
-export function derivePasswordKeys(
-  password: string,
-  salt: Buffer,
-  params: ScryptParams = DEFAULT_SCRYPT_PARAMS,
-): { kek: Buffer; authVerifier: Buffer } {
-  const normalized = password.normalize('NFKC');
-  const derived = crypto.scryptSync(normalized, salt, 64, {
-    N: params.N,
-    r: params.r,
-    p: params.p,
-    maxmem: 128 * 1024 * 1024,
-  });
-  const kek = Buffer.from(derived.subarray(0, 32));
-  const rawAuthKey = derived.subarray(32, 64);
-  const authVerifier = crypto.createHash('sha256').update(rawAuthKey).digest();
-  return { kek, authVerifier };
-}
-
-/**
- * Computes a short, non-reversible fingerprint of the 256-bit Vault Master Key (DEK)
- * so the UI can display cryptographic key identity without revealing key material.
- */
-export function computeKeyFingerprint(dek: Buffer): string {
-  const mac = crypto
-    .createHmac('sha256', dek)
-    .update('privatespace:key-fingerprint:v1')
-    .digest('hex');
-  return `${mac.slice(0, 4)}-${mac.slice(4, 8)}-${mac.slice(8, 12)}`.toUpperCase();
-}
-
-/**
- * Generates a fresh 256-bit Vault Master Key (DEK) and wraps it under the admin password.
- */
-export function createMasterKeyEnvelope(
-  password: string,
-  existingDek?: Buffer,
-  params: ScryptParams = DEFAULT_SCRYPT_PARAMS,
-): { dek: Buffer; envelope: WrappedMasterKeyEnvelope } {
-  const dek = existingDek ? Buffer.from(existingDek) : crypto.randomBytes(32);
-  if (dek.length !== 32) {
-    throw new Error('Invalid DEK length: expected 32 bytes');
+export class CryptoValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CryptoValidationError';
   }
+}
 
-  const kdfSalt = crypto.randomBytes(32);
-  const { kek, authVerifier } = derivePasswordKeys(password, kdfSalt, params);
+function decodeBase64Strict(value: unknown, fieldName: string, expectedBytes?: number): Buffer {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new CryptoValidationError(`缺少加密字段 ${fieldName}`);
+  }
+  const buf = Buffer.from(value.trim(), 'base64');
+  if (expectedBytes !== undefined && buf.length !== expectedBytes) {
+    throw new CryptoValidationError(
+      `加密字段 ${fieldName} 长度非法（期望 ${expectedBytes} 字节，实际 ${buf.length} 字节）`,
+    );
+  }
+  if (buf.length === 0) {
+    throw new CryptoValidationError(`加密字段 ${fieldName} 不能为空`);
+  }
+  return buf;
+}
 
-  const wrappedDekIv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', kek, wrappedDekIv);
-  cipher.setAAD(DEK_AAD);
-  const wrappedDekCiphertext = Buffer.concat([cipher.update(dek), cipher.final()]);
-  const wrappedDekTag = cipher.getAuthTag();
-
-  // Zero sensitive KEK buffer after wrapping
-  kek.fill(0);
-
+export function validateKdfParams(input: unknown): E2EEKdfParams {
+  if (!input || typeof input !== 'object') {
+    throw new CryptoValidationError('缺少客户端 KDF 参数 kdfParams');
+  }
+  const raw = input as Partial<E2EEKdfParams>;
+  if (raw.algorithm !== 'PBKDF2-HMAC-SHA256' || raw.hash !== 'SHA-256') {
+    throw new CryptoValidationError('仅支持 PBKDF2-HMAC-SHA256 密钥派生参数');
+  }
+  const iterations = Number(raw.iterations);
+  if (
+    !Number.isInteger(iterations) ||
+    iterations < MIN_PBKDF2_ITERATIONS ||
+    iterations > MAX_PBKDF2_ITERATIONS
+  ) {
+    throw new CryptoValidationError(
+      `PBKDF2 迭代次数超出安全范围（${MIN_PBKDF2_ITERATIONS} - ${MAX_PBKDF2_ITERATIONS}）`,
+    );
+  }
   return {
-    dek,
-    envelope: {
-      kdfSalt,
-      kdfParamsJson: JSON.stringify(params),
-      authVerifier,
-      wrappedDekIv,
-      wrappedDekTag,
-      wrappedDekCiphertext,
-      keyFingerprint: computeKeyFingerprint(dek),
-    },
+    algorithm: 'PBKDF2-HMAC-SHA256',
+    iterations,
+    hash: 'SHA-256',
+    dkLen: 64,
   };
 }
 
 /**
- * Verifies the admin password in constant time and unwraps the 256-bit Vault Master Key (DEK).
- * Returns null if the password is incorrect.
+ * Hashes the client-derived 32-byte `authKey` using server-side random `verifierSalt` + `scrypt`.
+ * Even if `admin_config` is exfiltrated from SQLite, an attacker cannot obtain `authKey` or `KEK`.
  */
-export function unlockMasterKeyEnvelope(
-  password: string,
-  envelope: WrappedMasterKeyEnvelope,
-): Buffer | null {
-  const params = JSON.parse(envelope.kdfParamsJson) as ScryptParams;
-  const { kek, authVerifier } = derivePasswordKeys(password, envelope.kdfSalt, params);
-
-  if (
-    authVerifier.length !== envelope.authVerifier.length ||
-    !crypto.timingSafeEqual(authVerifier, envelope.authVerifier)
-  ) {
-    kek.fill(0);
-    return null;
-  }
-
+export function hashClientAuthKey(
+  authKeyBase64: string,
+  existingVerifierSalt?: Buffer,
+): { verifierSalt: Buffer; authVerifier: Buffer } {
+  const authKeyBuf = decodeBase64Strict(authKeyBase64, 'authKey', 32);
+  const verifierSalt = existingVerifierSalt ? Buffer.from(existingVerifierSalt) : crypto.randomBytes(32);
   try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', kek, envelope.wrappedDekIv);
-    decipher.setAAD(DEK_AAD);
-    decipher.setAuthTag(envelope.wrappedDekTag);
-    const dek = Buffer.concat([
-      decipher.update(envelope.wrappedDekCiphertext),
-      decipher.final(),
-    ]);
-    kek.fill(0);
-    return dek;
+    const authVerifier = crypto.scryptSync(
+      authKeyBuf,
+      verifierSalt,
+      32,
+      SERVER_VERIFIER_SCRYPT_OPTS,
+    );
+    return { verifierSalt, authVerifier };
+  } finally {
+    authKeyBuf.fill(0);
+  }
+}
+
+/**
+ * Verifies a client-supplied `authKey` against the stored `scrypt` verifier in constant time.
+ */
+export function verifyClientAuthKey(
+  authKeyBase64: string,
+  verifierSalt: Buffer,
+  expectedVerifier: Buffer,
+): boolean {
+  let authKeyBuf: Buffer;
+  try {
+    authKeyBuf = decodeBase64Strict(authKeyBase64, 'authKey', 32);
   } catch {
-    kek.fill(0);
-    return null;
+    return false;
   }
-}
-
-export type VaultCipherDomain = VaultItemType | 'album' | 'upload';
-
-export function buildItemHkdfInfo(itemId: string, itemType: VaultCipherDomain): string {
-  return `privatespace:item:v1:${itemType}:${itemId}`;
-}
-
-export function buildItemAad(
-  itemId: string,
-  itemType: VaultCipherDomain,
-  revision: number,
-  cipherVersion = CIPHER_VERSION,
-): string {
-  return JSON.stringify({
-    v: cipherVersion,
-    id: itemId,
-    type: itemType,
-    rev: revision,
-  });
-}
-
-function deriveItemKey(
-  dek: Buffer,
-  itemSalt: Buffer,
-  itemId: string,
-  itemType: VaultCipherDomain,
-): Buffer {
-  const info = Buffer.from(buildItemHkdfInfo(itemId, itemType), 'utf8');
-  const raw = crypto.hkdfSync('sha256', dek, itemSalt, info, 32);
-  return Buffer.from(raw);
-}
-
-/**
- * Encrypts a vault item payload (note, password, media metadata, album, or upload session)
- * using HKDF-derived per-item key + AES-256-GCM + AAD metadata binding.
- */
-export function encryptVaultPayload<T>(
-  dek: Buffer,
-  itemId: string,
-  itemType: VaultCipherDomain,
-  revision: number,
-  payload: T,
-): EncryptedItemEnvelope {
-  const itemSalt = crypto.randomBytes(16);
-  const nonce = crypto.randomBytes(12);
-  const itemKey = deriveItemKey(dek, itemSalt, itemId, itemType);
-  const aad = Buffer.from(buildItemAad(itemId, itemType, revision, CIPHER_VERSION), 'utf8');
 
   try {
-    const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
-    const cipher = crypto.createCipheriv('aes-256-gcm', itemKey, nonce);
-    cipher.setAAD(aad);
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const authTag = cipher.getAuthTag();
-
-    return {
-      cipherVersion: CIPHER_VERSION,
-      itemSalt,
-      nonce,
-      authTag,
-      ciphertext,
-      byteSize: ciphertext.length,
-    };
+    const computed = crypto.scryptSync(authKeyBuf, verifierSalt, 32, SERVER_VERIFIER_SCRYPT_OPTS);
+    try {
+      return (
+        computed.length === expectedVerifier.length &&
+        crypto.timingSafeEqual(computed, expectedVerifier)
+      );
+    } finally {
+      computed.fill(0);
+    }
   } finally {
-    itemKey.fill(0);
+    authKeyBuf.fill(0);
   }
 }
 
-/**
- * Decrypts and authenticates an encrypted vault item envelope.
- * Throws if ciphertext, tag, nonce, itemId, itemType, or revision were tampered with.
- */
-export function decryptVaultPayload<T = NoteDecryptedPayload>(
-  dek: Buffer,
-  itemId: string,
-  itemType: VaultCipherDomain,
-  revision: number,
-  envelope: {
-    cipherVersion: number;
-    itemSalt: Buffer;
-    nonce: Buffer;
-    authTag: Buffer;
-    ciphertext: Buffer;
-  },
-): T {
-  const itemKey = deriveItemKey(dek, envelope.itemSalt, itemId, itemType);
-  const aad = Buffer.from(
-    buildItemAad(itemId, itemType, revision, envelope.cipherVersion),
-    'utf8',
+export function buildZeroKnowledgeAdminEnvelope(params: {
+  kdfSaltBase64: string;
+  kdfParams: E2EEKdfParams;
+  authKeyBase64: string;
+  wrappedDek: WrappedDekDto;
+  keyFingerprint: string;
+}): ZeroKnowledgeAdminEnvelope {
+  const kdfSalt = decodeBase64Strict(params.kdfSaltBase64, 'kdfSalt', 32);
+  const cleanKdfParams = validateKdfParams(params.kdfParams);
+  const wrappedDekIv = decodeBase64Strict(params.wrappedDek?.iv, 'wrappedDek.iv', 12);
+  const wrappedDekTag = decodeBase64Strict(params.wrappedDek?.tag, 'wrappedDek.tag', 16);
+  const wrappedDekCiphertext = decodeBase64Strict(
+    params.wrappedDek?.ciphertext,
+    'wrappedDek.ciphertext',
+    32,
   );
-
-  try {
-    const decipher = crypto.createDecipheriv('aes-256-gcm', itemKey, envelope.nonce);
-    decipher.setAAD(aad);
-    decipher.setAuthTag(envelope.authTag);
-    const plaintext = Buffer.concat([
-      decipher.update(envelope.ciphertext),
-      decipher.final(),
-    ]);
-    return JSON.parse(plaintext.toString('utf8')) as T;
-  } finally {
-    itemKey.fill(0);
-  }
-}
-
-/**
- * Computes character/word count & clean excerpt from Markdown/plain text before encryption.
- */
-export function summarizeNoteText(title: string, content: string): {
-  cleanTitle: string;
-  excerpt: string;
-  wordCount: number;
-} {
-  const trimmedTitle = title.trim();
-  const stripped = content
-    .replace(/```[\s\S]*?```/g, ' [代码片段] ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/^#{1,6}\s+/gm, '')
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/^\s*[-*+]\s+\[[ xX]\]\s+/gm, '')
-    .replace(/^\s*[-*+>]\s+/gm, '')
-    .replace(/[*_~]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  let fallbackTitle = trimmedTitle;
-  if (!fallbackTitle) {
-    const firstNonEmptyLine = content
-      .split('\n')
-      .map((line) => line.replace(/^#{1,6}\s+/, '').trim())
-      .find((line) => line.length > 0);
-    fallbackTitle = firstNonEmptyLine ? firstNonEmptyLine.slice(0, 60) : '无标题记录';
+  const cleanFingerprint = String(params.keyFingerprint || '').trim().toUpperCase();
+  if (!/^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/.test(cleanFingerprint)) {
+    throw new CryptoValidationError('密钥指纹格式非法（期望 XXXX-XXXX-XXXX）');
   }
 
-  const excerpt = stripped.slice(0, 160);
-
-  // Count CJK characters + Latin/number words accurately
-  const cjkMatches = content.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g);
-  const nonCjkWords = content
-    .replace(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/g, ' ')
-    .match(/[A-Za-z0-9_'-]+/g);
-  const wordCount = (cjkMatches?.length || 0) + (nonCjkWords?.length || 0);
+  const { verifierSalt, authVerifier } = hashClientAuthKey(params.authKeyBase64);
 
   return {
-    cleanTitle: fallbackTitle,
-    excerpt,
-    wordCount,
+    kdfSalt,
+    kdfParamsJson: JSON.stringify(cleanKdfParams),
+    verifierSalt,
+    authVerifier,
+    wrappedDekIv,
+    wrappedDekTag,
+    wrappedDekCiphertext,
+    keyFingerprint: cleanFingerprint,
+  };
+}
+
+/**
+ * Optional one-shot bootstrap helper for headless container initialization (`ADMIN_PASSWORD`).
+ * Derives an E2EE v2 compatible envelope locally at first boot and immediately wipes all key material
+ * so neither `DEK` nor `KEK` persists in server memory.
+ */
+export function bootstrapHeadlessZeroKnowledgeAdmin(
+  password: string,
+  iterations = DEFAULT_PBKDF2_ITERATIONS,
+): ZeroKnowledgeAdminEnvelope {
+  const normalized = Buffer.from(password.normalize('NFKC'), 'utf8');
+  const kdfSalt = crypto.randomBytes(32);
+  const dek = crypto.randomBytes(32);
+  const kdfParams: E2EEKdfParams = {
+    ...DEFAULT_E2EE_KDF_PARAMS,
+    iterations,
+  };
+
+  const masterSeed = crypto.pbkdf2Sync(normalized, kdfSalt, iterations, 64, 'sha256');
+  normalized.fill(0);
+
+  const kek = Buffer.from(masterSeed.subarray(0, 32));
+  const authSeed = Buffer.from(masterSeed.subarray(32, 64));
+  masterSeed.fill(0);
+
+  try {
+    const authKey = Buffer.from(
+      crypto.hkdfSync(
+        'sha256',
+        authSeed,
+        kdfSalt,
+        Buffer.from('privatespace:e2ee:auth-key:v2', 'utf8'),
+        32,
+      ),
+    );
+    const wrappedDekIv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', kek, wrappedDekIv);
+    cipher.setAAD(Buffer.from('privatespace:e2ee:dek:v2', 'utf8'));
+    const wrappedDekCiphertext = Buffer.concat([cipher.update(dek), cipher.final()]);
+    const wrappedDekTag = cipher.getAuthTag();
+
+    const macHex = crypto
+      .createHmac('sha256', dek)
+      .update('privatespace:key-fingerprint:v1')
+      .digest('hex');
+    const keyFingerprint =
+      `${macHex.slice(0, 4)}-${macHex.slice(4, 8)}-${macHex.slice(8, 12)}`.toUpperCase();
+
+    const verifierSalt = crypto.randomBytes(32);
+    const authVerifier = crypto.scryptSync(authKey, verifierSalt, 32, SERVER_VERIFIER_SCRYPT_OPTS);
+    authKey.fill(0);
+
+    return {
+      kdfSalt,
+      kdfParamsJson: JSON.stringify(kdfParams),
+      verifierSalt,
+      authVerifier,
+      wrappedDekIv,
+      wrappedDekTag,
+      wrappedDekCiphertext,
+      keyFingerprint,
+    };
+  } finally {
+    dek.fill(0);
+    kek.fill(0);
+    authSeed.fill(0);
+  }
+}
+
+export function parseAndValidateCipherEnvelope(dto: unknown): ValidatedCipherEnvelope {
+  if (!dto || typeof dto !== 'object') {
+    throw new CryptoValidationError('缺少端到端密文信封 envelope');
+  }
+  const raw = dto as Partial<CipherEnvelopeDto>;
+  const cipherVersion = Number(raw.cipherVersion ?? E2EE_CIPHER_VERSION);
+  if (!Number.isInteger(cipherVersion) || cipherVersion < E2EE_CIPHER_VERSION) {
+    throw new CryptoValidationError(`不支持的密文协议版本 cipherVersion=${String(raw.cipherVersion)}`);
+  }
+
+  const itemSalt = decodeBase64Strict(raw.itemSalt, 'envelope.itemSalt', 16);
+  const nonce = decodeBase64Strict(raw.nonce, 'envelope.nonce', 12);
+  const authTag = decodeBase64Strict(raw.authTag, 'envelope.authTag', 16);
+  const ciphertext = decodeBase64Strict(raw.ciphertext, 'envelope.ciphertext');
+
+  return {
+    cipherVersion,
+    itemSalt,
+    nonce,
+    authTag,
+    ciphertext,
+    byteSize: ciphertext.length,
+  };
+}
+
+export function serializeCipherEnvelope(row: {
+  cipherVersion: number;
+  itemSalt: Uint8Array;
+  nonce: Uint8Array;
+  authTag: Uint8Array;
+  ciphertext: Uint8Array;
+}): CipherEnvelopeDto {
+  return {
+    cipherVersion: Number(row.cipherVersion),
+    itemSalt: Buffer.from(row.itemSalt).toString('base64'),
+    nonce: Buffer.from(row.nonce).toString('base64'),
+    authTag: Buffer.from(row.authTag).toString('base64'),
+    ciphertext: Buffer.from(row.ciphertext).toString('base64'),
+  };
+}
+
+export interface ValidatedBlobKeyMeta {
+  blobId: string;
+  fekSalt: Buffer;
+  fekNonce: Buffer;
+  fekTag: Buffer;
+  wrappedFek: Buffer;
+  baseNonce: Buffer;
+  chunkSize: number;
+  chunkCount: number;
+  plainSize: number;
+  encryptedSize: number;
+  sha256: string;
+}
+
+export function parseAndValidateBlobKeyMeta(
+  dto: unknown,
+  fieldPrefix = 'mainBlob',
+): ValidatedBlobKeyMeta {
+  if (!dto || typeof dto !== 'object') {
+    throw new CryptoValidationError(`缺少媒体加密信封 ${fieldPrefix}`);
+  }
+  const raw = dto as Partial<EncryptedBlobKeyMetaDto>;
+  const blobId = String(raw.blobId || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{24,64}$/.test(blobId)) {
+    throw new CryptoValidationError(`${fieldPrefix}.blobId 格式非法`);
+  }
+
+  const fekSalt = decodeBase64Strict(raw.fekSalt, `${fieldPrefix}.fekSalt`, 16);
+  const fekNonce = decodeBase64Strict(raw.fekNonce, `${fieldPrefix}.fekNonce`, 12);
+  const fekTag = decodeBase64Strict(raw.fekTag, `${fieldPrefix}.fekTag`, 16);
+  const wrappedFek = decodeBase64Strict(raw.wrappedFek, `${fieldPrefix}.wrappedFek`, 32);
+  const baseNonce = decodeBase64Strict(raw.baseNonce, `${fieldPrefix}.baseNonce`, 12);
+
+  const chunkSize = Number(raw.chunkSize);
+  const plainSize = Number(raw.plainSize);
+  const chunkCount = Number(raw.chunkCount);
+  const encryptedSize = Number(raw.encryptedSize);
+
+  if (!Number.isInteger(chunkSize) || chunkSize < 4096 || chunkSize > 16 * 1024 * 1024) {
+    throw new CryptoValidationError(`${fieldPrefix}.chunkSize 超出允许范围`);
+  }
+  if (!Number.isInteger(plainSize) || plainSize < 0) {
+    throw new CryptoValidationError(`${fieldPrefix}.plainSize 非法`);
+  }
+
+  const expected = computePsencEncryptedSize(plainSize, chunkSize);
+  if (chunkCount !== expected.chunkCount || encryptedSize !== expected.encryptedSize) {
+    throw new CryptoValidationError(
+      `${fieldPrefix} PSENC001 密文字节长度不匹配（期望 ${expected.encryptedSize}，提交 ${encryptedSize}）`,
+    );
+  }
+
+  const sha256 = String(raw.sha256 || '').trim().toLowerCase();
+  if (sha256 && !/^[0-9a-f]{64}$/.test(sha256)) {
+    throw new CryptoValidationError(`${fieldPrefix}.sha256 格式非法`);
+  }
+
+  return {
+    blobId,
+    fekSalt,
+    fekNonce,
+    fekTag,
+    wrappedFek,
+    baseNonce,
+    chunkSize,
+    chunkCount,
+    plainSize,
+    encryptedSize,
+    sha256,
   };
 }

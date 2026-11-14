@@ -1,4 +1,35 @@
-import { generateTotp, type TotpTokenSnapshot } from '@shared/totp';
+import {
+  aes256GcmDecrypt,
+  aes256GcmEncrypt,
+  base64ToBytes,
+  bytesToBase64,
+  bytesToHex,
+  randomBytes,
+  sha256,
+  zeroBytes,
+} from '@shared/cryptoPrimitives';
+import {
+  computeEncryptedRangeForPlainRange,
+  computePsencEncryptedSize,
+  createZeroKnowledgeMasterBundle,
+  decryptPsencFullBuffer,
+  decryptPsencRangeSlice,
+  DEFAULT_MEDIA_CHUNK_SIZE,
+  deriveMasterKeysFromPassword,
+  encryptItemPayload,
+  encryptMediaBytesToPsenc,
+  encryptResumableMediaPart,
+  generateBlobId,
+  hydrateDecryptedAlbum,
+  hydrateDecryptedMedia,
+  hydrateDecryptedNote,
+  hydrateDecryptedPassword,
+  hydrateDecryptedVaultRecord,
+  unlockZeroKnowledgeMasterBundle,
+  unwrapMasterDek,
+  wrapBlobFek,
+} from '@shared/e2ee';
+import { probeMediaOnClient } from '@shared/mediaProbe';
 import {
   auditPasswordVault,
   evaluatePasswordEntropy,
@@ -9,22 +40,36 @@ import {
   type PasswordGeneratorOptions,
   type VaultPasswordAuditReport,
 } from '@shared/passwordGenerator';
+import { generateTotp, type TotpTokenSnapshot } from '@shared/totp';
 import type {
+  AuthEnvelopeResponse,
+  AuthParamsResponse,
   AuthSessionResponse,
   AuthStatusResponse,
   ChangePasswordRequest,
   CipherEnvelopeInspection,
   CreateAlbumRequest,
+  CreateEncryptedItemRequest,
   CreateNoteRequest,
   CreatePasswordRequest,
+  EncryptedAlbumRecordDto,
+  EncryptedResumableUploadCompleteRequest,
+  EncryptedResumableUploadInitResponse,
+  EncryptedResumableUploadStatusResponse,
+  EncryptedSyncPullResponse,
+  EncryptedVaultRecordDto,
   ImportPasswordEntryInput,
   MediaAlbum,
+  MediaAlbumDecryptedPayload,
+  MediaDecryptedPayload,
   MediaItem,
   MediaKind,
+  NoteDecryptedPayload,
   NoteItem,
+  PasswordCustomField,
+  PasswordDecryptedPayload,
+  PasswordHistoryEntry,
   PasswordItem,
-  ResumableUploadInitResponse,
-  ResumableUploadStatusResponse,
   SessionInfo,
   SetupRequest,
   SyncPullResponse,
@@ -32,6 +77,7 @@ import type {
   UpdateNoteRequest,
   UpdatePasswordRequest,
   VaultSecuritySummary,
+  ZeroKnowledgeChangePasswordRequest,
 } from '@shared/types';
 
 export type MobilePlatform = 'android' | 'ios';
@@ -91,6 +137,8 @@ export interface VaultPersistenceAdapter {
   saveSnapshot(snapshot: MobileVaultSnapshot): Promise<void>;
   loadSessionToken(): Promise<string | null>;
   saveSessionToken(token: string | null): Promise<void>;
+  loadVaultDek?(): Promise<string | null>;
+  saveVaultDek?(dekBase64: string | null): Promise<void>;
   loadPendingMutations?(): Promise<PendingVaultMutation[]>;
   savePendingMutations?(mutations: PendingVaultMutation[]): Promise<void>;
   clearAll?(): Promise<void>;
@@ -111,6 +159,7 @@ export function createEmptySnapshot(): MobileVaultSnapshot {
 export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
   private snapshot: MobileVaultSnapshot | null = null;
   private token: string | null = null;
+  private dekBase64: string | null = null;
   private mutations: PendingVaultMutation[] = [];
 
   async loadSnapshot(): Promise<MobileVaultSnapshot | null> {
@@ -129,6 +178,14 @@ export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
     this.token = token;
   }
 
+  async loadVaultDek(): Promise<string | null> {
+    return this.dekBase64;
+  }
+
+  async saveVaultDek(dekBase64: string | null): Promise<void> {
+    this.dekBase64 = dekBase64;
+  }
+
   async loadPendingMutations(): Promise<PendingVaultMutation[]> {
     return structuredClone(this.mutations);
   }
@@ -140,13 +197,15 @@ export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
   async clearAll(): Promise<void> {
     this.snapshot = null;
     this.token = null;
+    this.dekBase64 = null;
     this.mutations = [];
   }
 }
 
 /**
- * WebCrypto AES-256-GCM Encrypted Persistence Adapter for iOS Standalone PWA / Mobile WebView.
- * Ensures cached vault snapshots are stored encrypted with random 96-bit IVs rather than raw JSON.
+ * AES-256-GCM Encrypted Persistence Adapter for iOS Standalone PWA / Mobile WebView.
+ * Uses `@shared/cryptoPrimitives` so it works identically on HTTPS and plain-HTTP LAN.
+ * Both vault snapshots and cached DEKs are encrypted at rest with random 96-bit nonces.
  */
 export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
   private readonly namespace: string;
@@ -163,48 +222,70 @@ export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
     }
   }
 
-  private toBase64(bytes: Uint8Array): string {
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-  private fromBase64(b64: string): Uint8Array {
-    const bin = atob(b64);
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) {
-      out[i] = bin.charCodeAt(i);
-    }
-    return out;
-  }
-
-  private async getOrCreateDeviceAesKey(): Promise<CryptoKey | null> {
+  private getOrCreateDeviceKeyBytes(): Uint8Array | null {
     const store = this.storage;
-    if (!store || !globalThis.crypto?.subtle) return null;
+    if (!store) return null;
 
     const keyName = `${this.namespace}:device_key`;
-    let rawKeyBytes: Uint8Array;
     const existing = store.getItem(keyName);
     if (existing) {
-      rawKeyBytes = this.fromBase64(existing);
-    } else {
-      rawKeyBytes = new Uint8Array(32);
-      globalThis.crypto.getRandomValues(rawKeyBytes);
-      store.setItem(keyName, this.toBase64(rawKeyBytes));
+      return base64ToBytes(existing);
     }
+    const rawKey = randomBytes(32);
+    store.setItem(keyName, bytesToBase64(rawKey));
+    return rawKey;
+  }
 
-    return globalThis.crypto.subtle.importKey(
-      'raw',
-      rawKeyBytes.buffer.slice(
-        rawKeyBytes.byteOffset,
-        rawKeyBytes.byteOffset + rawKeyBytes.byteLength,
-      ) as ArrayBuffer,
-      { name: 'AES-GCM' },
-      false,
-      ['encrypt', 'decrypt'],
-    );
+  private async encryptString(plainText: string, aadLabel: string): Promise<string | null> {
+    const key = this.getOrCreateDeviceKeyBytes();
+    if (!key) return null;
+    try {
+      const iv = randomBytes(12);
+      const aad = new TextEncoder().encode(`${this.namespace}:${aadLabel}`);
+      const plainBytes = new TextEncoder().encode(plainText);
+      const sealed = await aes256GcmEncrypt(key, iv, plainBytes, aad);
+      return JSON.stringify({
+        iv: bytesToBase64(iv),
+        ct: bytesToBase64(sealed.ciphertext),
+        tag: bytesToBase64(sealed.authTag),
+      });
+    } finally {
+      zeroBytes(key);
+    }
+  }
+
+  private async decryptString(rawEnvelope: string, aadLabel: string): Promise<string | null> {
+    const key = this.getOrCreateDeviceKeyBytes();
+    if (!key) return null;
+    try {
+      const parsed = JSON.parse(rawEnvelope) as { iv: string; ct: string; tag?: string };
+      const iv = base64ToBytes(parsed.iv);
+      if (parsed.tag) {
+        const aad = new TextEncoder().encode(`${this.namespace}:${aadLabel}`);
+        const plainBytes = await aes256GcmDecrypt(
+          key,
+          iv,
+          base64ToBytes(parsed.ct),
+          base64ToBytes(parsed.tag),
+          aad,
+        );
+        return new TextDecoder().decode(plainBytes);
+      }
+      // Legacy combined ciphertext+tag format compatibility
+      const combined = base64ToBytes(parsed.ct);
+      if (combined.length < 16) return null;
+      const plainBytes = await aes256GcmDecrypt(
+        key,
+        iv,
+        combined.subarray(0, combined.length - 16),
+        combined.subarray(combined.length - 16),
+      );
+      return new TextDecoder().decode(plainBytes);
+    } catch {
+      return null;
+    } finally {
+      zeroBytes(key);
+    }
   }
 
   async loadSnapshot(): Promise<MobileVaultSnapshot | null> {
@@ -212,22 +293,10 @@ export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
     if (!store) return null;
     const rawEnvelope = store.getItem(`${this.namespace}:snapshot_enc`);
     if (!rawEnvelope) return null;
-
+    const plain = await this.decryptString(rawEnvelope, 'snapshot');
+    if (!plain) return null;
     try {
-      const key = await this.getOrCreateDeviceAesKey();
-      if (!key) return null;
-      const parsed = JSON.parse(rawEnvelope) as { iv: string; ct: string };
-      const iv = this.fromBase64(parsed.iv);
-      const ct = this.fromBase64(parsed.ct);
-      const plainBuf = await globalThis.crypto.subtle.decrypt(
-        {
-          name: 'AES-GCM',
-          iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer,
-        },
-        key,
-        ct.buffer.slice(ct.byteOffset, ct.byteOffset + ct.byteLength) as ArrayBuffer,
-      );
-      return JSON.parse(new TextDecoder().decode(plainBuf)) as MobileVaultSnapshot;
+      return JSON.parse(plain) as MobileVaultSnapshot;
     } catch {
       return null;
     }
@@ -236,30 +305,10 @@ export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
   async saveSnapshot(snapshot: MobileVaultSnapshot): Promise<void> {
     const store = this.storage;
     if (!store) return;
-    const key = await this.getOrCreateDeviceAesKey();
-    if (!key) return;
-
-    const iv = new Uint8Array(12);
-    globalThis.crypto.getRandomValues(iv);
-    const plainBytes = new TextEncoder().encode(JSON.stringify(snapshot));
-    const ctBuf = await globalThis.crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv: iv.buffer.slice(iv.byteOffset, iv.byteOffset + iv.byteLength) as ArrayBuffer,
-      },
-      key,
-      plainBytes.buffer.slice(
-        plainBytes.byteOffset,
-        plainBytes.byteOffset + plainBytes.byteLength,
-      ) as ArrayBuffer,
-    );
-    store.setItem(
-      `${this.namespace}:snapshot_enc`,
-      JSON.stringify({
-        iv: this.toBase64(iv),
-        ct: this.toBase64(new Uint8Array(ctBuf)),
-      }),
-    );
+    const sealed = await this.encryptString(JSON.stringify(snapshot), 'snapshot');
+    if (sealed) {
+      store.setItem(`${this.namespace}:snapshot_enc`, sealed);
+    }
   }
 
   async loadSessionToken(): Promise<string | null> {
@@ -276,10 +325,32 @@ export class EncryptedWebVaultPersistence implements VaultPersistenceAdapter {
     }
   }
 
+  async loadVaultDek(): Promise<string | null> {
+    const store = this.storage;
+    if (!store) return null;
+    const rawEnvelope = store.getItem(`${this.namespace}:dek_enc`);
+    if (!rawEnvelope) return null;
+    return this.decryptString(rawEnvelope, 'dek');
+  }
+
+  async saveVaultDek(dekBase64: string | null): Promise<void> {
+    const store = this.storage;
+    if (!store) return;
+    if (!dekBase64) {
+      store.removeItem(`${this.namespace}:dek_enc`);
+      return;
+    }
+    const sealed = await this.encryptString(dekBase64, 'dek');
+    if (sealed) {
+      store.setItem(`${this.namespace}:dek_enc`, sealed);
+    }
+  }
+
   async clearAll(): Promise<void> {
     const store = this.storage;
     if (!store) return;
     store.removeItem(`${this.namespace}:snapshot_enc`);
+    store.removeItem(`${this.namespace}:dek_enc`);
     store.removeItem(`${this.namespace}:token`);
     store.removeItem(`${this.namespace}:device_key`);
   }
@@ -397,6 +468,19 @@ export class IndexedDbVaultPersistence implements VaultPersistenceAdapter {
     }
   }
 
+  async loadVaultDek(): Promise<string | null> {
+    const idb = await this.getVal<string>('vault_dek');
+    if (idb) return idb;
+    return this.fallback.loadVaultDek();
+  }
+
+  async saveVaultDek(dekBase64: string | null): Promise<void> {
+    const ok = await this.setVal('vault_dek', dekBase64);
+    if (!ok) {
+      await this.fallback.saveVaultDek(dekBase64);
+    }
+  }
+
   async loadPendingMutations(): Promise<PendingVaultMutation[]> {
     const idb = await this.getVal<PendingVaultMutation[]>('pending_mutations');
     if (idb) return idb;
@@ -414,6 +498,7 @@ export class IndexedDbVaultPersistence implements VaultPersistenceAdapter {
     await Promise.all([
       this.setVal('snapshot', null),
       this.setVal('session_token', null),
+      this.setVal('vault_dek', null),
       this.setVal('pending_mutations', null),
       this.fallback.clearAll(),
     ]);
@@ -595,19 +680,85 @@ function generateClientUuid(): string {
   if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
   }
-  const bytes = new Uint8Array(16);
-  globalThis.crypto.getRandomValues(bytes);
+  const bytes = randomBytes(16);
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const hex = bytesToHex(bytes);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+function toOwnedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+function normalizeTags(raw: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    const t = String(item).trim().slice(0, 36);
+    if (!t) continue;
+    const lower = t.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      out.push(t);
+    }
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+function summarizeNoteText(title: string, content: string): {
+  cleanTitle: string;
+  excerpt: string;
+  wordCount: number;
+} {
+  const plain = content
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/[#>*_`~\-\[\]()!]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  let cleanTitle = title.trim();
+  if (!cleanTitle && content.trim()) {
+    const firstLine = content
+      .split('\n')
+      .map((line) => line.replace(/^[#>\-\s*]+/, '').trim())
+      .find(Boolean);
+    cleanTitle = (firstLine || '未命名笔记').slice(0, 80);
+  }
+  const compactCount = content.replace(/\s+/g, '').length;
+  return {
+    cleanTitle: cleanTitle.slice(0, 120),
+    excerpt: plain.slice(0, 180),
+    wordCount: compactCount,
+  };
+}
+
+function sanitizeCustomFields(raw: PasswordCustomField[]): PasswordCustomField[] {
+  return raw
+    .map((f) => ({
+      id: String(f.id || '').trim() || generateClientUuid(),
+      label: String(f.label || '').trim().slice(0, 60),
+      value: String(f.value || '').slice(0, 1000),
+      hidden: Boolean(f.hidden),
+    }))
+    .filter((f) => f.label.length > 0 || f.value.length > 0)
+    .slice(0, 20);
+}
+
+function bytesToRenderableUrl(bytes: Uint8Array, mimeType: string): string {
+  if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+    return URL.createObjectURL(new Blob([toOwnedArrayBuffer(bytes)], { type: mimeType }));
+  }
+  return `data:${mimeType || 'application/octet-stream'};base64,${bytesToBase64(bytes)}`;
+}
+
 /**
- * Cross-platform Sync & Encrypted Media SDK for PrivateSpace Android & iOS clients.
- * Supports Bearer session tokens, initial server setup, monotonic cursor delta sync (`since_seq`),
- * offline mutation outbox queue, SSE live cursor notifications, offline-capable RFC 6238 TOTP,
- * resumable chunked video/image uploads, and authenticated HTTP 206 Range URLs.
+ * Cross-platform Zero-Knowledge E2EE Sync & Media SDK for PrivateSpace Android & iOS clients.
+ * Derives KEK + AuthKey locally via PBKDF2-HMAC-SHA256 + HKDF-SHA256, unwraps the 256-bit DEK
+ * exclusively on-device, and performs all AES-256-GCM item & PSENC001 chunked media encryption locally.
  */
 export class PrivateSpaceMobileClient {
   private baseUrl: string;
@@ -617,6 +768,10 @@ export class PrivateSpaceMobileClient {
   private readonly fetchFn: typeof fetch;
   private readonly onUnauthorized?: () => void;
   private token: string | null = null;
+  private dek: Uint8Array | null = null;
+  private readonly mediaMetaCache = new Map<string, MediaItem>();
+  private readonly objectUrlCache = new Map<string, string>();
+  private readonly inFlightUrlLoads = new Map<string, Promise<string>>();
 
   constructor(options: MobileClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -651,14 +806,112 @@ export class PrivateSpaceMobileClient {
     return `${this.baseUrl}${path}`;
   }
 
+  hasUnlockedKey(): boolean {
+    return this.dek !== null && this.dek.byteLength === 32;
+  }
+
+  getDekBase64(): string | null {
+    return this.dek ? bytesToBase64(this.dek) : null;
+  }
+
+  private setUnlockedDek(nextDek: Uint8Array): void {
+    if (this.dek) {
+      zeroBytes(this.dek);
+    }
+    this.dek = new Uint8Array(nextDek.byteLength);
+    this.dek.set(nextDek);
+  }
+
+  clearUnlockedKey(): void {
+    if (this.dek) {
+      zeroBytes(this.dek);
+      this.dek = null;
+    }
+    this.mediaMetaCache.clear();
+    if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      for (const url of this.objectUrlCache.values()) {
+        if (url.startsWith('blob:')) {
+          try {
+            URL.revokeObjectURL(url);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+    this.objectUrlCache.clear();
+    this.inFlightUrlLoads.clear();
+  }
+
+  private requireUnlockedDek(): Uint8Array {
+    if (!this.dek || this.dek.byteLength !== 32) {
+      throw new MobileApiError(
+        '零知识主密钥尚未在当前客户端解封，请输入管理员主密码重新解锁',
+        401,
+        'E2EE_KEY_LOCKED',
+        false,
+      );
+    }
+    return this.dek;
+  }
+
   async restoreSession(): Promise<string | null> {
-    this.token = await this.persistence.loadSessionToken();
+    const [savedToken, savedDekB64] = await Promise.all([
+      this.persistence.loadSessionToken(),
+      this.persistence.loadVaultDek ? this.persistence.loadVaultDek() : Promise.resolve(null),
+    ]);
+    this.token = savedToken;
+    if (savedDekB64) {
+      try {
+        const decoded = base64ToBytes(savedDekB64);
+        if (decoded.byteLength === 32) {
+          this.setUnlockedDek(decoded);
+        }
+        zeroBytes(decoded);
+      } catch {
+        this.clearUnlockedKey();
+      }
+    }
+    if (!this.token || !this.hasUnlockedKey()) {
+      return null;
+    }
     return this.token;
   }
 
-  async setSessionToken(token: string | null): Promise<void> {
+  async setSessionAndDek(token: string | null, dekBase64: string | null): Promise<void> {
     this.token = token;
-    await this.persistence.saveSessionToken(token);
+    if (dekBase64) {
+      const decoded = base64ToBytes(dekBase64);
+      if (decoded.byteLength === 32) {
+        this.setUnlockedDek(decoded);
+      }
+      zeroBytes(decoded);
+    } else {
+      this.clearUnlockedKey();
+    }
+    await Promise.all([
+      this.persistence.saveSessionToken(token),
+      this.persistence.saveVaultDek ? this.persistence.saveVaultDek(dekBase64) : Promise.resolve(),
+    ]);
+  }
+
+  async setSessionToken(tokenOrBundle: string | null): Promise<void> {
+    if (tokenOrBundle && tokenOrBundle.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(tokenOrBundle) as {
+          token?: string | null;
+          dekBase64?: string | null;
+        };
+        if (parsed.token) {
+          await this.setSessionAndDek(parsed.token, parsed.dekBase64 ?? null);
+          return;
+        }
+      } catch {
+        // treat as plain token
+      }
+    }
+    this.token = tokenOrBundle;
+    await this.persistence.saveSessionToken(tokenOrBundle);
   }
 
   getToken(): string | null {
@@ -680,10 +933,12 @@ export class PrivateSpaceMobileClient {
 
   async clearLocalVaultCache(): Promise<void> {
     this.token = null;
+    this.clearUnlockedKey();
     if (this.persistence.clearAll) {
       await this.persistence.clearAll();
     } else {
       await this.persistence.saveSessionToken(null);
+      await this.persistence.saveVaultDek?.(null);
       await this.persistence.saveSnapshot(createEmptySnapshot());
     }
   }
@@ -695,7 +950,7 @@ export class PrivateSpaceMobileClient {
   ): Promise<T> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/1.0 (${this.deviceName})`,
+      'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/2.0 (${this.deviceName})`,
       ...((init.headers as Record<string, string>) || {}),
     };
     if (this.token) {
@@ -732,6 +987,7 @@ export class PrivateSpaceMobileClient {
           : errBody?.error?.message || `HTTP ${res.status}`;
 
       if (res.status === 401 && !suppressUnauthorizedCallback) {
+        this.clearUnlockedKey();
         this.onUnauthorized?.();
       }
       throw new MobileApiError(msg, res.status, code, false);
@@ -740,48 +996,123 @@ export class PrivateSpaceMobileClient {
     return (await res.json()) as T;
   }
 
-  // ==================== 1. Server Probe, Setup & Auth ====================
+  private async fetchBinaryBytes(
+    path: string,
+    extraHeaders: Record<string, string> = {},
+  ): Promise<Uint8Array> {
+    const headers: Record<string, string> = {
+      'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/2.0 (${this.deviceName})`,
+      ...extraHeaders,
+    };
+    if (this.token) {
+      headers.Authorization = `Bearer ${this.token}`;
+    }
+
+    let res: Response;
+    try {
+      res = await this.fetchFn(this.buildUrl(path), { headers });
+    } catch (err) {
+      throw new MobileApiError(
+        err instanceof Error ? `无法连接服务器 (${err.message})` : '网络连接不可用',
+        0,
+        'NETWORK_ERROR',
+        true,
+      );
+    }
+
+    if (!res.ok && res.status !== 206) {
+      if (res.status === 401) {
+        this.clearUnlockedKey();
+        this.onUnauthorized?.();
+      }
+      throw new MobileApiError(`拉取加密媒体分片失败 (HTTP ${res.status})`, res.status, `HTTP_${res.status}`, false);
+    }
+
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
+  // ==================== 1. Zero-Knowledge Probe, Setup & Auth ====================
 
   async getAuthStatus(): Promise<AuthStatusResponse> {
     return this.requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
   }
 
+  async getAuthParams(): Promise<AuthParamsResponse> {
+    return this.requestJson<AuthParamsResponse>('/api/v1/auth/params', {}, true);
+  }
+
   async setupAdmin(
     input: Omit<SetupRequest, 'platform' | 'deviceName'>,
   ): Promise<AuthSessionResponse> {
-    const auth = await this.requestJson<AuthSessionResponse>(
-      '/api/v1/auth/setup',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          ...input,
-          deviceName: this.deviceName,
-          platform: this.platform,
-        }),
-      },
-      true,
-    );
-    this.token = auth.token;
-    await this.persistence.saveSessionToken(auth.token);
-    return auth;
+    const bundle = await createZeroKnowledgeMasterBundle(input.password);
+    try {
+      const auth = await this.requestJson<AuthSessionResponse>(
+        '/api/v1/auth/setup',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            authKey: bundle.authKey,
+            vaultName: input.vaultName,
+            kdfSalt: bundle.kdfSalt,
+            kdfParams: bundle.kdfParams,
+            wrappedDek: bundle.wrappedDek,
+            keyFingerprint: bundle.keyFingerprint,
+            deviceName: this.deviceName,
+            platform: this.platform,
+          }),
+        },
+        true,
+      );
+      await this.setSessionAndDek(auth.token, bytesToBase64(bundle.dek));
+      return auth;
+    } finally {
+      zeroBytes(bundle.dek);
+    }
   }
 
   async login(password: string): Promise<AuthSessionResponse> {
-    const auth = await this.requestJson<AuthSessionResponse>(
-      '/api/v1/auth/login',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          password,
-          deviceName: this.deviceName,
-          platform: this.platform,
-        }),
-      },
-      true,
-    );
-    this.token = auth.token;
-    await this.persistence.saveSessionToken(auth.token);
-    return auth;
+    const params = await this.getAuthParams();
+    if (!params.initialized || !params.kdfSalt || !params.kdfParams) {
+      throw new MobileApiError('私密空间尚未初始化', 403, 'VAULT_NOT_INITIALIZED', false);
+    }
+
+    const derived = await deriveMasterKeysFromPassword(password, params.kdfSalt, params.kdfParams);
+    try {
+      const auth = await this.requestJson<AuthSessionResponse>(
+        '/api/v1/auth/login',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            authKey: derived.authKeyBase64,
+            deviceName: this.deviceName,
+            platform: this.platform,
+          }),
+        },
+        true,
+      );
+
+      let dek: Uint8Array;
+      try {
+        dek = await unwrapMasterDek(auth.wrappedDek, derived.kek);
+      } catch {
+        throw new MobileApiError(
+          '本地主密钥信封解封失败，请确认管理员密码是否正确',
+          401,
+          'DEK_UNWRAP_FAILED',
+          false,
+        );
+      }
+
+      try {
+        await this.setSessionAndDek(auth.token, bytesToBase64(dek));
+      } finally {
+        zeroBytes(dek);
+      }
+      return auth;
+    } finally {
+      zeroBytes(derived.kek);
+      zeroBytes(derived.authKey);
+    }
   }
 
   async logout(wipeLocalCache = false): Promise<void> {
@@ -789,10 +1120,14 @@ export class PrivateSpaceMobileClient {
       await this.requestJson('/api/v1/auth/logout', { method: 'POST' }, true);
     } finally {
       this.token = null;
+      this.clearUnlockedKey();
       if (wipeLocalCache && this.persistence.clearAll) {
         await this.persistence.clearAll();
       } else {
-        await this.persistence.saveSessionToken(null);
+        await Promise.all([
+          this.persistence.saveSessionToken(null),
+          this.persistence.saveVaultDek ? this.persistence.saveVaultDek(null) : Promise.resolve(),
+        ]);
       }
     }
   }
@@ -800,14 +1135,56 @@ export class PrivateSpaceMobileClient {
   async changePassword(
     input: ChangePasswordRequest,
   ): Promise<{ ok: boolean; keyFingerprint: string; passwordUpdatedAt: string }> {
-    return this.requestJson(
-      '/api/v1/auth/change-password',
-      {
-        method: 'POST',
-        body: JSON.stringify(input),
-      },
-      true,
-    );
+    const envelope = await this.requestJson<AuthEnvelopeResponse>('/api/v1/auth/envelope');
+
+    let currentUnlocked: Awaited<ReturnType<typeof unlockZeroKnowledgeMasterBundle>>;
+    try {
+      currentUnlocked = await unlockZeroKnowledgeMasterBundle(input.currentPassword, envelope);
+    } catch {
+      throw new MobileApiError(
+        '当前管理员密码不正确，本地主密钥校验未通过',
+        401,
+        'INVALID_CREDENTIALS',
+        false,
+      );
+    }
+
+    const rotated = await createZeroKnowledgeMasterBundle(input.newPassword, {
+      existingDek: currentUnlocked.dek,
+      iterations: envelope.kdfParams.iterations,
+    });
+
+    try {
+      const wireBody: ZeroKnowledgeChangePasswordRequest = {
+        currentAuthKey: currentUnlocked.authKey,
+        newAuthKey: rotated.authKey,
+        newKdfSalt: rotated.kdfSalt,
+        newKdfParams: rotated.kdfParams,
+        newWrappedDek: rotated.wrappedDek,
+        keyFingerprint: rotated.keyFingerprint,
+        revokeOtherSessions: input.revokeOtherSessions,
+      };
+
+      const res = await this.requestJson<{
+        ok: boolean;
+        keyFingerprint: string;
+        passwordUpdatedAt: string;
+      }>(
+        '/api/v1/auth/change-password',
+        {
+          method: 'POST',
+          body: JSON.stringify(wireBody),
+        },
+        true,
+      );
+
+      this.setUnlockedDek(rotated.dek);
+      await this.persistence.saveVaultDek?.(bytesToBase64(rotated.dek));
+      return res;
+    } finally {
+      zeroBytes(currentUnlocked.dek);
+      zeroBytes(rotated.dek);
+    }
   }
 
   async changeMasterPassword(
@@ -849,7 +1226,7 @@ export class PrivateSpaceMobileClient {
     return this.inspectCipher(itemId);
   }
 
-  // ==================== 2. Offline Mutation Queue, Outbox & Delta Sync ====================
+  // ==================== 2. Offline Mutation Queue, Outbox & E2EE Delta Sync ====================
 
   async enqueueOfflineNote(input: CreateNoteRequest): Promise<NoteItem> {
     const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
@@ -950,25 +1327,13 @@ export class PrivateSpaceMobileClient {
       const m = queue[i];
       try {
         if (m.kind === 'create_note') {
-          await this.requestJson('/api/v1/notes', {
-            method: 'POST',
-            body: JSON.stringify(m.payload),
-          });
+          await this.createNote(m.payload);
         } else if (m.kind === 'update_note') {
-          await this.requestJson(`/api/v1/notes/${encodeURIComponent(m.itemId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify(m.payload),
-          });
+          await this.updateNote(m.itemId, m.payload);
         } else if (m.kind === 'create_password') {
-          await this.requestJson('/api/v1/passwords', {
-            method: 'POST',
-            body: JSON.stringify(m.payload),
-          });
+          await this.createPassword(m.payload);
         } else if (m.kind === 'update_password') {
-          await this.requestJson(`/api/v1/passwords/${encodeURIComponent(m.itemId)}`, {
-            method: 'PATCH',
-            body: JSON.stringify(m.payload),
-          });
+          await this.updatePassword(m.itemId, m.payload);
         }
         flushed += 1;
       } catch (err) {
@@ -986,41 +1351,80 @@ export class PrivateSpaceMobileClient {
   }
 
   /**
-   * Pulls incremental changes since the locally persisted `lastSyncSeq` cursor
-   * and atomically updates local notes, passwords, images, videos, albums, and tombstones.
+   * Pulls incremental ciphertext changes since `lastSyncSeq`, decrypts every item locally
+   * using the unlocked 256-bit DEK, and updates the encrypted local snapshot.
    */
   async syncDelta(): Promise<{ snapshot: MobileVaultSnapshot; delta: SyncPullResponse }> {
+    const dek = this.requireUnlockedDek();
+
     await this.flushOutbox();
     await this.flushPendingMutations();
 
     const existing = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
 
-    const delta = await this.requestJson<SyncPullResponse>(
+    const raw = await this.requestJson<EncryptedSyncPullResponse>(
       `/api/v1/sync?since_seq=${existing.lastSyncSeq}`,
     );
 
-    for (const note of delta.notes) {
-      existing.notes[note.id] = note;
+    const hydratedItems = await Promise.all(
+      raw.items.map((rec) => hydrateDecryptedVaultRecord(dek, rec)),
+    );
+
+    const notes: NoteItem[] = [];
+    const passwords: PasswordItem[] = [];
+    const media: MediaItem[] = [];
+
+    for (const item of hydratedItems) {
+      if (item.itemType === 'note') {
+        notes.push(item);
+        existing.notes[item.id] = item;
+      } else if (item.itemType === 'password') {
+        passwords.push(item);
+        existing.passwords[item.id] = item;
+      } else {
+        media.push(item);
+        existing.media[item.id] = item;
+        this.mediaMetaCache.set(item.id, item);
+      }
     }
-    for (const pw of delta.passwords) {
-      existing.passwords[pw.id] = pw;
-    }
-    for (const m of delta.media) {
-      existing.media[m.id] = m;
-    }
-    for (const album of delta.albums) {
-      existing.albums[album.id] = album;
-    }
-    for (const tomb of delta.deleted) {
+
+    for (const tomb of raw.deleted) {
       delete existing.notes[tomb.id];
       delete existing.passwords[tomb.id];
       delete existing.media[tomb.id];
       delete existing.albums[tomb.id];
+      this.mediaMetaCache.delete(tomb.id);
     }
 
-    existing.lastSyncSeq = delta.latestSyncSeq;
-    existing.syncedAt = delta.serverTime;
+    const albumCounts = new Map<string, number>();
+    for (const m of Object.values(existing.media)) {
+      if (!m.isTrashed && m.albumId) {
+        albumCounts.set(m.albumId, (albumCounts.get(m.albumId) ?? 0) + 1);
+      }
+    }
+
+    const albums = await Promise.all(
+      raw.albums.map((rec) => hydrateDecryptedAlbum(dek, rec, albumCounts.get(rec.id) ?? 0)),
+    );
+    for (const alb of albums) {
+      existing.albums[alb.id] = alb;
+    }
+
+    existing.lastSyncSeq = raw.latestSyncSeq;
+    existing.syncedAt = raw.serverTime;
     await this.persistence.saveSnapshot(existing);
+
+    const delta: SyncPullResponse = {
+      serverTime: raw.serverTime,
+      latestSyncSeq: raw.latestSyncSeq,
+      sinceSeq: raw.sinceSeq,
+      items: hydratedItems,
+      notes,
+      passwords,
+      media,
+      albums,
+      deleted: raw.deleted,
+    };
 
     return { snapshot: existing, delta };
   }
@@ -1085,18 +1489,41 @@ export class PrivateSpaceMobileClient {
     return snap;
   }
 
-  // ==================== 3. Encrypted Notes CRUD ====================
+  // ==================== 3. Client-Side E2EE Notes CRUD ====================
 
   async createNote(input: CreateNoteRequest): Promise<NoteItem> {
-    const res = await this.requestJson<{ note: NoteItem }>('/api/v1/notes', {
+    const dek = this.requireUnlockedDek();
+    const id = input.id ?? generateClientUuid();
+    const revision = 1;
+    const rawContent = input.content ?? '';
+    const { cleanTitle, excerpt, wordCount } = summarizeNoteText(input.title ?? '', rawContent);
+
+    const payload: NoteDecryptedPayload = {
+      title: cleanTitle,
+      content: rawContent,
+      excerpt,
+      tags: normalizeTags(input.tags ?? []),
+      format: input.format ?? 'markdown',
+      wordCount,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'note', revision, payload);
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>('/api/v1/notes', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        id,
+        isPinned: input.isPinned ?? false,
+        revision,
+        envelope,
+      }),
     });
+
+    const note = await hydrateDecryptedNote(dek, res.item);
     await this.upsertSnapshotItem((snap) => {
-      snap.notes[res.note.id] = res.note;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.note.syncSeq);
+      snap.notes[note.id] = note;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, note.syncSeq);
     });
-    return res.note;
+    return note;
   }
 
   async createNoteWithOffline(
@@ -1113,16 +1540,19 @@ export class PrivateSpaceMobileClient {
       if (opts?.allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
         const now = new Date().toISOString();
         const content = reqPayload.content ?? '';
-        const plain = content.replace(/[#>*_`~\-\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+        const { cleanTitle, excerpt, wordCount } = summarizeNoteText(
+          reqPayload.title ?? '',
+          content,
+        );
         const optimistic: NoteItem = {
           id: clientId,
           itemType: 'note',
-          title: reqPayload.title ?? '',
+          title: cleanTitle,
           content,
-          excerpt: plain.slice(0, 140),
-          tags: reqPayload.tags ?? [],
+          excerpt,
+          tags: normalizeTags(reqPayload.tags ?? []),
           format: reqPayload.format ?? 'markdown',
-          wordCount: content.trim() ? content.trim().length : 0,
+          wordCount,
           isPinned: Boolean(reqPayload.isPinned),
           isArchived: false,
           isTrashed: false,
@@ -1150,18 +1580,48 @@ export class PrivateSpaceMobileClient {
   }
 
   async updateNote(id: string, input: UpdateNoteRequest): Promise<NoteItem> {
-    const res = await this.requestJson<{ note: NoteItem }>(
+    const dek = this.requireUnlockedDek();
+    const currentRes = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
+      `/api/v1/notes/${encodeURIComponent(id)}`,
+    );
+    const current = await hydrateDecryptedNote(dek, currentRes.item);
+    const nextRevision = current.revision + 1;
+
+    const nextTitleRaw = input.title !== undefined ? input.title : current.title;
+    const nextContent = input.content !== undefined ? input.content : current.content;
+    const { cleanTitle, excerpt, wordCount } = summarizeNoteText(nextTitleRaw, nextContent);
+
+    const payload: NoteDecryptedPayload = {
+      title: cleanTitle,
+      content: nextContent,
+      excerpt,
+      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
+      format: input.format ?? current.format,
+      wordCount,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'note', nextRevision, payload);
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
       `/api/v1/notes/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          isPinned: input.isPinned,
+          isArchived: input.isArchived,
+          isTrashed: input.isTrashed,
+          expectedRevision: input.expectedRevision ?? current.revision,
+          revision: nextRevision,
+          envelope,
+        }),
       },
     );
+
+    const note = await hydrateDecryptedNote(dek, res.item);
     await this.upsertSnapshotItem((snap) => {
-      snap.notes[res.note.id] = res.note;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.note.syncSeq);
+      snap.notes[note.id] = note;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, note.syncSeq);
     });
-    return res.note;
+    return note;
   }
 
   async updateNoteWithOffline(
@@ -1179,15 +1639,18 @@ export class PrivateSpaceMobileClient {
         if (current) {
           const now = new Date().toISOString();
           const nextContent = input.content ?? current.content;
-          const plain = nextContent.replace(/[#>*_`~\-\[\]()!]/g, ' ').replace(/\s+/g, ' ').trim();
+          const { cleanTitle, excerpt, wordCount } = summarizeNoteText(
+            input.title ?? current.title,
+            nextContent,
+          );
           const updated: NoteItem = {
             ...current,
-            title: input.title ?? current.title,
+            title: cleanTitle,
             content: nextContent,
-            excerpt: plain.slice(0, 140),
-            tags: input.tags ?? current.tags,
+            excerpt,
+            tags: input.tags ? normalizeTags(input.tags) : current.tags,
             format: input.format ?? current.format,
-            wordCount: nextContent.trim() ? nextContent.trim().length : 0,
+            wordCount,
             isPinned: input.isPinned ?? current.isPinned,
             isArchived: input.isArchived ?? current.isArchived,
             isTrashed: input.isTrashed ?? current.isTrashed,
@@ -1238,18 +1701,45 @@ export class PrivateSpaceMobileClient {
     return res.purgedCount;
   }
 
-  // ==================== 4. Encrypted Passwords, TOTP, Generator & Audit ====================
+  // ==================== 4. Client-Side E2EE Passwords, TOTP, Generator & Audit ====================
 
   async createPassword(input: CreatePasswordRequest): Promise<PasswordItem> {
-    const res = await this.requestJson<{ password: PasswordItem }>('/api/v1/passwords', {
+    const dek = this.requireUnlockedDek();
+    const id = input.id ?? generateClientUuid();
+    const revision = 1;
+    const now = new Date().toISOString();
+
+    const payload: PasswordDecryptedPayload = {
+      title: (input.title || '').trim().slice(0, 120) || '未命名账号',
+      username: (input.username || '').trim().slice(0, 240),
+      password: input.password || '',
+      url: (input.url || '').trim().slice(0, 500),
+      totpSecret: (input.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
+      category: input.category || 'login',
+      notes: (input.notes || '').slice(0, 10_000),
+      tags: normalizeTags(input.tags ?? []),
+      customFields: sanitizeCustomFields(input.customFields ?? []),
+      history: [],
+      passwordChangedAt: now,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'password', revision, payload);
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>('/api/v1/passwords', {
       method: 'POST',
-      body: JSON.stringify(input),
+      body: JSON.stringify({
+        id,
+        isPinned: input.isPinned ?? false,
+        revision,
+        envelope,
+      }),
     });
+
+    const password = await hydrateDecryptedPassword(dek, res.item);
     await this.upsertSnapshotItem((snap) => {
-      snap.passwords[res.password.id] = res.password;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.password.syncSeq);
+      snap.passwords[password.id] = password;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, password.syncSeq);
     });
-    return res.password;
+    return password;
   }
 
   async createPasswordWithOffline(
@@ -1274,8 +1764,8 @@ export class PrivateSpaceMobileClient {
           totpSecret: reqPayload.totpSecret ?? '',
           category: reqPayload.category ?? 'login',
           notes: reqPayload.notes ?? '',
-          tags: reqPayload.tags ?? [],
-          customFields: reqPayload.customFields ?? [],
+          tags: normalizeTags(reqPayload.tags ?? []),
+          customFields: sanitizeCustomFields(reqPayload.customFields ?? []),
           history: [],
           passwordChangedAt: now,
           isPinned: Boolean(reqPayload.isPinned),
@@ -1305,18 +1795,75 @@ export class PrivateSpaceMobileClient {
   }
 
   async updatePassword(id: string, input: UpdatePasswordRequest): Promise<PasswordItem> {
-    const res = await this.requestJson<{ password: PasswordItem }>(
+    const dek = this.requireUnlockedDek();
+    const currentRes = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
+      `/api/v1/passwords/${encodeURIComponent(id)}`,
+    );
+    const current = await hydrateDecryptedPassword(dek, currentRes.item);
+    const nextRevision = current.revision + 1;
+    const now = new Date().toISOString();
+
+    let history: PasswordHistoryEntry[] = current.history;
+    let passwordChangedAt = current.passwordChangedAt;
+    const nextPassword = input.password !== undefined ? input.password : current.password;
+
+    if (input.password !== undefined && input.password !== current.password && current.password) {
+      history = [
+        {
+          password: current.password,
+          changedAt: current.passwordChangedAt || current.updatedAt,
+        },
+        ...current.history,
+      ].slice(0, 15);
+      passwordChangedAt = now;
+    }
+
+    const payload: PasswordDecryptedPayload = {
+      title:
+        input.title !== undefined
+          ? input.title.trim().slice(0, 120) || '未命名账号'
+          : current.title,
+      username:
+        input.username !== undefined ? input.username.trim().slice(0, 240) : current.username,
+      password: nextPassword,
+      url: input.url !== undefined ? input.url.trim().slice(0, 500) : current.url,
+      totpSecret:
+        input.totpSecret !== undefined
+          ? input.totpSecret.replace(/\s+/g, '').toUpperCase().slice(0, 160)
+          : current.totpSecret,
+      category: input.category ?? current.category,
+      notes: input.notes !== undefined ? input.notes.slice(0, 10_000) : current.notes,
+      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
+      customFields:
+        input.customFields !== undefined
+          ? sanitizeCustomFields(input.customFields)
+          : current.customFields,
+      history,
+      passwordChangedAt,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'password', nextRevision, payload);
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
       `/api/v1/passwords/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          isPinned: input.isPinned,
+          isArchived: input.isArchived,
+          isTrashed: input.isTrashed,
+          expectedRevision: input.expectedRevision ?? current.revision,
+          revision: nextRevision,
+          envelope,
+        }),
       },
     );
+
+    const password = await hydrateDecryptedPassword(dek, res.item);
     await this.upsertSnapshotItem((snap) => {
-      snap.passwords[res.password.id] = res.password;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.password.syncSeq);
+      snap.passwords[password.id] = password;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, password.syncSeq);
     });
-    return res.password;
+    return password;
   }
 
   async updatePasswordWithOffline(
@@ -1348,8 +1895,10 @@ export class PrivateSpaceMobileClient {
             totpSecret: input.totpSecret ?? current.totpSecret,
             category: input.category ?? current.category,
             notes: input.notes ?? current.notes,
-            tags: input.tags ?? current.tags,
-            customFields: input.customFields ?? current.customFields,
+            tags: input.tags ? normalizeTags(input.tags) : current.tags,
+            customFields: input.customFields
+              ? sanitizeCustomFields(input.customFields)
+              : current.customFields,
             history: nextHistory,
             passwordChangedAt: passwordChanged ? now : current.passwordChangedAt,
             isPinned: input.isPinned ?? current.isPinned,
@@ -1403,20 +1952,48 @@ export class PrivateSpaceMobileClient {
   }
 
   async importPasswords(entries: ImportPasswordEntryInput[]): Promise<PasswordItem[]> {
-    const res = await this.requestJson<{ imported: PasswordItem[]; count: number }>(
+    const dek = this.requireUnlockedDek();
+    const now = new Date().toISOString();
+    const items: CreateEncryptedItemRequest[] = [];
+
+    for (const entry of entries.slice(0, 500)) {
+      if (!entry.title && !entry.password && !entry.username) continue;
+      const id = generateClientUuid();
+      const payload: PasswordDecryptedPayload = {
+        title: (entry.title || entry.url || '导入凭据').trim().slice(0, 120),
+        username: (entry.username || '').trim().slice(0, 240),
+        password: entry.password || '',
+        url: (entry.url || '').trim().slice(0, 500),
+        totpSecret: (entry.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
+        category: entry.category || 'login',
+        notes: (entry.notes || '').slice(0, 10_000),
+        tags: normalizeTags(entry.tags ?? []),
+        customFields: [],
+        history: [],
+        passwordChangedAt: now,
+      };
+      const envelope = await encryptItemPayload(dek, id, 'password', 1, payload);
+      items.push({ id, revision: 1, envelope });
+    }
+
+    const res = await this.requestJson<{ items: EncryptedVaultRecordDto[]; count: number }>(
       '/api/v1/passwords/import',
       {
         method: 'POST',
-        body: JSON.stringify({ entries }),
+        body: JSON.stringify({ items }),
       },
     );
+
+    const imported = await Promise.all(
+      res.items.map((rec) => hydrateDecryptedPassword(dek, rec)),
+    );
     await this.upsertSnapshotItem((snap) => {
-      for (const pw of res.imported) {
+      for (const pw of imported) {
         snap.passwords[pw.id] = pw;
         snap.lastSyncSeq = Math.max(snap.lastSyncSeq, pw.syncSeq);
       }
     });
-    return res.imported;
+    return imported;
   }
 
   computeTotp(secretOrUri: string, timestampMs = Date.now()): TotpTokenSnapshot | null {
@@ -1460,18 +2037,34 @@ export class PrivateSpaceMobileClient {
     return auditPasswordVault(items, nowMs);
   }
 
-  // ==================== 5. Encrypted Photos, Streaming Videos & Albums ====================
+  // ==================== 5. Client-Side E2EE Photos, Streaming Videos & Albums ====================
 
-  async createAlbum(input: CreateAlbumRequest): Promise<MediaAlbum> {
-    const res = await this.requestJson<{ album: MediaAlbum }>('/api/v1/media/albums', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    });
+  async createAlbum(input: CreateAlbumRequest & { coverColor?: string }): Promise<MediaAlbum> {
+    const dek = this.requireUnlockedDek();
+    const id = generateClientUuid();
+    const revision = 1;
+    const payload: MediaAlbumDecryptedPayload = {
+      name: input.name.trim().slice(0, 80),
+      description: (input.description ?? '').slice(0, 500),
+      kind: input.kind ?? 'mixed',
+      coverMediaId: input.coverMediaId ?? null,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'album', revision, payload);
+    const res = await this.requestJson<{ album: EncryptedAlbumRecordDto }>(
+      '/api/v1/media/albums',
+      {
+        method: 'POST',
+        body: JSON.stringify({ id, revision, envelope }),
+      },
+    );
+
+    const album = await hydrateDecryptedAlbum(dek, res.album, 0);
     await this.upsertSnapshotItem((snap) => {
-      snap.albums[res.album.id] = res.album;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.album.syncSeq);
+      snap.albums[album.id] = album;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, album.syncSeq);
     });
-    return res.album;
+    return album;
   }
 
   async deleteAlbum(id: string): Promise<void> {
@@ -1487,21 +2080,59 @@ export class PrivateSpaceMobileClient {
   }
 
   async updateMedia(id: string, input: UpdateMediaRequest): Promise<MediaItem> {
-    const res = await this.requestJson<{ media: MediaItem }>(
+    const dek = this.requireUnlockedDek();
+    const currentRes = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
+      `/api/v1/media/${encodeURIComponent(id)}`,
+    );
+    const current = await hydrateDecryptedMedia(dek, currentRes.item);
+    const nextRevision = current.revision + 1;
+
+    const payload: MediaDecryptedPayload = {
+      title: input.title !== undefined ? input.title.trim().slice(0, 160) : current.title,
+      originalFilename: current.originalFilename,
+      mimeType: current.mimeType,
+      albumId: input.albumId !== undefined ? input.albumId : current.albumId,
+      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
+      description:
+        input.description !== undefined ? input.description.slice(0, 4000) : current.description,
+      width: current.width,
+      height: current.height,
+      durationMs: current.durationMs,
+      videoCodec: current.videoCodec,
+      audioCodec: current.audioCodec,
+      bitrate: current.bitrate,
+      sha256: current.sha256,
+      thumbnailMimeType: current.thumbnailMimeType,
+      takenAt: current.takenAt,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, current.itemType, nextRevision, payload);
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
       `/api/v1/media/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
-        body: JSON.stringify(input),
+        body: JSON.stringify({
+          isPinned: input.isPinned,
+          isArchived: input.isArchived,
+          isTrashed: input.isTrashed,
+          expectedRevision: input.expectedRevision ?? current.revision,
+          revision: nextRevision,
+          envelope,
+        }),
       },
     );
+
+    const media = await hydrateDecryptedMedia(dek, res.item);
+    this.mediaMetaCache.set(media.id, media);
     await this.upsertSnapshotItem((snap) => {
-      snap.media[res.media.id] = res.media;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, res.media.syncSeq);
+      snap.media[media.id] = media;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, media.syncSeq);
     });
-    return res.media;
+    return media;
   }
 
   async deleteMediaPermanently(id: string): Promise<void> {
+    this.mediaMetaCache.delete(id);
     await this.requestJson(`/api/v1/media/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
@@ -1520,6 +2151,7 @@ export class PrivateSpaceMobileClient {
       for (const [id, m] of Object.entries(snap.media)) {
         if (m.isTrashed && (!kind || m.itemType === kind)) {
           delete snap.media[id];
+          this.mediaMetaCache.delete(id);
         }
       }
     });
@@ -1527,9 +2159,9 @@ export class PrivateSpaceMobileClient {
   }
 
   /**
-   * Resumable chunked upload for photos & large 4K videos on mobile networks.
-   * Supports both `bytes: Uint8Array` (SDK/Node) and `file: Blob | File` (Android WebView zero-RAM-copy slicing).
-   * Queries already-received chunks when resuming an interrupted uploadId.
+   * Zero-Knowledge Resumable Chunked Upload (`init -> encrypted PSENC001 parts -> complete`).
+   * Supports both `bytes: Uint8Array` (SDK/Node) and `file: Blob | File` (WebView/Safari).
+   * Every 64 KiB chunk is encrypted with AES-256-GCM on-device before leaving the client.
    */
   async uploadMediaResumable(params: {
     bytes?: Uint8Array;
@@ -1547,120 +2179,361 @@ export class PrivateSpaceMobileClient {
     chunkBytes?: number;
     onProgress?: (uploadedBytes: number, totalBytes: number) => void;
   }): Promise<MediaItem> {
-    const totalLength = params.bytes
-      ? params.bytes.byteLength
-      : params.file
-        ? params.file.size
-        : 0;
+    const dek = this.requireUnlockedDek();
 
-    if (totalLength <= 0) {
+    const plainBytes: Uint8Array = params.bytes
+      ? params.bytes
+      : params.file
+        ? new Uint8Array(await params.file.arrayBuffer())
+        : new Uint8Array(0);
+
+    const totalPlainBytes = plainBytes.byteLength;
+    if (totalPlainBytes <= 0) {
       throw new Error('待上传文件字节数为空');
     }
 
-    let chunkBytes = params.chunkBytes ?? 512 * 1024;
-    let uploadId = params.existingUploadId;
-    let totalChunks = Math.max(1, Math.ceil(totalLength / chunkBytes));
-    const completedSet = new Set<number>();
+    const requestedChunk = params.chunkBytes ?? 512 * 1024;
+    const partPlainBytes = Math.max(
+      DEFAULT_MEDIA_CHUNK_SIZE,
+      Math.ceil(requestedChunk / DEFAULT_MEDIA_CHUNK_SIZE) * DEFAULT_MEDIA_CHUNK_SIZE,
+    );
 
-    if (uploadId) {
-      const status = await this.requestJson<ResumableUploadStatusResponse>(
-        `/api/v1/media/uploads/${encodeURIComponent(uploadId)}`,
-      );
-      totalChunks = status.totalChunks;
-      chunkBytes = status.chunkBytes;
-      for (const idx of status.receivedChunks) completedSet.add(idx);
-    } else {
-      const init = await this.requestJson<ResumableUploadInitResponse>(
-        '/api/v1/media/uploads/init',
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            filename: params.filename,
-            mimeType: params.mimeType || 'application/octet-stream',
-            kind: params.kind,
-            totalBytes: totalLength,
-            chunkBytes,
-            title: params.title,
-            description: params.description,
-            takenAt: params.takenAt,
-            sha256: params.sha256Hex,
-            albumId: params.albumId ?? null,
-            tags: params.tags ?? [],
-          }),
-        },
-      );
-      uploadId = init.uploadId;
-      totalChunks = init.totalChunks;
-      chunkBytes = init.chunkBytes;
-    }
+    const kind: MediaKind =
+      params.kind ??
+      ((params.mimeType || '').toLowerCase().startsWith('video/') ||
+      /\.(mp4|mov|webm|mkv|m4v)$/i.test(params.filename)
+        ? 'video'
+        : 'image');
+    const mimeType = params.mimeType || (kind === 'video' ? 'video/mp4' : 'image/jpeg');
 
-    for (let i = 0; i < totalChunks; i += 1) {
-      if (completedSet.has(i)) continue;
-      const start = i * chunkBytes;
-      const end = Math.min(totalLength, start + chunkBytes);
-      const bodyPayload: BodyInit = params.bytes
-        ? (params.bytes.subarray(start, end) as unknown as BodyInit)
-        : (params.file!.slice(start, end) as BodyInit);
+    const probe = await probeMediaOnClient(plainBytes, kind, mimeType);
+    const sha256Hex = params.sha256Hex || bytesToHex(await sha256(plainBytes));
+    const { chunkCount: psencChunkCount, encryptedSize: totalEncryptedBytes } =
+      computePsencEncryptedSize(totalPlainBytes, DEFAULT_MEDIA_CHUNK_SIZE);
+    const totalParts = Math.max(1, Math.ceil(totalPlainBytes / partPlainBytes));
 
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/octet-stream',
-      };
-      if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    const uploadId = params.existingUploadId ?? generateClientUuid();
+    const itemId = generateClientUuid();
+    const mainBlobId = generateBlobId();
+    const fek = randomBytes(32);
+    const baseNonce = randomBytes(12);
+    const wrappedFek = await wrapBlobFek(dek, fek, mainBlobId);
 
-      let attempt = 0;
-      while (true) {
-        try {
-          const chunkRes = await this.fetchFn(
-            this.buildUrl(`/api/v1/media/uploads/${encodeURIComponent(uploadId)}/chunks/${i}`),
-            {
-              method: 'PUT',
-              headers,
-              body: bodyPayload,
-            },
-          );
-          if (!chunkRes.ok) {
-            throw new Error(`Chunk ${i} upload failed with HTTP ${chunkRes.status}`);
-          }
-          break;
-        } catch (err) {
-          attempt += 1;
-          if (attempt >= 3) throw err;
-          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
-        }
+    try {
+      let activeUploadId = uploadId;
+      let activePartPlainBytes = partPlainBytes;
+      let activeTotalParts = totalParts;
+      const completedSet = new Set<number>();
+
+      if (params.existingUploadId) {
+        const status = await this.requestJson<EncryptedResumableUploadStatusResponse>(
+          `/api/v1/media/uploads/${encodeURIComponent(params.existingUploadId)}`,
+        );
+        activeUploadId = status.uploadId;
+        activePartPlainBytes = status.chunkBytes;
+        activeTotalParts = status.totalChunks;
+        for (const idx of status.receivedChunks) completedSet.add(idx);
+      } else {
+        const metaEnvelope = await encryptItemPayload(dek, uploadId, 'upload', 1, {
+          itemId,
+          mainBlobId,
+          filename: params.filename,
+        });
+
+        const init = await this.requestJson<EncryptedResumableUploadInitResponse>(
+          '/api/v1/media/uploads/init',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              uploadId,
+              kind,
+              totalPlainBytes,
+              totalEncryptedBytes,
+              partPlainBytes,
+              totalParts,
+              metaEnvelope,
+            }),
+          },
+        );
+        activeUploadId = init.uploadId;
+        activePartPlainBytes = init.partPlainBytes;
+        activeTotalParts = init.totalParts;
       }
 
-      params.onProgress?.(end, totalLength);
+      for (let i = 0; i < activeTotalParts; i += 1) {
+        if (completedSet.has(i)) continue;
+        const start = i * activePartPlainBytes;
+        const end = Math.min(totalPlainBytes, start + activePartPlainBytes);
+        const slice = plainBytes.subarray(start, end);
+
+        const encryptedPart = await encryptResumableMediaPart({
+          fek,
+          blobId: mainBlobId,
+          baseNonce,
+          partPlainBytes: slice,
+          partIndex: i,
+          partStridePlainBytes: activePartPlainBytes,
+          totalPlainSize: totalPlainBytes,
+          chunkPlainSize: DEFAULT_MEDIA_CHUNK_SIZE,
+        });
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/octet-stream',
+          'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/2.0 (${this.deviceName})`,
+        };
+        if (this.token) headers.Authorization = `Bearer ${this.token}`;
+
+        let attempt = 0;
+        while (true) {
+          try {
+            const chunkRes = await this.fetchFn(
+              this.buildUrl(`/api/v1/media/uploads/${encodeURIComponent(activeUploadId)}/chunks/${i}`),
+              {
+                method: 'PUT',
+                headers,
+                body: toOwnedArrayBuffer(encryptedPart),
+              },
+            );
+            if (!chunkRes.ok) {
+              throw new Error(`Chunk ${i} upload failed with HTTP ${chunkRes.status}`);
+            }
+            break;
+          } catch (err) {
+            attempt += 1;
+            if (attempt >= 3) throw err;
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
+
+        params.onProgress?.(end, totalPlainBytes);
+      }
+
+      const thumbEnc = probe.thumbnailBytes
+        ? await encryptMediaBytesToPsenc(dek, probe.thumbnailBytes)
+        : null;
+
+      const defaultTitle =
+        params.filename.replace(/\.[^.]+$/, '') || params.filename || '未命名媒体';
+      const payload: MediaDecryptedPayload = {
+        title: (params.title || defaultTitle).trim().slice(0, 160),
+        originalFilename: params.filename,
+        mimeType,
+        albumId: params.albumId ?? null,
+        tags: normalizeTags(params.tags ?? []),
+        description: (params.description ?? '').slice(0, 4000),
+        width: probe.width,
+        height: probe.height,
+        durationMs: probe.durationMs,
+        videoCodec: probe.videoCodec,
+        audioCodec: probe.audioCodec,
+        bitrate: probe.bitrate,
+        sha256: sha256Hex,
+        thumbnailMimeType: thumbEnc ? probe.thumbnailMimeType || 'image/jpeg' : null,
+        takenAt: params.takenAt ?? new Date().toISOString(),
+      };
+
+      const envelope = await encryptItemPayload(dek, itemId, kind, 1, payload);
+      const completeBody: EncryptedResumableUploadCompleteRequest = {
+        id: itemId,
+        kind,
+        revision: 1,
+        envelope,
+        mainBlob: {
+          blobId: mainBlobId,
+          ...wrappedFek,
+          baseNonce: bytesToBase64(baseNonce),
+          chunkSize: DEFAULT_MEDIA_CHUNK_SIZE,
+          chunkCount: psencChunkCount,
+          plainSize: totalPlainBytes,
+          encryptedSize: totalEncryptedBytes,
+          sha256: sha256Hex,
+        },
+        thumbBlob: thumbEnc ? thumbEnc.meta : null,
+        encryptedThumbnailBase64: thumbEnc ? bytesToBase64(thumbEnc.encryptedBytes) : null,
+      };
+
+      const completed = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
+        `/api/v1/media/uploads/${encodeURIComponent(activeUploadId)}/complete`,
+        {
+          method: 'POST',
+          body: JSON.stringify(completeBody),
+        },
+      );
+
+      const media = await hydrateDecryptedMedia(dek, completed.item);
+      this.mediaMetaCache.set(media.id, media);
+      await this.upsertSnapshotItem((snap) => {
+        snap.media[media.id] = media;
+        snap.lastSyncSeq = Math.max(snap.lastSyncSeq, media.syncSeq);
+      });
+      return media;
+    } finally {
+      zeroBytes(fek);
+    }
+  }
+
+  async ensureMediaItem(idOrItem: string | MediaItem): Promise<MediaItem> {
+    if (typeof idOrItem !== 'string' && idOrItem.blobKeyBundle) {
+      this.mediaMetaCache.set(idOrItem.id, idOrItem);
+      return idOrItem;
+    }
+    const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+    const cached = this.mediaMetaCache.get(id);
+    if (cached?.blobKeyBundle) return cached;
+
+    const snap = await this.persistence.loadSnapshot();
+    const fromSnap = snap?.media[id];
+    if (fromSnap?.blobKeyBundle) {
+      this.mediaMetaCache.set(id, fromSnap);
+      return fromSnap;
     }
 
-    const done = await this.requestJson<{ media: MediaItem }>(
-      `/api/v1/media/uploads/${encodeURIComponent(uploadId)}/complete`,
+    const dek = this.requireUnlockedDek();
+    const res = await this.requestJson<{ item: EncryptedVaultRecordDto }>(
+      `/api/v1/media/${encodeURIComponent(id)}`,
+    );
+    const hydrated = await hydrateDecryptedMedia(dek, res.item);
+    this.mediaMetaCache.set(hydrated.id, hydrated);
+    return hydrated;
+  }
+
+  async decryptMediaBytes(idOrItem: string | MediaItem): Promise<Uint8Array> {
+    const dek = this.requireUnlockedDek();
+    const resolved = await this.ensureMediaItem(idOrItem);
+    const mainMeta = resolved.blobKeyBundle?.main;
+    if (!mainMeta) {
+      throw new MobileApiError('缺少加密媒体密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+    }
+    const encryptedBytes = await this.fetchBinaryBytes(
+      `/api/v1/media/${encodeURIComponent(resolved.id)}/blob?rev=${resolved.revision}`,
+    );
+    return decryptPsencFullBuffer(dek, encryptedBytes, mainMeta);
+  }
+
+  async decryptMediaByteRange(
+    idOrItem: string | MediaItem,
+    startPlainByte: number,
+    endPlainByte?: number,
+  ): Promise<Uint8Array> {
+    const dek = this.requireUnlockedDek();
+    const resolved = await this.ensureMediaItem(idOrItem);
+    const mainMeta = resolved.blobKeyBundle?.main;
+    if (!mainMeta) {
+      throw new MobileApiError('缺少加密媒体密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+    }
+
+    const range = computeEncryptedRangeForPlainRange(mainMeta, startPlainByte, endPlainByte);
+    const encryptedSlice = await this.fetchBinaryBytes(
+      `/api/v1/media/${encodeURIComponent(resolved.id)}/blob`,
       {
-        method: 'POST',
+        Range: `bytes=${range.diskStart}-${range.diskEnd}`,
       },
     );
 
-    await this.upsertSnapshotItem((snap) => {
-      snap.media[done.media.id] = done.media;
-      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, done.media.syncSeq);
+    return decryptPsencRangeSlice({
+      dek,
+      encryptedSlice,
+      meta: mainMeta,
+      clampedStart: range.clampedStart,
+      clampedEnd: range.clampedEnd,
+      firstChunkIdx: range.firstChunkIdx,
+      lastChunkIdx: range.lastChunkIdx,
+    });
+  }
+
+  async loadThumbnailObjectUrl(item: MediaItem): Promise<string> {
+    const cacheKey = `${item.id}:thumb:${item.revision}`;
+    const existing = this.objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = this.inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const dek = this.requireUnlockedDek();
+      const resolved = await this.ensureMediaItem(item);
+      const bundle = resolved.blobKeyBundle;
+      if (!bundle) {
+        throw new MobileApiError('缺少加密媒体密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+      }
+      const targetMeta =
+        bundle.thumbnail ?? (resolved.itemType === 'image' ? bundle.main : null);
+      if (!targetMeta) {
+        throw new MobileApiError('暂无加密缩略图', 404, 'NO_THUMBNAIL', false);
+      }
+
+      const encryptedBytes = await this.fetchBinaryBytes(
+        `/api/v1/media/${encodeURIComponent(resolved.id)}/thumbnail-blob?rev=${resolved.revision}`,
+      );
+      const plainBytes = await decryptPsencFullBuffer(dek, encryptedBytes, targetMeta);
+      const mime = bundle.thumbnail
+        ? resolved.thumbnailMimeType || 'image/jpeg'
+        : resolved.mimeType;
+      const url = bytesToRenderableUrl(plainBytes, mime);
+      zeroBytes(plainBytes);
+      this.objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      this.inFlightUrlLoads.delete(cacheKey);
     });
 
-    return done.media;
+    this.inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
   }
 
-  getThumbnailUrl(mediaId: string, revision = 1): string {
-    const params = new URLSearchParams({ rev: String(revision) });
-    if (this.token) params.set('token', this.token);
-    return this.buildUrl(`/api/v1/media/${encodeURIComponent(mediaId)}/thumbnail?${params.toString()}`);
+  async loadMediaObjectUrl(item: MediaItem): Promise<string> {
+    const cacheKey = `${item.id}:full:${item.revision}`;
+    const existing = this.objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = this.inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const plainBytes = await this.decryptMediaBytes(item);
+      const url = bytesToRenderableUrl(plainBytes, item.mimeType);
+      zeroBytes(plainBytes);
+      this.objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      this.inFlightUrlLoads.delete(cacheKey);
+    });
+
+    this.inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
   }
 
+  async downloadDecryptedMedia(item: MediaItem): Promise<void> {
+    if (typeof document === 'undefined') return;
+    const url = await this.loadMediaObjectUrl(item);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = item.originalFilename || item.title || 'decrypted-media';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  /**
+   * Returns the authenticated raw `.psenc` ciphertext stream URL (`GET` / `HEAD` / `HTTP 206 Range`).
+   * The server streams opaque `PSENC001` encrypted bytes; clients decrypt chunks locally.
+   */
   getStreamUrl(mediaId: string, revision = 1): string {
     const params = new URLSearchParams({ rev: String(revision) });
     if (this.token) params.set('token', this.token);
     return this.buildUrl(`/api/v1/media/${encodeURIComponent(mediaId)}/stream?${params.toString()}`);
   }
 
-  getDownloadUrl(mediaId: string): string {
-    const q = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
-    return this.buildUrl(`/api/v1/media/${encodeURIComponent(mediaId)}/download${q}`);
+  getEncryptedBlobUrl(mediaId: string, revision = 1): string {
+    const params = new URLSearchParams({ rev: String(revision) });
+    if (this.token) params.set('token', this.token);
+    return this.buildUrl(`/api/v1/media/${encodeURIComponent(mediaId)}/blob?${params.toString()}`);
+  }
+
+  getEncryptedThumbnailBlobUrl(mediaId: string, revision = 1): string {
+    const params = new URLSearchParams({ rev: String(revision) });
+    if (this.token) params.set('token', this.token);
+    return this.buildUrl(
+      `/api/v1/media/${encodeURIComponent(mediaId)}/thumbnail-blob?${params.toString()}`,
+    );
   }
 }

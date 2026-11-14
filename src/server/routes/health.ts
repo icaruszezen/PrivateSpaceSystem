@@ -10,15 +10,16 @@ export function createHealthRoutes(repo: VaultRepository): Hono {
     return c.json({
       status: 'ok',
       service: 'private-space-system',
-      version: '0.3.0',
+      version: '0.4.0',
       initialized: Boolean(admin),
       encryption: ENCRYPTION_SPEC,
       capabilities: [
+        'zero-knowledge-e2ee-v2',
         'notes',
         'passwords',
         'totp-rfc6238',
         'psenc001-media',
-        'http206-range',
+        'http206-encrypted-range',
         'resumable-upload',
         'sse-sync',
         'ios-autofill',

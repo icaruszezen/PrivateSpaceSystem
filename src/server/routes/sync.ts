@@ -16,13 +16,12 @@ export function createSyncRoutes(
   const router = new Hono<AuthEnv>();
   const requireAuth = createRequireAuthMiddleware(repo, sessionCrypto);
 
-  // GET /api/v1/sync/stream - Real-time SSE notification channel for Web, iOS, and Android
+  // GET /api/v1/sync/stream - Real-time blind SSE cursor notification channel (zero key material)
   router.get('/stream', (c) => {
     const resolved = resolveOptionalSession(c, repo, sessionCrypto, true);
     if (!resolved) {
       return c.json({ error: { code: 'UNAUTHORIZED', message: '未授权同步连接' } }, 401);
     }
-    resolved.dek.fill(0);
 
     const admin = repo.getAdminConfig();
     const initialSeq = admin?.syncSeq ?? 0;
@@ -81,12 +80,11 @@ export function createSyncRoutes(
   router.use('*', requireAuth);
 
   // GET /api/v1/sync?since_seq=0
-  // Incremental synchronization endpoint for Web, iOS, and Android clients
+  // Incremental blind ciphertext delta sync endpoint for Web, iOS, and Android clients
   router.get('/', (c) => {
-    const dek = c.get('dek');
     const rawSeq = c.req.query('since_seq') ?? '0';
     const sinceSeq = Math.max(0, Number.parseInt(rawSeq, 10) || 0);
-    const delta = repo.pullSyncChanges(dek, sinceSeq);
+    const delta = repo.pullEncryptedSyncChanges(sinceSeq);
     return c.json(delta);
   });
 

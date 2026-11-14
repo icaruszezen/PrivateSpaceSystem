@@ -1,8 +1,8 @@
 {
   "name": "private-space-system",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Self-hosted AES-256-GCM encrypted private space for text notes, passwords, images, and videos with Web/Android/iOS sync",
+  "description": "Self-hosted Zero-Knowledge End-to-End Encrypted (E2EE v2) private space for notes, passwords, images, and streaming videos across Web, Android, and iOS",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"

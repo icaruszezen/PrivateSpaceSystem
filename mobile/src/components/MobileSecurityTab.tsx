@@ -169,15 +169,16 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
       return;
     }
     const token = client.getToken();
-    if (!token) {
-      onNotify('当前离线无会话令牌，请重新登录后设置');
+    const dekBase64 = client.getDekBase64();
+    if (!token || !dekBase64) {
+      onNotify('当前离线或主密钥未解封，请重新登录后设置');
       return;
     }
-    await quickLockManager.configurePin(pinInput, bioToggle, token);
+    await quickLockManager.configurePin(pinInput, bioToggle, token, dekBase64);
     setPinInput('');
     setPinModalOpen(false);
     await onQuickLockChanged();
-    onNotify('Android Keystore 快捷解锁已启用');
+    onNotify('Android Keystore 零知识密钥快捷解锁已启用');
   };
 
   const handleRotatePassword = async (e: React.FormEvent) => {

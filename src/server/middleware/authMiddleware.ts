@@ -1,15 +1,14 @@
 import crypto from 'node:crypto';
 import { getCookie } from 'hono/cookie';
 import type { Context, MiddlewareHandler } from 'hono';
+import type { SessionInfo } from '../../shared/types.js';
 import type { EphemeralSessionCrypto } from '../crypto/sessionStore.js';
 import type { VaultRepository } from '../db/repositories.js';
-import type { SessionInfo } from '../../shared/types.js';
 
 export const SESSION_COOKIE_NAME = 'pss_session';
 
 export interface AuthEnv {
   Variables: {
-    dek: Buffer;
     sessionId: string;
     sessionInfo: SessionInfo;
   };
@@ -30,7 +29,10 @@ export function extractRawToken(c: Context, allowQueryToken = false): string | n
   return null;
 }
 
-export function detectDeviceLabel(c: Context, explicitDeviceName?: string): {
+export function detectDeviceLabel(
+  c: Context,
+  explicitDeviceName?: string,
+): {
   deviceName: string;
   platform: 'web' | 'ios' | 'android' | 'api';
   ipAddress: string;
@@ -78,7 +80,7 @@ export function resolveOptionalSession(
   repo: VaultRepository,
   sessionCrypto: EphemeralSessionCrypto,
   allowQueryToken = false,
-): { dek: Buffer; sessionInfo: SessionInfo } | null {
+): { sessionInfo: SessionInfo } | null {
   const rawToken = extractRawToken(c, allowQueryToken);
   const parsed = sessionCrypto.parseToken(rawToken);
   if (!parsed) {
@@ -87,34 +89,22 @@ export function resolveOptionalSession(
 
   const stored = repo.getSessionById(parsed.sessionId);
   if (!stored) {
-    return null;
-  }
-
-  if (
-    stored.tokenHash.length !== parsed.tokenHash.length ||
-    !crypto.timingSafeEqual(stored.tokenHash, parsed.tokenHash)
-  ) {
     parsed.sessionSecret.fill(0);
     return null;
   }
 
-  const dek = sessionCrypto.unwrapDekForSession(parsed.sessionId, parsed.sessionSecret, {
-    iv: stored.wrappedDekIv,
-    tag: stored.wrappedDekTag,
-    ciphertext: stored.wrappedDekCiphertext,
-  });
+  const valid =
+    stored.tokenHash.length === parsed.tokenHash.length &&
+    crypto.timingSafeEqual(stored.tokenHash, parsed.tokenHash);
   parsed.sessionSecret.fill(0);
 
-  if (!dek) {
-    // Ephemeral runtime secret rotated (e.g., server restarted); purge stale session envelope
-    repo.deleteSession(parsed.sessionId);
+  if (!valid) {
     return null;
   }
 
   repo.touchSession(parsed.sessionId);
 
   return {
-    dek,
     sessionInfo: {
       id: stored.id,
       deviceName: stored.deviceName,
@@ -139,7 +129,7 @@ export function createRequireAuthMiddleware(
         {
           error: {
             code: 'VAULT_NOT_INITIALIZED',
-            message: '私密空间尚未初始化，请先设置管理员密码',
+            message: '私密空间尚未初始化，请先在客户端创建主密码与加密密钥',
           },
         },
         403,
@@ -152,22 +142,15 @@ export function createRequireAuthMiddleware(
         {
           error: {
             code: 'UNAUTHORIZED',
-            message: '空间已锁定或登录已过期，请重新输入管理员密码解锁',
+            message: '会话未认证或已过期，请重新解锁私密空间',
           },
         },
         401,
       );
     }
 
-    c.set('dek', resolved.dek);
     c.set('sessionId', resolved.sessionInfo.id);
     c.set('sessionInfo', resolved.sessionInfo);
-
-    try {
-      await next();
-    } finally {
-      // Wipe unwrapped DEK from RAM immediately after serving the request
-      resolved.dek.fill(0);
-    }
+    await next();
   };
 }

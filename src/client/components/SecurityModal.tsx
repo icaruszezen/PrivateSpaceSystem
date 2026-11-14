@@ -229,8 +229,8 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
             <>
               <div className="sec-stat-grid">
                 <div className="sec-stat-card">
-                  <div className="sec-stat-label">加密套件 / 媒体分块</div>
-                  <div className="sec-stat-value">AES-256-GCM · PSENC001</div>
+                  <div className="sec-stat-label">零知识架构 / 媒体分块</div>
+                  <div className="sec-stat-value">E2EE v2 · AES-256-GCM · PSENC001</div>
                 </div>
                 <div className="sec-stat-card">
                   <div className="sec-stat-label">主密钥指纹 (HMAC)</div>
@@ -482,7 +482,7 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                 <div className="auth-notice">
                   <KeyRound size={16} />
                   <span>
-                    采用信封加密机制，修改管理员主密码仅重新包裹 256 位空间主密钥（DEK），所有已存储的密码、.psenc 图片与高清视频无需重加密即可无缝访问。
+                    零知识信封重包裹机制：原密码与新密码均仅在浏览器本地派生 KEK 重新包裹 256 位主密钥（DEK），服务端永不获知密码或 DEK，所有既有密码、.psenc 图片与高清视频无需重加密即可无缝访问。
                   </span>
                 </div>
 

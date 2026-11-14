@@ -119,6 +119,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     setOnUnauthorized(() => {
+      api.clearUnlockedKey();
       setNotes([]);
       setPasswords([]);
       setMediaItems([]);
@@ -135,7 +136,7 @@ export const App: React.FC = () => {
         setKeyFingerprint(status.keyFingerprint);
         if (!status.initialized) {
           setPhase('setup');
-        } else if (!status.authenticated) {
+        } else if (!status.authenticated || !api.hasUnlockedKey()) {
           setPhase('locked');
         } else {
           await loadInitialWorkspace();

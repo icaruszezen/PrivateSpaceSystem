@@ -72,23 +72,23 @@ export const LoginView: React.FC<LoginViewProps> = ({
             {keyFingerprint && (
               <div className="auth-key-badge" title="空间主密钥指纹（HMAC-SHA256 不可逆摘要）">
                 <KeyRound size={12} />
-                <span>KEY · {keyFingerprint}</span>
+                <span>E2EE KEY · {keyFingerprint}</span>
               </div>
             )}
             <h1 id="login-heading" className="auth-title">
-              管理员解锁登录
+              零知识密钥解锁
             </h1>
             <p className="auth-subtitle">
-              当前空间处于加密锁定状态。输入唯一管理员密码以解封主密钥并访问私密记录。
+              当前空间处于端到端加密锁定状态。输入管理员主密码以在浏览器本地派生 KEK 并解封主密钥。
             </p>
           </div>
 
           <form className="auth-form" onSubmit={handleSubmit}>
             <div className="field-group">
               <label htmlFor="login-password" className="field-label">
-                <span>管理员密码</span>
+                <span>管理员主密码</span>
                 <span className="mono" style={{ fontSize: '0.73rem' }}>
-                  单管理员身份
+                  零知识本地派生
                 </span>
               </label>
               <div className="field-input-wrap">
@@ -98,7 +98,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   className="field-input has-trailing"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="输入管理员密码以解锁空间"
+                  placeholder="输入管理员主密码以本地解封密钥"
                   autoComplete="current-password"
                   autoFocus
                   required
@@ -117,7 +117,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <div className="auth-notice">
               <Shield size={16} />
               <span>
-                解封后的主密钥仅驻留于临时会话内存，每次请求完成后自动擦除明文缓冲。
+                端到端零知识加密（E2EE v2）：主密码永不发送至服务器；解封后的 256 位 DEK 仅驻留当前浏览器内存，服务端全程仅存储不透明密文。
               </span>
             </div>
 
@@ -133,18 +133,18 @@ export const LoginView: React.FC<LoginViewProps> = ({
               className="btn btn-primary auth-submit"
               disabled={submitting}
             >
-              {submitting ? '正在验证并解封密钥...' : '解锁进入私密空间'}
+              {submitting ? '正在本地派生密钥并解封...' : '本地解封进入私密空间'}
             </button>
           </form>
         </section>
       </main>
 
       <footer className="auth-footer">
-        <span className="auth-spec-item">AES-256-GCM 静态数据加密</span>
+        <span className="auth-spec-item">零知识端到端加密 (E2EE v2)</span>
         <span>·</span>
-        <span className="auth-spec-item">自部署私有存储</span>
+        <span className="auth-spec-item">PBKDF2-SHA256 310k + AES-256-GCM</span>
         <span>·</span>
-        <span className="auth-spec-item">支持网页与多端同步协议</span>
+        <span className="auth-spec-item">服务端零明文 / 零主密钥</span>
       </footer>
     </div>
   );

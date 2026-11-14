@@ -1114,6 +1114,27 @@ export function IosDarkroomPhotoModal(props: {
   const [zoom, setZoom] = useState(1);
   const [deg, setDeg] = useState(0);
   const [flip, setFlip] = useState(false);
+  const [decryptedUri, setDecryptedUri] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!props.media) {
+      setDecryptedUri(null);
+      return;
+    }
+    let cancelled = false;
+    setDecryptedUri(null);
+    props.client
+      .loadMediaObjectUrl(props.media)
+      .then((u) => {
+        if (!cancelled) setDecryptedUri(u);
+      })
+      .catch(() => {
+        if (!cancelled) setDecryptedUri(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.media, props.client]);
 
   if (!props.media) return null;
   const media = props.media;
@@ -1169,19 +1190,25 @@ export function IosDarkroomPhotoModal(props: {
             padding: 12,
           }}
         >
-          <Image
-            source={{ uri: props.client.getStreamUrl(media.id, media.revision) }}
-            resizeMode="contain"
-            style={{
-              width: '100%',
-              height: 360,
-              transform: [
-                { scale: zoom },
-                { rotate: `${deg}deg` },
-                { scaleX: flip ? -1 : 1 },
-              ],
-            }}
-          />
+          {decryptedUri ? (
+            <Image
+              source={{ uri: decryptedUri }}
+              resizeMode="contain"
+              style={{
+                width: '100%',
+                height: 360,
+                transform: [
+                  { scale: zoom },
+                  { rotate: `${deg}deg` },
+                  { scaleX: flip ? -1 : 1 },
+                ],
+              }}
+            />
+          ) : (
+            <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.72)' }}>
+              正在本地解密 PSENC001 原图…
+            </Text>
+          )}
         </View>
 
         <View
@@ -1243,6 +1270,44 @@ export function IosVideoCinemaModal(props: {
   onDeletePermanent: (id: string) => Promise<void>;
   onInspectCipher: (id: string) => void;
 }): React.JSX.Element | null {
+  const [videoUri, setVideoUri] = useState<string | null>(null);
+  const [posterUri, setPosterUri] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (!props.video) {
+      setVideoUri(null);
+      setPosterUri(undefined);
+      return;
+    }
+    let cancelled = false;
+    setVideoUri(null);
+    setPosterUri(undefined);
+
+    props.client
+      .loadMediaObjectUrl(props.video)
+      .then((u) => {
+        if (!cancelled) setVideoUri(u);
+      })
+      .catch(() => {
+        if (!cancelled) setVideoUri(null);
+      });
+
+    if (props.video.hasThumbnail) {
+      props.client
+        .loadThumbnailObjectUrl(props.video)
+        .then((u) => {
+          if (!cancelled) setPosterUri(u);
+        })
+        .catch(() => {
+          if (!cancelled) setPosterUri(undefined);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [props.video, props.client]);
+
   if (!props.video) return null;
   const video = props.video;
 
@@ -1273,15 +1338,27 @@ export function IosVideoCinemaModal(props: {
         />
 
         <ScrollView contentContainerStyle={{ padding: 16, gap: 14 }}>
-          <IosStreamingVideoSurface
-            streamUrl={props.client.getStreamUrl(video.id, video.revision)}
-            posterUrl={
-              video.hasThumbnail
-                ? props.client.getThumbnailUrl(video.id, video.revision)
-                : undefined
-            }
-            theme={props.theme}
-          />
+          {videoUri ? (
+            <IosStreamingVideoSurface
+              streamUrl={videoUri}
+              posterUrl={posterUri}
+              theme={props.theme}
+            />
+          ) : (
+            <View
+              style={{
+                height: 210,
+                borderRadius: 14,
+                backgroundColor: '#0A0E10',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Text style={{ fontSize: 12, color: 'rgba(255,255,255,0.75)' }}>
+                正在本地校验并解密 PSENC001 视频流…
+              </Text>
+            </View>
+          )}
 
           <View
             style={{
@@ -1294,7 +1371,7 @@ export function IosVideoCinemaModal(props: {
             }}
           >
             <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textPrimary }}>
-              HTTP 206 随机分块实时解密流信息
+              客户端 E2EE PSENC001 分块解密流信息
             </Text>
             <Text style={{ fontSize: 12, color: props.theme.textSecondary }}>
               规格：{video.width > 0 ? `${video.width}×${video.height} · ` : ''}

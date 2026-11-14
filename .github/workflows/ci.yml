@@ -54,24 +54,110 @@ jobs:
 
           for i in $(seq 1 20); do
             if curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"initialized":true'; then
-              echo "Container healthcheck & bootstrap verified!"
+              echo "Container healthcheck & headless bootstrap verified!"
+              curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"ZERO_KNOWLEDGE_E2EE_V2"'
               curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
               curl -sf http://127.0.0.1:18080/ios | grep -q 'ios-root'
               curl -sf http://127.0.0.1:18080/mobile/ | grep -q 'PrivateSpace'
-              TOKEN=$(curl -sf -X POST http://127.0.0.1:18080/api/v1/auth/login \
-                -H 'Content-Type: application/json' \
-                -d '{"password":"CiTestMasterPass!2026","platform":"android","deviceName":"CI Android"}' | node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8')).token)")
-              curl -sf -X POST http://127.0.0.1:18080/api/v1/notes \
-                -H 'Content-Type: application/json' \
-                -H "Authorization: Bearer $TOKEN" \
-                -d '{"title":"CI Smoke Test","content":"AES-256-GCM verified in container"}' | grep -q '"revision":1'
-              curl -sf -X POST http://127.0.0.1:18080/api/v1/passwords \
-                -H 'Content-Type: application/json' \
-                -H "Authorization: Bearer $TOKEN" \
-                -d '{"title":"CI Vault Entry","username":"ops@example.com","password":"Str0ng#Vault!Password99","totpSecret":"JBSWY3DPEHPK3PXP"}' | grep -q '"revision":1'
-              curl -sf "http://127.0.0.1:18080/api/v1/sync?since_seq=0" \
-                -H "Authorization: Bearer $TOKEN" | grep -q '"passwords":\['
-              echo "End-to-end encrypted notes, passwords, /mobile Android route, /ios app, AASA, and delta sync verified inside Docker container!"
+              node --input-type=module <<'EOF'
+          import assert from 'node:assert/strict';
+          import crypto from 'node:crypto';
+          import {
+            deriveMasterKeysFromPassword,
+            encryptItemPayload,
+            hydrateDecryptedNote,
+            hydrateDecryptedPassword,
+            unwrapMasterDek,
+          } from './dist/server/shared/e2ee.js';
+
+          const base = 'http://127.0.0.1:18080';
+
+          // 1. Plaintext login MUST be rejected with 400 E2EE_REQUIRED
+          const plainRes = await fetch(`${base}/api/v1/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: 'CiTestMasterPass!2026' }),
+          });
+          assert.equal(plainRes.status, 400);
+          assert.equal((await plainRes.json()).error.code, 'E2EE_REQUIRED');
+
+          // 2. Client-side PBKDF2 + HKDF split-key login & DEK unwrap
+          const params = await (await fetch(`${base}/api/v1/auth/params`)).json();
+          const { kek, authKeyBase64 } = await deriveMasterKeysFromPassword(
+            'CiTestMasterPass!2026',
+            params.kdfSalt,
+            params.kdfParams,
+          );
+          const loginRes = await fetch(`${base}/api/v1/auth/login`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              authKey: authKeyBase64,
+              platform: 'android',
+              deviceName: 'CI Zero-Knowledge Client',
+            }),
+          });
+          assert.equal(loginRes.status, 200);
+          const auth = await loginRes.json();
+          const dek = await unwrapMasterDek(auth.wrappedDek, kek);
+          const headers = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${auth.token}`,
+          };
+
+          // 3. Encrypt note & password on client and store blind envelopes in container
+          const noteId = crypto.randomUUID();
+          const noteEnv = await encryptItemPayload(dek, noteId, 'note', 1, {
+            title: 'CI E2EE Note',
+            content: 'Zero-Knowledge AES-256-GCM verified in Docker container',
+            excerpt: 'Zero-Knowledge AES-256-GCM verified in Docker container',
+            tags: ['ci', 'e2ee'],
+            format: 'markdown',
+            wordCount: 8,
+          });
+          const noteCreate = await fetch(`${base}/api/v1/notes`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ id: noteId, revision: 1, envelope: noteEnv }),
+          });
+          assert.equal(noteCreate.status, 201);
+
+          const pwId = crypto.randomUUID();
+          const pwEnv = await encryptItemPayload(dek, pwId, 'password', 1, {
+            title: 'CI Vault Entry',
+            username: 'ops@example.com',
+            password: 'Str0ng#Vault!Password99',
+            url: 'https://example.com',
+            totpSecret: 'JBSWY3DPEHPK3PXP',
+            category: 'server',
+            notes: '',
+            tags: [],
+            customFields: [],
+            history: [],
+            passwordChangedAt: new Date().toISOString(),
+          });
+          const pwCreate = await fetch(`${base}/api/v1/passwords`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ id: pwId, revision: 1, envelope: pwEnv }),
+          });
+          assert.equal(pwCreate.status, 201);
+
+          // 4. Pull blind sync cursor & decrypt records locally
+          const sync = await (await fetch(`${base}/api/v1/sync?since_seq=0`, { headers })).json();
+          assert.equal(sync.items.length, 2);
+          const decNote = await hydrateDecryptedNote(
+            dek,
+            sync.items.find((x) => x.itemType === 'note'),
+          );
+          const decPw = await hydrateDecryptedPassword(
+            dek,
+            sync.items.find((x) => x.itemType === 'password'),
+          );
+          assert.equal(decNote.title, 'CI E2EE Note');
+          assert.equal(decPw.password, 'Str0ng#Vault!Password99');
+          EOF
+              echo "Zero-Knowledge E2EE v2 notes, passwords, /mobile, /ios, AASA, and blind sync verified inside Docker container!"
               docker rm -f pss-ci
               exit 0
             fi
