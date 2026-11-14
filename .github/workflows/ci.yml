@@ -104,17 +104,28 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Android SDK (Platform 34)
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          else
+            SDKMANAGER=$(ls "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n 1)
+          fi
+          (yes || true) | "$SDKMANAGER" --licenses >/dev/null
+          if [ ! -d "$SDK_ROOT/platforms/android-34" ] || [ ! -d "$SDK_ROOT/build-tools/34.0.0" ]; then
+            "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          fi
 
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Sync Capacitor Android & run Kotlin JUnit tests
-        run: npm run android:test
-
-      - name: Assemble Android Debug APK
-        run: cd mobile/android && ./gradlew --no-daemon assembleDebug
+      - name: Sync Capacitor Android, run Kotlin JUnit tests & assemble Debug APK
+        run: |
+          npm run android:sync
+          cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleDebug
 
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v4
