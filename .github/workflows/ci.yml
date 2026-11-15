@@ -253,13 +253,13 @@ jobs:
             export ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
             (cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleRelease $GRADLE_PROPS)
             APK_SRC=$(ls mobile/android/app/build/outputs/apk/release/*.apk | head -n 1)
-            APK_NAME="PrivateSpace-Android-v${APP_VERSION}.apk"
+            APK_NAME="PSS-Android-v${APP_VERSION}.apk"
             SIGN_MODE="release-signed"
           else
             echo "No ANDROID_KEYSTORE_BASE64 secret configured — falling back to Debug-signed APK..."
             (cd mobile/android && ./gradlew --no-daemon testDebugUnitTest assembleDebug $GRADLE_PROPS)
             APK_SRC="mobile/android/app/build/outputs/apk/debug/app-debug.apk"
-            APK_NAME="PrivateSpace-Android-v${APP_VERSION}-debug.apk"
+            APK_NAME="PSS-Android-v${APP_VERSION}-debug.apk"
             SIGN_MODE="debug-signed"
           fi
 
@@ -444,7 +444,7 @@ jobs:
               -exportPath "$RUNNER_TEMP/ipa-export"
 
             IPA_SRC=$(ls "$RUNNER_TEMP/ipa-export"/*.ipa | head -n 1)
-            IPA_NAME="PrivateSpace-iOS-v${APP_VERSION}.ipa"
+            IPA_NAME="PSS-iOS-v${APP_VERSION}.ipa"
             cp "$IPA_SRC" "dist-release/ios/${IPA_NAME}"
             SIGN_MODE="adhoc-ota"
 
@@ -478,7 +478,7 @@ jobs:
 
             mkdir -p "$RUNNER_TEMP/payload-stage/Payload"
             cp -R "$RUNNER_TEMP/ios-derived/Build/Products/Release-iphoneos/PrivateSpaceIOS.app" "$RUNNER_TEMP/payload-stage/Payload/"
-            IPA_NAME="PrivateSpace-iOS-v${APP_VERSION}-unsigned.ipa"
+            IPA_NAME="PSS-iOS-v${APP_VERSION}-unsigned.ipa"
             (cd "$RUNNER_TEMP/payload-stage" && ditto -c -k --sequesterRsrc --keepParent Payload "$GITHUB_WORKSPACE/dist-release/ios/${IPA_NAME}")
             SIGN_MODE="unsigned-sideload"
           fi
@@ -616,7 +616,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: PrivateSpace ${{ github.ref_name }}
+          name: PSS ${{ github.ref_name }}
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: |

@@ -31,6 +31,7 @@ import {
   unwrapMasterDek,
   wrapBlobFek,
 } from '@shared/e2ee';
+import { CURRENT_APP_VERSION } from '@shared/appUpdate';
 import { probeMediaOnClient } from '@shared/mediaProbe';
 import type {
   ApiErrorResponse,
@@ -1270,7 +1271,7 @@ export const api = {
     const qs = new URLSearchParams({
       platform,
       channel,
-      current_version: '0.4.0',
+      current_version: CURRENT_APP_VERSION,
       force: force ? '1' : '0',
     });
     return requestJson(`/api/v1/updates/check?${qs.toString()}`);

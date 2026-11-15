@@ -98,7 +98,7 @@ describe('PrivateSpace iOS Native & Standalone Zero-Knowledge Mobile Client Suit
     const healthRes = await app.request('/api/v1/health');
     expect(healthRes.status).toBe(200);
     const health = await healthRes.json();
-    expect(health.version).toBe('0.4.0');
+    expect(health.version).toBe('0.5.0');
     expect(health.encryption.zeroKnowledge).toBe(true);
     expect(health.capabilities).toContain('zero-knowledge-e2ee-v2');
     expect(health.capabilities).toContain('ios-autofill');

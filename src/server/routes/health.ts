@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { CURRENT_APP_VERSION } from '../../shared/appUpdate.js';
 import { ENCRYPTION_SPEC } from '../crypto/vaultCrypto.js';
 import type { VaultRepository } from '../db/repositories.js';
 
@@ -10,7 +11,7 @@ export function createHealthRoutes(repo: VaultRepository): Hono {
     return c.json({
       status: 'ok',
       service: 'private-space-system',
-      version: '0.4.0',
+      version: CURRENT_APP_VERSION,
       initialized: Boolean(admin),
       encryption: ENCRYPTION_SPEC,
       capabilities: [
