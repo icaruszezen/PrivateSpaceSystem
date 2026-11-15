@@ -18,6 +18,8 @@
   2. **密码保险箱（Passwords）**：客户端加密存储站点、账号、密码、**RFC 6238 动态两步验证码（TOTP `SHA-1` / `SHA-256` 实时倒计时环）**、自定义隐藏字段与最近 15 次历史密码版本；内置 **无偏拒绝采样 CSPRNG 随机密码与助记词组生成器**、**安全健康度审计面板**（弱口令、重复密码、未启用 2FA 筛选）以及主流密码管理器 CSV 本地加密批量导入。
   3. **加密相册（Images）**：支持拖拽、手机相机直拍与 `PhotosPicker` 多图客户端加密上传、客户端纯本地探测 PNG/JPEG/GIF/WebP 尺寸与生成加密缩略图、加密相册分类管理、**暗房级灯箱预览**（缩放、90° 旋转、镜像翻转、幻灯片播放、信息编辑）与 `.psenc` 分块密文透视。
   4. **私密视频影院（Videos）**：支持大文件 **客户端分片加密断点续传 + SHA-256 完整性校验**、客户端封面帧提取加密，以及 **`PSENC001` HTTP `206` 客户端按需分块解密流式播放**（倍速、`±10s` 快进退、循环、画中画 PiP）。
+- **未登录官网隐蔽伪装层（Stealth Editorial Disguise）**：
+  - 未登录访问 `/` 时默认伪装为可正常阅读、检索与分类浏览的个人阅读与工程静态文集 **「松间手记」**，浏览器标题、Favicon、Manifest、首屏 DOM 及初始网络请求均零私密空间特征暴露；本人可通过 **连点左上角站点标题/页脚版权 5 次**、**`Ctrl/Cmd + Shift + L` 快捷键** 或在搜索框输入唤醒暗语（默认 `:unlock`）唤出低调的「作者后台」口令验证框，解锁后亦支持 `Ctrl/Cmd + Shift + L` 一键紧急锁定切回手记页，并可在「安全中心 → 首页伪装」自定义站点名与暗语。
 - **Android 原生手机客户端（[`mobile/`](mobile/README.md)，`com.privatespace.mobile`）**：
   - 基于 **Capacitor 6 + Kotlin 原生安全插件** 构建，支持 **`AndroidKeyStore` 硬件级 `AES-256-GCM` 封装 `{ token, dek }`、`BiometricPrompt` 指纹/面容零知识快锁、`FLAG_SECURE` 防截屏与多任务遮蔽、Android 13+ 敏感剪贴板隐私遮罩与 30s 自动擦除、系统分享直存加密笔记、`privatespace://pair?...` 一键配对、离线加密队列重放与相机直拍 `.psenc` 入库**；服务端亦在 `/mobile/` 托管移动端伴侣包。
 - **完备的 Apple iOS 客户端体系（原生 SwiftUI + `/ios` 独立应用）**：
@@ -58,7 +60,7 @@ docker compose up -d --build
 
 ### 初始化与多端接入
 
-1. **桌面网页端**：打开 `http://localhost:8080`，首次启动在浏览器本地生成 256 位随机 `DEK` 并设置主密码（不会向服务器发送明文密码）；在「安全中心 → 多端同步与设备」可一键复制 `privatespace://pair` 配对码并查看移动端最新发布版本。
+1. **桌面网页端**：打开 `http://localhost:8080`（默认呈现「松间手记」伪装首页），按 `Ctrl/Cmd + Shift + L`、连点左上角站点标题 5 次或在搜索框输入 `:unlock` 回车唤出「作者后台」窗口，首次启动将在浏览器本地生成 256 位随机 `DEK` 并设置主密码（不会向服务器发送明文密码）；在「安全中心 → 多端同步与设备」可一键复制 `privatespace://pair` 配对码并查看移动端最新发布版本。
 2. **Android 原生手机端（APK / `/mobile/`）**：从 GitHub Releases / Actions 构建产物或本地 `npm run android:apk` 安装 APK，粘贴配对码输入主密码即可同步数据，后续新版本支持应用内一键校验 SHA-256 自动升级；详见 [`mobile/README.md`](mobile/README.md)。
 3. **iPhone 免编译独立客户端（PWA）**：在 iPhone Safari 打开 `https://你的部署域名/ios`，点击分享 →「添加到主屏幕」即可全屏运行，并支持应用内版本检测与一键热更新。
 4. **iOS 原生 SwiftUI 客户端与系统自动填充**：在 macOS 上进入 `ios/` 目录，执行 `xcodegen generate && open PrivateSpaceIOS.xcodeproj` 编译安装至真机，支持 OTA / TestFlight / AltStore 自动更新检测；详见 [`ios/README.md`](ios/README.md)。

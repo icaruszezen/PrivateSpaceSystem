@@ -4,6 +4,7 @@ import { App } from './App';
 import './styles/tokens.css';
 import './styles/base.css';
 import './styles/auth.css';
+import './styles/disguise.css';
 import './styles/workspace.css';
 import './styles/vault-media.css';
 
