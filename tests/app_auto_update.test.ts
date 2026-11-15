@@ -334,6 +334,28 @@ describe('Android & iOS Software Auto-Update & GitHub Release Gateway', () => {
     const plistXml = await plistRes.text();
     expect(plistXml).toContain('<string>io.acme.privatevault</string>');
     expect(plistXml).toContain('/api/v1/updates/download/ios');
+
+    // 5. Explicit ipa_url query parameter builds OTA plist locally without hitting upstream GitHub API
+    const rateLimitedServer = createUpdateTestServer(
+      {
+        GITHUB_REPO: 'acme-sec/PrivateVault',
+        IOS_BUNDLE_ID: 'io.privatespace.ios',
+      },
+      async () =>
+        new Response(JSON.stringify({ message: 'API rate limit exceeded' }), {
+          status: 403,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    const explicitPlistRes = await rateLimitedServer.inst.app.request(
+      'http://127.0.0.1:18080/api/v1/updates/ios-manifest.plist?ipa_url=https://example.com/PrivateSpace.ipa&version=0.5.0&build=500',
+    );
+    expect(explicitPlistRes.status).toBe(200);
+    const explicitPlistXml = await explicitPlistRes.text();
+    expect(explicitPlistXml).toContain('https://example.com/PrivateSpace.ipa');
+    expect(explicitPlistXml).toContain('<string>io.privatespace.ios</string>');
+    expect(explicitPlistXml).toContain('<string>0.5.0</string>');
+    expect(explicitPlistXml).toContain('<string>Build 500</string>');
   });
 
   it('supports air-gapped local release-manifest.json override and Mobile SDK dual-mode checks', async () => {

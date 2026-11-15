@@ -305,11 +305,16 @@ export function buildAppleOtaManifestPlist(params: {
   ipaUrl: string;
   bundleId?: string;
   bundleVersion: string;
+  buildNumber?: number;
   title?: string;
 }): string {
   const bundleId = (params.bundleId || DEFAULT_IOS_BUNDLE_ID).trim();
   const version = cleanSemverString(params.bundleVersion, CURRENT_APP_VERSION);
   const title = (params.title || 'PrivateSpace · 私密空间').trim();
+  const subtitleXml =
+    typeof params.buildNumber === 'number' && Number.isFinite(params.buildNumber)
+      ? `\n        <key>subtitle</key>\n        <string>${escapeXml(`Build ${Math.trunc(params.buildNumber)}`)}</string>`
+      : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -334,7 +339,7 @@ export function buildAppleOtaManifestPlist(params: {
         <key>bundle-version</key>
         <string>${escapeXml(version)}</string>
         <key>kind</key>
-        <string>software</string>
+        <string>software</string>${subtitleXml}
         <key>title</key>
         <string>${escapeXml(title)}</string>
       </dict>
