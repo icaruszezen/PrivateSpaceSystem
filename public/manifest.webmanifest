@@ -1,7 +1,7 @@
 {
-  "name": "PrivateSpace · 私密空间",
-  "short_name": "PrivateSpace",
-  "description": "自部署、端到端静态加密的私密文本、密码、图片、视频存储与多端同步空间",
+  "name": "松间手记 · 阅读与工程札记",
+  "short_name": "松间手记",
+  "description": "记录系统工程、存储推演、旧书批注与山行随笔的个人静态文集",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#F8F7F4",

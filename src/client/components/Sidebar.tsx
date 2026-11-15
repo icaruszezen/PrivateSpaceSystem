@@ -51,7 +51,7 @@ interface SidebarProps {
   onPrimaryCreate: () => void;
   onOpenPalette: () => void;
   onTriggerSync: () => void;
-  onOpenSecurity: (tab?: 'cipher' | 'password' | 'sessions') => void;
+  onOpenSecurity: (tab?: 'cipher' | 'password' | 'sessions' | 'disguise') => void;
   onToggleTheme: () => void;
   onLockVault: () => void;
 }
@@ -415,8 +415,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               type="button"
               className="btn-icon"
               onClick={onLockVault}
-              title="立即锁定私密空间并清除会话密钥"
-              aria-label="锁定空间"
+              title="立即锁定并返回伪装手记首页 (Ctrl/Cmd+Shift+L)"
+              aria-label="锁定并返回伪装首页"
             >
               <Lock size={15} />
             </button>

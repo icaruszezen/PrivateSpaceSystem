@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type { MediaItem, NoteItem, PasswordItem } from '@shared/types';
 import { formatBytes, formatShortDate } from '../utils/format';
+import type { SecurityTab } from './SecurityModal';
 import type { WorkspaceSection } from './Sidebar';
 
 interface CommandPaletteProps {
@@ -27,7 +28,7 @@ interface CommandPaletteProps {
   onSelectPassword: (id: string) => void;
   onCreateNote: () => void;
   onToggleTheme: () => void;
-  onOpenSecurity: () => void;
+  onOpenSecurity: (tab?: SecurityTab) => void;
   onLockVault: () => void;
 }
 
@@ -114,7 +115,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         sub: 'AES-256-GCM',
         icon: <ShieldCheck size={15} />,
         run: () => {
-          onOpenSecurity();
+          onOpenSecurity('cipher');
+          onClose();
+        },
+      },
+      {
+        id: 'cmd-disguise',
+        label: '配置未登录首页伪装与唤醒暗语',
+        sub: '松间手记伪装层',
+        icon: <ShieldCheck size={15} />,
+        run: () => {
+          onOpenSecurity('disguise');
           onClose();
         },
       },
@@ -130,8 +141,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       },
       {
         id: 'cmd-lock',
-        label: '立即锁定私密空间',
-        sub: '销毁会话密钥',
+        label: '立即锁定并切回伪装首页',
+        sub: '快捷键 Ctrl+Shift+L',
         icon: <Lock size={15} />,
         run: () => {
           onClose();

@@ -14,21 +14,32 @@ import type {
 } from '@shared/types';
 import { api, setOnUnauthorized } from './api/client';
 import { CommandPalette } from './components/CommandPalette';
-import { LoginView } from './components/LoginView';
+import { DisguiseHomeView } from './components/DisguiseHomeView';
 import { MediaGalleryView } from './components/MediaGalleryView';
 import { NoteEditor } from './components/NoteEditor';
 import { NoteList, type SortMode } from './components/NoteList';
 import { PasswordVaultView } from './components/PasswordVaultView';
 import { SecurityModal, type SecurityTab } from './components/SecurityModal';
-import { SetupView } from './components/SetupView';
 import { Sidebar, type NavFilter, type WorkspaceSection } from './components/Sidebar';
+import {
+  formatDisguisedDocumentTitle,
+  isDisguiseShortcutEvent,
+  loadDisguiseConfig,
+  type DisguiseConfig,
+} from './utils/disguiseConfig';
 
-type AppPhase = 'loading' | 'setup' | 'locked' | 'unlocked';
+type AppPhase = 'loading' | 'disguised' | 'unlocked';
 
 export const App: React.FC = () => {
-  const [phase, setPhase] = useState<AppPhase>('loading');
+  const [phase, setPhase] = useState<AppPhase>(() =>
+    api.hasUnlockedKey() ? 'loading' : 'disguised',
+  );
+  const [vaultInitialized, setVaultInitialized] = useState<boolean | null>(null);
   const [vaultName, setVaultName] = useState('PrivateSpace');
   const [keyFingerprint, setKeyFingerprint] = useState<string | null>(null);
+  const [disguiseConfig, setDisguiseConfig] = useState<DisguiseConfig>(() =>
+    loadDisguiseConfig(),
+  );
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem('pss_theme');
     if (saved === 'dark' || saved === 'light') return saved;
@@ -79,6 +90,14 @@ export const App: React.FC = () => {
     localStorage.setItem('pss_theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    document.title = formatDisguisedDocumentTitle(
+      disguiseConfig,
+      phase === 'unlocked',
+      vaultName,
+    );
+  }, [disguiseConfig, phase, vaultName]);
+
   const notify = useCallback((msg: string) => {
     setToast(msg);
   }, []);
@@ -126,25 +145,33 @@ export const App: React.FC = () => {
       setAlbums([]);
       setSelectedNoteId(null);
       setSelectedPasswordId(null);
-      setPhase('locked');
+      setPhase('disguised');
     });
+
+    // Stealth mode: if there is no unlocked tab key in sessionStorage, render the disguised
+    // essay homepage immediately without firing any /api/v1/auth/* network requests.
+    if (!api.hasUnlockedKey()) {
+      setPhase('disguised');
+      return () => setOnUnauthorized(null);
+    }
 
     api
       .getAuthStatus()
       .then(async (status) => {
+        setVaultInitialized(status.initialized);
         setVaultName(status.vaultName);
         setKeyFingerprint(status.keyFingerprint);
-        if (!status.initialized) {
-          setPhase('setup');
-        } else if (!status.authenticated || !api.hasUnlockedKey()) {
-          setPhase('locked');
+        if (!status.initialized || !status.authenticated || !api.hasUnlockedKey()) {
+          api.clearUnlockedKey();
+          setPhase('disguised');
         } else {
           await loadInitialWorkspace();
           setPhase('unlocked');
         }
       })
       .catch(() => {
-        setPhase('locked');
+        api.clearUnlockedKey();
+        setPhase('disguised');
       });
 
     return () => setOnUnauthorized(null);
@@ -438,7 +465,6 @@ export const App: React.FC = () => {
   }, [activeSection, handleCreateNote]);
 
   const handleLockVault = useCallback(async () => {
-    await api.logout().catch(() => undefined);
     setNotes([]);
     setPasswords([]);
     setMediaItems([]);
@@ -447,24 +473,31 @@ export const App: React.FC = () => {
     setSelectedPasswordId(null);
     setSecurityModal((s) => ({ ...s, open: false }));
     setPaletteOpen(false);
-    setPhase('locked');
+    api.clearUnlockedKey();
+    setPhase('disguised');
+    await api.logout().catch(() => undefined);
   }, []);
 
-  // Global keyboard shortcuts: Cmd/Ctrl + K (Command Palette), Cmd/Ctrl + N (New Item)
+  // Global keyboard shortcuts: Cmd/Ctrl + Shift + L (Instant Disguise Boss-Key), Cmd/Ctrl + K (Palette), Cmd/Ctrl + N (New)
   useEffect(() => {
     if (phase !== 'unlocked') return;
     function onKeyDown(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      if (isDisguiseShortcutEvent(e)) {
+        e.preventDefault();
+        void handleLockVault();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen((p) => !p);
-      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+      } else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'n') {
         e.preventDefault();
         handlePrimarySidebarAction();
       }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [phase, handlePrimarySidebarAction]);
+  }, [phase, handlePrimarySidebarAction, handleLockVault]);
 
   // Compute navigation counts & tag list
   const counts = useMemo(() => {
@@ -586,35 +619,26 @@ export const App: React.FC = () => {
     return (
       <div className="boot-screen">
         <div className="boot-spinner" />
-        <span>正在连接加密私密空间...</span>
+        <span>正在载入内容...</span>
       </div>
     );
   }
 
-  if (phase === 'setup') {
+  if (phase === 'disguised') {
     return (
-      <SetupView
+      <DisguiseHomeView
+        disguiseConfig={disguiseConfig}
+        theme={theme}
+        initialVaultInitialized={vaultInitialized}
         defaultVaultName={vaultName}
-        theme={theme}
         onToggleTheme={toggleTheme}
-        onInitialized={async ({ vaultName: name, keyFingerprint: fp }) => {
-          setVaultName(name);
-          setKeyFingerprint(fp);
-          await loadInitialWorkspace();
-          setPhase('unlocked');
+        onStatusResolved={(status) => {
+          setVaultInitialized(status.initialized);
+          setVaultName(status.vaultName);
+          setKeyFingerprint(status.keyFingerprint);
         }}
-      />
-    );
-  }
-
-  if (phase === 'locked') {
-    return (
-      <LoginView
-        vaultName={vaultName}
-        keyFingerprint={keyFingerprint}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        onUnlocked={async ({ vaultName: name, keyFingerprint: fp }) => {
+        onAuthenticated={async ({ vaultName: name, keyFingerprint: fp, initialized }) => {
+          setVaultInitialized(initialized);
           setVaultName(name);
           setKeyFingerprint(fp);
           await loadInitialWorkspace();
@@ -775,8 +799,11 @@ export const App: React.FC = () => {
         initialTab={securityModal.tab}
         inspectItemId={securityModal.itemId}
         vaultName={vaultName}
+        disguiseConfig={disguiseConfig}
         onClose={() => setSecurityModal((s) => ({ ...s, open: false }))}
         onVaultNameUpdated={setVaultName}
+        onDisguiseConfigUpdated={setDisguiseConfig}
+        onLockAndPreviewDisguise={() => void handleLockVault()}
         onNotify={notify}
       />
 
@@ -805,10 +832,10 @@ export const App: React.FC = () => {
         }}
         onCreateNote={() => void handleCreateNote()}
         onToggleTheme={toggleTheme}
-        onOpenSecurity={() =>
+        onOpenSecurity={(tab = 'cipher') =>
           setSecurityModal({
             open: true,
-            tab: 'cipher',
+            tab,
             itemId: selectedPasswordId ?? selectedNote?.id ?? null,
           })
         }

@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
+  BookOpen,
   Copy,
   Download,
   KeyRound,
   Laptop,
+  Lock,
   RefreshCw,
   ShieldCheck,
   Smartphone,
@@ -19,20 +21,29 @@ import type {
 } from '@shared/types';
 import { api } from '../api/client';
 import {
+  DEFAULT_DISGUISE_CONFIG,
+  resetDisguiseConfig,
+  saveDisguiseConfig,
+  type DisguiseConfig,
+} from '../utils/disguiseConfig';
+import {
   evaluatePasswordStrength,
   formatBytes,
   formatFullDateTime,
 } from '../utils/format';
 
-export type SecurityTab = 'cipher' | 'password' | 'sessions';
+export type SecurityTab = 'cipher' | 'password' | 'sessions' | 'disguise';
 
 interface SecurityModalProps {
   open: boolean;
   initialTab: SecurityTab;
   inspectItemId: string | null;
   vaultName: string;
+  disguiseConfig: DisguiseConfig;
   onClose: () => void;
   onVaultNameUpdated: (newName: string) => void;
+  onDisguiseConfigUpdated: (next: DisguiseConfig) => void;
+  onLockAndPreviewDisguise: () => void;
   onNotify: (msg: string) => void;
 }
 
@@ -41,8 +52,11 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   initialTab,
   inspectItemId,
   vaultName,
+  disguiseConfig,
   onClose,
   onVaultNameUpdated,
+  onDisguiseConfigUpdated,
+  onLockAndPreviewDisguise,
   onNotify,
 }) => {
   const [tab, setTab] = useState<SecurityTab>(initialTab);
@@ -58,6 +72,9 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
   // Vault name edit
   const [nameInput, setNameInput] = useState(vaultName);
 
+  // Disguise config edit
+  const [disguiseForm, setDisguiseForm] = useState<DisguiseConfig>(disguiseConfig);
+
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -70,12 +87,13 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
     if (open) {
       setTab(initialTab);
       setNameInput(vaultName);
+      setDisguiseForm(disguiseConfig);
       setPwdError(null);
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
     }
-  }, [open, initialTab, vaultName]);
+  }, [open, initialTab, vaultName, disguiseConfig]);
 
   useEffect(() => {
     if (!open) return;
@@ -243,6 +261,17 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
           >
             <KeyRound size={14} />
             <span>管理员密码与设置</span>
+          </button>
+          <button
+            id="sec-tab-disguise"
+            type="button"
+            role="tab"
+            aria-selected={tab === 'disguise'}
+            className={`modal-tab ${tab === 'disguise' ? 'is-active' : ''}`}
+            onClick={() => setTab('disguise')}
+          >
+            <BookOpen size={14} />
+            <span>首页伪装</span>
           </button>
         </div>
 
@@ -744,6 +773,193 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                 </button>
               </form>
             </>
+          )}
+
+          {tab === 'disguise' && (
+            <form
+              className="auth-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const saved = saveDisguiseConfig(disguiseForm);
+                setDisguiseForm(saved);
+                onDisguiseConfigUpdated(saved);
+                onNotify('未登录首页伪装与唤醒暗语已保存');
+              }}
+            >
+              <div className="auth-notice">
+                <BookOpen size={16} />
+                <span>
+                  未登录访客打开官网首页时，仅展示个人阅读与工程静态文集「{disguiseForm.siteTitle}」，页面源码与网络请求中均不暴露私密空间入口。你可通过以下任一隐蔽方式唤出「作者后台」验证框：
+                </span>
+              </div>
+
+              <div className="cipher-inspector-box">
+                <div className="cipher-inspector-head">
+                  <span>隐蔽唤醒手势与紧急伪装键</span>
+                  <span className="mono" style={{ color: 'var(--accent)' }}>
+                    STEALTH PORTAL
+                  </span>
+                </div>
+                <div className="cipher-kv-list">
+                  <div className="cipher-kv-row">
+                    <span className="cipher-kv-key">连点徽标 / 页脚</span>
+                    <span className="cipher-kv-val">
+                      3 秒内连续点击左上角站点标题或页脚版权文字 5 次
+                    </span>
+                  </div>
+                  <div className="cipher-kv-row">
+                    <span className="cipher-kv-key">全局组合快捷键</span>
+                    <span className="cipher-kv-val mono">
+                      Ctrl + Shift + L / ⌘ + Shift + L（解锁态下按此键一键锁定切回手记）
+                    </span>
+                  </div>
+                  <div className="cipher-kv-row">
+                    <span className="cipher-kv-key">搜索框唤醒暗语</span>
+                    <span className="cipher-kv-val mono">
+                      输入 {disguiseForm.unlockPhrase || DEFAULT_DISGUISE_CONFIG.unlockPhrase} 后按回车
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                  gap: 12,
+                }}
+              >
+                <div className="field-group">
+                  <label htmlFor="disguise-site-title" className="field-label">
+                    <span>伪装站点名称</span>
+                  </label>
+                  <input
+                    id="disguise-site-title"
+                    type="text"
+                    className="field-input"
+                    maxLength={32}
+                    value={disguiseForm.siteTitle}
+                    onChange={(e) =>
+                      setDisguiseForm((prev) => ({ ...prev, siteTitle: e.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="disguise-pen-name" className="field-label">
+                    <span>署名笔名</span>
+                  </label>
+                  <input
+                    id="disguise-pen-name"
+                    type="text"
+                    className="field-input"
+                    maxLength={24}
+                    value={disguiseForm.authorPenName}
+                    onChange={(e) =>
+                      setDisguiseForm((prev) => ({ ...prev, authorPenName: e.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                  gap: 12,
+                }}
+              >
+                <div className="field-group">
+                  <label htmlFor="disguise-site-tagline" className="field-label">
+                    <span>站点副标题</span>
+                  </label>
+                  <input
+                    id="disguise-site-tagline"
+                    type="text"
+                    className="field-input"
+                    maxLength={48}
+                    value={disguiseForm.siteTagline}
+                    onChange={(e) =>
+                      setDisguiseForm((prev) => ({ ...prev, siteTagline: e.target.value }))
+                    }
+                  />
+                </div>
+
+                <div className="field-group">
+                  <label htmlFor="disguise-unlock-phrase" className="field-label">
+                    <span>搜索框唤醒暗语</span>
+                  </label>
+                  <input
+                    id="disguise-unlock-phrase"
+                    type="text"
+                    className="field-input mono"
+                    maxLength={36}
+                    value={disguiseForm.unlockPhrase}
+                    onChange={(e) =>
+                      setDisguiseForm((prev) => ({ ...prev, unlockPhrase: e.target.value }))
+                    }
+                    placeholder=":unlock"
+                  />
+                </div>
+              </div>
+
+              <label className="auth-checkbox-row" htmlFor="disguise-keep-title">
+                <input
+                  id="disguise-keep-title"
+                  type="checkbox"
+                  checked={disguiseForm.keepDisguisedTitleWhenUnlocked}
+                  onChange={(e) =>
+                    setDisguiseForm((prev) => ({
+                      ...prev,
+                      keepDisguisedTitleWhenUnlocked: e.target.checked,
+                    }))
+                  }
+                />
+                <span>解锁进入私密空间后，浏览器标签页标题仍继续伪装为「{disguiseForm.siteTitle}」（防旁人窥屏）</span>
+              </label>
+
+              <div
+                style={{
+                  display: 'flex',
+                  flexWrap: 'wrap',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  paddingTop: 6,
+                }}
+              >
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <button id="disguise-save-btn" type="submit" className="btn btn-primary">
+                    保存伪装配置
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => {
+                      const defaults = resetDisguiseConfig();
+                      setDisguiseForm(defaults);
+                      onDisguiseConfigUpdated(defaults);
+                      onNotify('已恢复默认「松间手记」伪装参数');
+                    }}
+                  >
+                    恢复默认
+                  </button>
+                </div>
+
+                <button
+                  id="disguise-preview-lock-btn"
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    onClose();
+                    onLockAndPreviewDisguise();
+                  }}
+                >
+                  <Lock size={14} />
+                  <span>立即锁定并预览伪装首页</span>
+                </button>
+              </div>
+            </form>
           )}
         </div>
       </div>
