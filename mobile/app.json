@@ -1,21 +1,21 @@
 {
   "expo": {
-    "name": "PrivateSpace",
-    "slug": "privatespace-mobile",
-    "version": "0.3.0",
+    "name": "PSS",
+    "slug": "pss-mobile",
+    "version": "0.4.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
-    "backgroundColor": "#F6F4EF",
-    "primaryColor": "#266454",
+    "backgroundColor": "#F6F5F0",
+    "primaryColor": "#1F4A40",
     "ios": {
       "bundleIdentifier": "io.privatespace.ios",
-      "buildNumber": "3",
+      "buildNumber": "400",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
-        "NSFaceIDUsageDescription": "使用面容 ID 快速解锁您的 PrivateSpace 本地加密保险箱与自动填充凭据。",
-        "NSPhotoLibraryUsageDescription": "选择照片或视频以通过 PSENC001 分块 AES-256-GCM 加密上传至您的自部署空间。",
-        "NSPhotoLibraryAddUsageDescription": "保存已解密的私密相册照片或视频至系统相册。"
+        "NSFaceIDUsageDescription": "使用面容 ID 快速完成 PSS 会话验证与凭据自动填充。",
+        "NSPhotoLibraryUsageDescription": "选择图片或视频文件以同步至您的 PSS 自托管服务节点。",
+        "NSPhotoLibraryAddUsageDescription": "将 PSS 同步文件导出保存至系统媒体库。"
       },
       "entitlements": {
         "com.apple.developer.authentication-services.autofill-credential-provider": true,

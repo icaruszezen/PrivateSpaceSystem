@@ -75,10 +75,11 @@ function IosStandaloneHost(): React.JSX.Element {
     <div className="ios-studio-layout">
       <aside className="ios-studio-sidebar" aria-label="iOS 客户端架构说明">
         <span className="ios-studio-kicker">APPLE iOS 17+ SWIFTUI + STANDALONE PWA</span>
-        <h1 className="ios-studio-title">PrivateSpace iOS 移动加密空间</h1>
+        <h1 className="ios-studio-title">PSS · Personal System Service (iOS)</h1>
         <p className="ios-studio-desc">
-          在 iPhone Safari 访问 <code>/ios</code> 并「添加到主屏幕」即可开启全屏原生应用体验；或使用仓库{' '}
-          <code>ios/</code> 目录下的纯原生 SwiftUI + AutoFill 工程编译安装至真机。
+          在 iPhone Safari 访问 <code>/ios</code> 并「添加到主屏幕」即可以 <strong>PSS</strong>{' '}
+          图标开启全屏工具伪装与多端同步体验；或使用仓库 <code>ios/</code> 目录下的原生 SwiftUI +
+          AutoFill 工程编译安装至真机。
         </p>
 
         <div className="ios-studio-panel">
@@ -131,6 +132,9 @@ function IosStandaloneHost(): React.JSX.Element {
           </div>
           <ul className="ios-arch-list">
             <li>
+              <strong>PSS 双层伪装与脱敏</strong>：中性几何 <code>P</code> 桌面图标、数值/字节换算工具封面与隐藏口令/版本号连点唤出。
+            </li>
+            <li>
               <strong>PrivateSpaceKit (Swift 6)</strong>：<code>CryptoKit</code> 本机{' '}
               <code>PSCACHE1</code> <code>AES-256-GCM</code> 二次加密缓存与 Keychain 令牌隔离。
             </li>
@@ -140,19 +144,14 @@ function IosStandaloneHost(): React.JSX.Element {
               <code>/.well-known/apple-app-site-association</code> 域名关联。
             </li>
             <li>
-              <strong>流式影院与断点续传</strong>：<code>512 KiB</code> 分片 +{' '}
-              <code>SHA-256</code> 完整性校验，配合 <code>AVURLAsset</code> HTTP <code>206</code>{' '}
-              随机分块解密流。
-            </li>
-            <li>
-              <strong>面容 ID 与多任务遮罩</strong>：<code>LocalAuthentication</code> 生物识别解锁与后台切换自动高斯遮蔽。
+              <strong>面容 ID 与多任务挂起遮罩</strong>：<code>LocalAuthentication</code> 身份校验与切入后台自动恢复中性挂起层。
             </li>
           </ul>
         </div>
 
         <div className="ios-studio-links">
           <a className="ios-studio-link" href="/">
-            ← 返回桌面端私密工作台
+            ← 返回桌面端 PSS 工作台
           </a>
           <a
             className="ios-studio-link"

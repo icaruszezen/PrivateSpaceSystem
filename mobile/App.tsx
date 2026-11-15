@@ -35,6 +35,16 @@ import {
   normalizeGithubRepo,
 } from '@shared/appUpdate';
 import {
+  DEFAULT_DISGUISE_SECRET_CODE,
+  evaluateSystemExpression,
+  loadDisguisePreferences,
+  matchesDisguiseUnlockTrigger,
+  normalizeDisguiseSecretCode,
+  recordRapidTap,
+  saveDisguisePreferences,
+  type DisguisePreferences,
+} from '@shared/disguise';
+import {
   EncryptedWebVaultPersistence,
   InMemoryVaultPersistence,
   loadMobileUpdatePreferences,
@@ -101,7 +111,7 @@ function resolveDefaultServerUrl(explicit?: string): string {
   } catch {
     // ignore
   }
-  return 'https://vault.example.internal';
+  return 'https://pss.example.internal';
 }
 
 function IosGlyph(props: {
@@ -284,7 +294,7 @@ function IosEncryptedMediaThumb(props: {
           ...(props.style ?? {}),
         }}
       >
-        <Text style={{ fontSize: 10, color: 'rgba(128,140,145,0.85)' }}>解密中…</Text>
+        <Text style={{ fontSize: 10, color: 'rgba(128,140,145,0.85)' }}>加载中…</Text>
       </View>
     );
   }
@@ -297,6 +307,8 @@ function IosEncryptedMediaThumb(props: {
     />
   );
 }
+
+const IOS_DISGUISE_KEY = 'pss_ios_disguise_prefs_v1';
 
 export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps = {}): React.JSX.Element {
   const [internalTheme, setInternalTheme] = useState<IosColorMode>('light');
@@ -311,8 +323,8 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
 
   const [serverUrl, setServerUrl] = useState(() => resolveDefaultServerUrl(props.initialServerUrl));
   const [serverInitialized, setServerInitialized] = useState<boolean>(true);
-  const [vaultName, setVaultName] = useState<string>('私密空间');
-  const [setupVaultName, setSetupVaultName] = useState<string>('我的 iPhone 私密空间');
+  const [vaultName, setVaultName] = useState<string>('PSS');
+  const [setupVaultName, setSetupVaultName] = useState<string>('PSS');
   const [masterPassword, setMasterPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
   const [bootstrapping, setBootstrapping] = useState<boolean>(true);
@@ -321,13 +333,25 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
   const [biometricLocked, setBiometricLocked] = useState<boolean>(false);
   const [biometricEnabled, setBiometricEnabled] = useState<boolean>(true);
 
+  const [disguisePrefs, setDisguisePrefs] = useState<DisguisePreferences>(() =>
+    loadDisguisePreferences(IOS_DISGUISE_KEY),
+  );
+  const [isCoverActive, setIsCoverActive] = useState<boolean>(
+    () => loadDisguisePreferences(IOS_DISGUISE_KEY).enabled,
+  );
+  const [calcExpr, setCalcExpr] = useState<string>('4 GiB');
+  const [disguiseSecretDraft, setDisguiseSecretDraft] = useState<string>(
+    () => loadDisguisePreferences(IOS_DISGUISE_KEY).secretCode,
+  );
+  const coverTapTimesRef = useRef<number[]>([]);
+
   const [activeTab, setActiveTab] = useState<MobileTab>('passwords');
   const [snapshot, setSnapshot] = useState<MobileVaultSnapshot | null>(null);
   const [securitySummary, setSecuritySummary] = useState<VaultSecuritySummary | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [sseLive, setSseLive] = useState<boolean>(false);
   const [syncing, setSyncing] = useState<boolean>(false);
-  const [statusMessage, setStatusMessage] = useState<string>('正在连接加密节点...');
+  const [statusMessage, setStatusMessage] = useState<string>('正在连接 PSS 同步节点...');
   const [toast, setToast] = useState<string | null>(null);
   const [tick, setTick] = useState<number>(() => Date.now());
 
@@ -388,6 +412,29 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     toastTimerRef.current = setTimeout(() => setToast(null), 2600);
   }, []);
 
+  const patchDisguisePrefs = useCallback((patch: Partial<DisguisePreferences>) => {
+    setDisguisePrefs((prev) => {
+      const saved = saveDisguisePreferences({ ...prev, ...patch }, IOS_DISGUISE_KEY);
+      setDisguiseSecretDraft(saved.secretCode);
+      return saved;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onVis = () => {
+      if (
+        document.visibilityState === 'hidden' &&
+        disguisePrefs.enabled &&
+        disguisePrefs.autoCoverOnBackground
+      ) {
+        setIsCoverActive(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [disguisePrefs.autoCoverOnBackground, disguisePrefs.enabled]);
+
   const persistence = useMemo(() => {
     if (typeof globalThis.localStorage !== 'undefined' && globalThis.crypto?.subtle) {
       return new EncryptedWebVaultPersistence('pss_ios_vault_v1');
@@ -402,7 +449,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         platform: Platform.OS === 'ios' ? 'ios' : 'android',
         deviceName:
           props.deviceName ??
-          (Platform.OS === 'ios' ? 'iPhone 16 Pro (iOS 18)' : 'Android (PrivateSpace)'),
+          (Platform.OS === 'ios' ? 'iPhone 16 Pro · PSS' : 'Android · PSS'),
         persistence,
       }),
     [serverUrl, persistence, props.deviceName],
@@ -547,8 +594,10 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         const status = await client.getAuthStatus();
         if (cancelled) return;
         setServerInitialized(status.initialized);
-        setVaultName(status.vaultName || '私密空间');
-        setEditingVaultName(status.vaultName || '私密空间');
+        const resolvedName =
+          !status.vaultName || status.vaultName === 'PrivateSpace' ? 'PSS' : status.vaultName;
+        setVaultName(resolvedName);
+        setEditingVaultName(resolvedName);
 
         if (status.initialized) {
           const savedToken = await client.restoreSession();
@@ -558,20 +607,20 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
               if (cancelled) return;
               setSnapshot(synced);
               setUnlocked(true);
-              setStatusMessage(`已加密同步 · 游标 #${synced.lastSyncSeq}`);
+              setStatusMessage(`已同步 · 游标 #${synced.lastSyncSeq}`);
               await refreshSecurityAndSessions();
               return;
             } catch {
               await client.logout(false).catch(() => undefined);
             }
           }
-          setStatusMessage('请输入唯一管理员主密码解锁 iOS 加密空间');
+          setStatusMessage('请输入节点主访问口令建立会话');
         } else {
-          setStatusMessage('检测到新部署节点，请初始化唯一管理员主密码');
+          setStatusMessage('检测到未初始化节点，请配置主访问口令');
         }
       } catch {
         if (!cancelled) {
-          setStatusMessage('等待连接自部署 PrivateSpace 加密服务');
+          setStatusMessage('等待连接自部署 PSS 服务节点');
         }
       } finally {
         if (!cancelled) setBootstrapping(false);
@@ -608,22 +657,22 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
       client.setBaseUrl(serverUrl);
       if (!serverInitialized) {
         if (masterPassword.length < 10) {
-          setStatusMessage('主密码长度至少需要 10 位');
+          setStatusMessage('主访问口令长度至少需要 10 位');
           return;
         }
         if (masterPassword !== confirmPassword) {
-          setStatusMessage('两次输入的管理员主密码不一致');
+          setStatusMessage('两次输入的主访问口令不一致');
           return;
         }
-        setStatusMessage('正在派生 scrypt 主密钥并初始化 AES-256-GCM 空间...');
+        setStatusMessage('正在初始化 PSS 节点并同步会话...');
         const auth = await client.setupAdmin({
           password: masterPassword,
-          vaultName: setupVaultName.trim() || '我的私密空间',
+          vaultName: setupVaultName.trim() || 'PSS',
         });
         setServerInitialized(true);
         setVaultName(auth.vaultName);
       } else {
-        setStatusMessage('正在校验管理员密码并解密增量游标...');
+        setStatusMessage('正在验证节点凭据并同步游标...');
         const auth = await client.login(masterPassword);
         setVaultName(auth.vaultName);
       }
@@ -945,7 +994,244 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     }
   };
 
+  // ==================== 0. PSS System Utility Disguise Cover ====================
+
+  if (isCoverActive) {
+    const calcResult = evaluateSystemExpression(calcExpr);
+    const keypadRows = [
+      ['AC', '0x', 'MiB', '/'],
+      ['7', '8', '9', '*'],
+      ['4', '5', '6', '-'],
+      ['1', '2', '3', '+'],
+      ['GiB', '0', '.', '='],
+    ];
+
+    const onPressCalcKey = (k: string) => {
+      if (k === 'AC') {
+        setCalcExpr('');
+        return;
+      }
+      if (k === '=') {
+        if (matchesDisguiseUnlockTrigger(calcExpr, disguisePrefs)) {
+          setIsCoverActive(false);
+          return;
+        }
+        if (calcResult.ok) {
+          setCalcExpr(calcResult.formattedDecimal.replace(/,/g, ''));
+        }
+        return;
+      }
+      if (k === 'MiB' || k === 'GiB') {
+        setCalcExpr((prev) => `${prev} ${k}`);
+        return;
+      }
+      if (k === '+' || k === '-' || k === '*' || k === '/') {
+        setCalcExpr((prev) => `${prev} ${k} `);
+        return;
+      }
+      setCalcExpr((prev) => (prev === '0' ? k : `${prev}${k}`));
+    };
+
+    return (
+      <SafeAreaView
+        style={{
+          flex: 1,
+          backgroundColor: theme.bgPage,
+        }}
+        testID="ios-disguise-cover"
+      >
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            paddingHorizontal: 18,
+            paddingVertical: 12,
+            borderBottomWidth: 1,
+            borderBottomColor: theme.border,
+            backgroundColor: theme.bgCard,
+          }}
+        >
+          <View>
+            <Text style={{ fontSize: 17, fontWeight: '800', color: theme.textPrimary }}>
+              PSS
+            </Text>
+            <Text style={{ fontSize: 11, color: theme.textSecondary }}>
+              Personal System Service · 数值与字节换算
+            </Text>
+          </View>
+          <TouchableOpacity
+            onPress={toggleTheme}
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: 16,
+              backgroundColor: theme.bgSubtle,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            testID="ios-cover-theme-btn"
+          >
+            <IosGlyph
+              name={themeMode === 'light' ? 'moon' : 'sun'}
+              color={theme.textPrimary}
+              size={15}
+            />
+          </TouchableOpacity>
+        </View>
+
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 16, gap: 12 }}
+        >
+          <View
+            style={{
+              backgroundColor: theme.bgCard,
+              borderRadius: 18,
+              padding: 15,
+              gap: 8,
+              borderWidth: 1,
+              borderColor: theme.border,
+            }}
+          >
+            <TextInput
+              value={calcExpr}
+              onChangeText={setCalcExpr}
+              autoCapitalize="none"
+              placeholder="输入算式、0x十六进制或 MiB/GiB"
+              style={{
+                fontSize: 14,
+                color: theme.textSecondary,
+                fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                borderBottomWidth: 1,
+                borderBottomColor: theme.border,
+                paddingVertical: 6,
+              }}
+              testID="ios-cover-expr-input"
+            />
+            <Text
+              style={{
+                fontSize: 28,
+                fontWeight: '800',
+                color: theme.textPrimary,
+                textAlign: 'right',
+                fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+              }}
+            >
+              {calcResult.ok ? calcResult.formattedDecimal : calcResult.error ?? '—'}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: theme.bgSubtle,
+                  borderRadius: 10,
+                  padding: 8,
+                }}
+              >
+                <Text style={{ fontSize: 10, fontWeight: '700', color: theme.accent }}>HEX</Text>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: theme.textPrimary,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  }}
+                  numberOfLines={1}
+                >
+                  {calcResult.ok ? calcResult.hexValue : '—'}
+                </Text>
+              </View>
+              <View
+                style={{
+                  flex: 1,
+                  backgroundColor: theme.bgSubtle,
+                  borderRadius: 10,
+                  padding: 8,
+                }}
+              >
+                <Text style={{ fontSize: 10, fontWeight: '700', color: theme.accent }}>IEC</Text>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: theme.textPrimary,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  }}
+                  numberOfLines={1}
+                >
+                  {calcResult.ok ? calcResult.byteHuman : '—'}
+                </Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={{ gap: 8 }}>
+            {keypadRows.map((row, rIdx) => (
+              <View key={String(rIdx)} style={{ flexDirection: 'row', gap: 8 }}>
+                {row.map((key) => {
+                  const isEq = key === '=';
+                  return (
+                    <TouchableOpacity
+                      key={key}
+                      onPress={() => onPressCalcKey(key)}
+                      style={{
+                        flex: 1,
+                        height: 46,
+                        borderRadius: 12,
+                        backgroundColor: isEq ? theme.accent : theme.bgCard,
+                        borderWidth: 1,
+                        borderColor: isEq ? theme.accent : theme.border,
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                      testID={isEq ? 'ios-cover-eval-btn' : undefined}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 15,
+                          fontWeight: '700',
+                          color: isEq ? theme.textOnAccent : theme.textPrimary,
+                          fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                        }}
+                      >
+                        {key}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            ))}
+          </View>
+
+          <TouchableOpacity
+            onPress={() => {
+              if (!disguisePrefs.gestureUnlockEnabled) return;
+              const tap = recordRapidTap(coverTapTimesRef.current, Date.now());
+              coverTapTimesRef.current = tap.nextTimestamps;
+              if (tap.triggered) {
+                setIsCoverActive(false);
+              }
+            }}
+            style={{ alignItems: 'center', paddingVertical: 8 }}
+            testID="ios-cover-version-badge"
+          >
+            <Text
+              style={{
+                fontSize: 11,
+                color: theme.textTertiary,
+                fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+              }}
+            >
+              PSS Core v{CURRENT_APP_VERSION} ({CURRENT_APP_BUILD})
+            </Text>
+          </TouchableOpacity>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
   // ==================== 1. Face ID Biometric Quick-Lock Shield ====================
+
+  const displayVaultTitle = !vaultName || vaultName === 'PrivateSpace' ? 'PSS' : vaultName;
 
   if (unlocked && biometricLocked) {
     return (
@@ -982,7 +1268,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             <IosGlyph name="faceid" color={theme.accent} size={32} />
           </View>
           <Text style={{ fontSize: 19, fontWeight: '800', color: theme.textPrimary }}>
-            {vaultName} 已隐私锁定
+            {displayVaultTitle} 会话已挂起
           </Text>
           <Text
             style={{
@@ -992,7 +1278,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
               lineHeight: 1.5,
             }}
           >
-            内存明文视图已遮蔽，本地快照受 AES-256-GCM 保护。请验证面容 ID 恢复会话。
+            会话数据已保护性挂起，请验证面容 ID 继续访问节点。
           </Text>
 
           <TouchableOpacity
@@ -1011,7 +1297,13 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             testID="ios-faceid-unlock-btn"
           >
             <Text style={{ fontSize: 15, fontWeight: '700', color: theme.textOnAccent }}>
-              使用面容 ID 解锁
+              使用面容 ID 恢复会话
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity onPress={() => setIsCoverActive(true)}>
+            <Text style={{ fontSize: 12, fontWeight: '700', color: theme.accent }}>
+              切换至 PSS 伪装工具页
             </Text>
           </TouchableOpacity>
 
@@ -1024,7 +1316,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             }}
           >
             <Text style={{ fontSize: 12, fontWeight: '600', color: theme.textSecondary }}>
-              切换节点或使用管理员主密码重新登录
+              切换节点或改用主访问口令验证
             </Text>
           </TouchableOpacity>
         </View>
@@ -1069,32 +1361,53 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                 borderRadius: 999,
               }}
             >
-              <IosGlyph name="shield" color={theme.accent} size={13} />
+              <IosGlyph name="sync" color={theme.accent} size={13} />
               <Text style={{ fontSize: 11, fontWeight: '700', color: theme.accent }}>
-                iOS 18 · E2EE v2 端到端零知识加密
+                PSS · Personal System Service
               </Text>
             </View>
 
-            <TouchableOpacity
-              onPress={toggleTheme}
-              style={{
-                width: 34,
-                height: 34,
-                borderRadius: 17,
-                backgroundColor: theme.bgCard,
-                borderWidth: 1,
-                borderColor: theme.border,
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              testID="ios-auth-theme-btn"
-            >
-              <IosGlyph
-                name={themeMode === 'light' ? 'moon' : 'sun'}
-                color={theme.textPrimary}
-                size={16}
-              />
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <TouchableOpacity
+                onPress={() => setIsCoverActive(true)}
+                style={{
+                  paddingHorizontal: 10,
+                  height: 32,
+                  borderRadius: 16,
+                  backgroundColor: theme.bgCard,
+                  borderWidth: 1,
+                  borderColor: theme.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                testID="ios-auth-cover-btn"
+              >
+                <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
+                  工具页
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={toggleTheme}
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 17,
+                  backgroundColor: theme.bgCard,
+                  borderWidth: 1,
+                  borderColor: theme.border,
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+                testID="ios-auth-theme-btn"
+              >
+                <IosGlyph
+                  name={themeMode === 'light' ? 'moon' : 'sun'}
+                  color={theme.textPrimary}
+                  size={16}
+                />
+              </TouchableOpacity>
+            </View>
           </View>
 
           <View style={{ gap: 6, marginTop: 4 }}>
@@ -1106,12 +1419,12 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                 letterSpacing: -0.4,
               }}
             >
-              {serverInitialized ? vaultName : '初始化私密空间'}
+              {serverInitialized ? displayVaultTitle : '初始化 PSS 节点'}
             </Text>
             <Text style={{ fontSize: 13, color: theme.textSecondary, lineHeight: 1.5 }}>
               {serverInitialized
-                ? '连接自部署零知识盲存储服务，本地端到端加解密密码 (2FA)、原图相册、PSENC001 视频流与笔记。'
-                : '首次启动向导：主密码仅在本机经 PBKDF2-HMAC-SHA256 (310k) + HKDF-SHA256 派生密钥，服务端零明文可见。'}
+                ? '连接自部署同步服务节点，请输入主访问口令建立会话。'
+                : '首次启动向导：设置自部署节点的显示名称与主访问口令。'}
             </Text>
           </View>
 
@@ -1134,7 +1447,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                 onChangeText={setServerUrl}
                 autoCapitalize="none"
                 keyboardType="url"
-                placeholder="https://vault.yourdomain.com"
+                placeholder="https://pss.yourdomain.com"
                 style={{
                   backgroundColor: theme.bgInput,
                   borderWidth: 1,
@@ -1153,12 +1466,12 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             {!serverInitialized && (
               <View style={{ gap: 5 }}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary }}>
-                  空间显示名称
+                  节点显示名称
                 </Text>
                 <TextInput
                   value={setupVaultName}
                   onChangeText={setSetupVaultName}
-                  placeholder="我的 iPhone 私密空间"
+                  placeholder="PSS"
                   style={{
                     backgroundColor: theme.bgInput,
                     borderWidth: 1,
@@ -1175,13 +1488,13 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
 
             <View style={{ gap: 5 }}>
               <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary }}>
-                唯一管理员主密码
+                主访问口令
               </Text>
               <TextInput
                 value={masterPassword}
                 onChangeText={setMasterPassword}
                 secureTextEntry
-                placeholder={serverInitialized ? '输入管理员主密码解锁' : '设置至少 10 位高强度主密码'}
+                placeholder={serverInitialized ? '输入节点主访问口令' : '设置至少 10 位访问口令'}
                 style={{
                   backgroundColor: theme.bgInput,
                   borderWidth: 1,
@@ -1199,13 +1512,13 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             {!serverInitialized && (
               <View style={{ gap: 5 }}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textSecondary }}>
-                  确认管理员主密码
+                  确认主访问口令
                 </Text>
                 <TextInput
                   value={confirmPassword}
                   onChangeText={setConfirmPassword}
                   secureTextEntry
-                  placeholder="再次输入管理员主密码"
+                  placeholder="再次输入主访问口令"
                   style={{
                     backgroundColor: theme.bgInput,
                     borderWidth: 1,
@@ -1242,7 +1555,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                 <IosGlyph name="faceid" color={theme.textOnAccent} size={17} />
               )}
               <Text style={{ fontSize: 15, fontWeight: '700', color: theme.textOnAccent }}>
-                {serverInitialized ? '解锁并同步 iOS 空间' : '创建加密空间并登录'}
+                {serverInitialized ? '验证并连接 PSS 节点' : '初始化并连接节点'}
               </Text>
             </TouchableOpacity>
 
@@ -1271,9 +1584,9 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
             }}
           >
             {[
-              ['Keychain + CryptoKit', '本机快照经 256-bit 设备密钥 AES-GCM 二次加密存储'],
-              ['AutoFill 自动填充扩展', '支持系统级 Safari / App 账号口令与 RFC 6238 动态码填充'],
-              ['PSENC001 媒体分块流', '512KiB 断点续传与 AVPlayer HTTP 206 零落盘进度拖拽'],
+              ['Keychain + CryptoKit', '本机离线缓存受硬件级设备密钥保护'],
+              ['AutoFill 自动填充扩展', '支持系统级 Safari / App 账号口令与动态码填充'],
+              ['HTTP 206 媒体分块流', '512KiB 断点续传与流式按需加载'],
             ].map(([title, desc]) => (
               <View key={title} style={{ gap: 2 }}>
                 <Text style={{ fontSize: 12, fontWeight: '700', color: theme.textPrimary }}>
@@ -1327,7 +1640,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
               style={{ fontSize: 17, fontWeight: '800', color: theme.textPrimary }}
               numberOfLines={1}
             >
-              {vaultName}
+              {displayVaultTitle}
             </Text>
             <View
               style={{
@@ -1345,6 +1658,23 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         </View>
 
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <TouchableOpacity
+            onPress={() => setIsCoverActive(true)}
+            style={{
+              paddingHorizontal: 8,
+              height: 31,
+              borderRadius: 16,
+              backgroundColor: theme.bgSubtle,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+            testID="ios-header-cover-btn"
+          >
+            <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textSecondary }}>
+              伪装
+            </Text>
+          </TouchableOpacity>
+
           <TouchableOpacity
             onPress={() => void performSync(false)}
             style={{
@@ -2618,6 +2948,142 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         {/* -------------------- TAB 5: SECURITY, CIPHER AUDIT & MULTI-DEVICE SYNC -------------------- */}
         {activeTab === 'sync' && (
           <>
+            {/* PSS Disguise & Camouflage Card */}
+            <View
+              style={{
+                backgroundColor: theme.bgCard,
+                borderRadius: 16,
+                padding: 15,
+                gap: 11,
+                borderWidth: 1,
+                borderColor: theme.border,
+              }}
+              testID="ios-disguise-settings-card"
+            >
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <Text style={{ fontSize: 15, fontWeight: '800', color: theme.textPrimary }}>
+                  应用伪装与图标脱敏 (PSS)
+                </Text>
+                <Text
+                  style={{
+                    fontSize: 11,
+                    fontWeight: '700',
+                    color: theme.accent,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  }}
+                >
+                  {disguisePrefs.enabled ? '伪装开启' : '直连模式'}
+                </Text>
+              </View>
+
+              <Text style={{ fontSize: 12, color: theme.textSecondary, lineHeight: 1.45 }}>
+                主屏幕应用图标与标题统一为 PSS。开启伪装封面后，启动默认展示数值与字节换算工具页，输入隐藏口令（默认 {DEFAULT_DISGUISE_SECRET_CODE}）并按 = 即可进入工作区。
+              </Text>
+
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: theme.textPrimary }}>
+                    启动时默认进入 PSS 工具页
+                  </Text>
+                  <Text style={{ fontSize: 11, color: theme.textSecondary }}>
+                    关闭后打开应用将直接展示低调版 PSS 节点验证页
+                  </Text>
+                </View>
+                <Switch
+                  value={disguisePrefs.enabled}
+                  onValueChange={(val) => patchDisguisePrefs({ enabled: val })}
+                />
+              </View>
+
+              <View
+                style={{
+                  flexDirection: 'row',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <View style={{ flex: 1, paddingRight: 8 }}>
+                  <Text style={{ fontSize: 13, fontWeight: '600', color: theme.textPrimary }}>
+                    切回后台时自动恢复伪装封面
+                  </Text>
+                </View>
+                <Switch
+                  value={disguisePrefs.autoCoverOnBackground}
+                  onValueChange={(val) => patchDisguisePrefs({ autoCoverOnBackground: val })}
+                />
+              </View>
+
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <TextInput
+                  value={disguiseSecretDraft}
+                  onChangeText={setDisguiseSecretDraft}
+                  autoCapitalize="none"
+                  placeholder="隐藏口令 (3~16位)"
+                  style={{
+                    flex: 1,
+                    backgroundColor: theme.bgInput,
+                    borderWidth: 1,
+                    borderColor: theme.border,
+                    borderRadius: 9,
+                    paddingHorizontal: 10,
+                    paddingVertical: 7,
+                    fontSize: 12,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                    color: theme.textPrimary,
+                  }}
+                  testID="ios-disguise-secret-input"
+                />
+                <TouchableOpacity
+                  onPress={() => {
+                    const normalized = normalizeDisguiseSecretCode(disguiseSecretDraft);
+                    if (!normalized) {
+                      showToast('隐藏口令需为 3 ~ 16 位不含空格字符');
+                      return;
+                    }
+                    patchDisguisePrefs({ secretCode: normalized });
+                    showToast(`已更新隐藏口令为 ${normalized}`);
+                  }}
+                  style={{
+                    backgroundColor: theme.accent,
+                    paddingHorizontal: 12,
+                    justifyContent: 'center',
+                    borderRadius: 9,
+                  }}
+                >
+                  <Text style={{ fontSize: 11, fontWeight: '700', color: theme.textOnAccent }}>
+                    保存口令
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => setIsCoverActive(true)}
+                style={{
+                  backgroundColor: theme.accentSoft,
+                  borderRadius: 10,
+                  paddingVertical: 9,
+                  alignItems: 'center',
+                }}
+                testID="ios-activate-cover-now-btn"
+              >
+                <Text style={{ fontSize: 12, fontWeight: '700', color: theme.accent }}>
+                  立即切换至 PSS 伪装工具页
+                </Text>
+              </TouchableOpacity>
+            </View>
+
             {/* Cryptographic Engine Summary Card */}
             <View
               style={{

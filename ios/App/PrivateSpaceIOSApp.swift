@@ -41,26 +41,30 @@ struct RootContainerView: View {
                 .ignoresSafeArea()
 
             Group {
-                switch store.phase {
-                case .launching:
-                    VStack(spacing: 16) {
-                        ProgressView()
-                            .controlSize(.large)
-                        Text("正在握手加密私密空间...")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                if store.isDisguiseCoverActive {
+                    PSSSystemUtilityCoverView(store: store)
+                } else {
+                    switch store.phase {
+                    case .launching:
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .controlSize(.large)
+                            Text("正在连接 PSS 服务节点...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    case .serverSetup, .passwordLocked, .biometricLocked:
+                        ServerConnectAndAuthView(store: store)
+                    case .unlocked:
+                        MainTabShellView(store: store)
                     }
-                case .serverSetup, .passwordLocked, .biometricLocked:
-                    ServerConnectAndAuthView(store: store)
-                case .unlocked:
-                    MainTabShellView(store: store)
                 }
             }
 
             // Toast Notification Banner
             if let toast = store.statusBanner {
                 HStack(spacing: 8) {
-                    Image(systemName: "checkmark.shield.fill")
+                    Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
                     Text(toast)
                         .font(.footnote.weight(.semibold))
@@ -77,7 +81,7 @@ struct RootContainerView: View {
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            // iOS App Switcher Privacy Blur Shield (prevents sensitive snapshot leaks)
+            // iOS App Switcher Neutral Suspension Shield
             if store.isPrivacyShieldVisible {
                 PrivacyShieldOverlayView(vaultName: store.vaultName)
                     .transition(.opacity)
@@ -91,6 +95,10 @@ struct RootContainerView: View {
 struct PrivacyShieldOverlayView: View {
     let vaultName: String
 
+    private var displayTitle: String {
+        (vaultName.isEmpty || vaultName == "PrivateSpace") ? "PSS" : vaultName
+    }
+
     var body: some View {
         ZStack {
             Rectangle()
@@ -98,12 +106,12 @@ struct PrivacyShieldOverlayView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 14) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 46, weight: .semibold))
+                Image(systemName: "cpu")
+                    .font(.system(size: 42, weight: .semibold))
                     .foregroundStyle(MineralPineTheme.accent)
-                Text(vaultName)
+                Text(displayTitle)
                     .font(.title3.weight(.bold))
-                Text("AES-256-GCM 隐私防窥护盾已激活")
+                Text("Personal System Service · 会话已挂起")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

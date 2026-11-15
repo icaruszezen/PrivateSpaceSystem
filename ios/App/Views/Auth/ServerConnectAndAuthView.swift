@@ -8,7 +8,7 @@ struct ServerConnectAndAuthView: View {
     @State private var serverInput: String = ""
     @State private var masterPassword: String = ""
     @State private var confirmPassword: String = ""
-    @State private var setupVaultName: String = "PrivateSpace"
+    @State private var setupVaultName: String = "PSS"
     @State private var isSubmitting = false
     @State private var editingServer = false
 
@@ -22,41 +22,58 @@ struct ServerConnectAndAuthView: View {
         return false
     }
 
+    private var displayVaultTitle: String {
+        (store.vaultName.isEmpty || store.vaultName == "PrivateSpace") ? "PSS" : store.vaultName
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // Brand Security Header
+                // Brand System Header
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "lock.shield.fill")
-                            .font(.subheadline.weight(.bold))
-                        Text("E2EE v2 · 端到端零知识加密 · 服务端零明文")
-                            .font(.caption.weight(.semibold))
-                    }
-                    .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(
-                        MineralPineTheme.primaryAccent(for: colorScheme).opacity(0.12),
-                        in: Capsule()
-                    )
+                    HStack {
+                        HStack(spacing: 8) {
+                            Image(systemName: "cpu")
+                                .font(.subheadline.weight(.bold))
+                            Text("PSS · Personal System Service")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(
+                            MineralPineTheme.primaryAccent(for: colorScheme).opacity(0.12),
+                            in: Capsule()
+                        )
 
-                    Text(isSetupMode ? "初始化自部署私密空间" : store.vaultName)
+                        Spacer()
+
+                        Button {
+                            store.isDisguiseCoverActive = true
+                        } label: {
+                            Label("工具页", systemImage: "function")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+
+                    Text(isSetupMode ? "初始化 PSS 节点" : displayVaultTitle)
                         .font(.system(size: 28, weight: .bold, design: .default))
 
                     Text(
                         isSetupMode
-                            ? "主密码仅在 iPhone 本地派生 KEK 与认证子密钥并封装 256 位主密钥 (DEK)，服务端永不接触明文。"
-                            : "唯一管理员零知识认证 · 笔记、密码 (TOTP)、PSENC001 原图与流式影院全程客户端本机加解密。"
+                            ? "配置自部署同步节点的主访问口令，建立多端实时增量同步连接。"
+                            : "自部署多端数据同步与服务节点会话验证。"
                     )
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
                     if let fp = store.keyFingerprint {
                         HStack(spacing: 6) {
-                            Image(systemName: "key.horizontal.fill")
+                            Image(systemName: "number.square")
                                 .font(.caption2)
-                            Text("DEK 指纹 \(fp)")
+                            Text("节点指纹 \(fp)")
                                 .font(.system(.caption2, design: .monospaced))
                         }
                         .foregroundStyle(.secondary)
@@ -67,7 +84,7 @@ struct ServerConnectAndAuthView: View {
                 // Server Node Card
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label("自部署空间节点", systemImage: "server.rack")
+                        Label("自部署服务节点", systemImage: "server.rack")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -86,7 +103,7 @@ struct ServerConnectAndAuthView: View {
                     }
 
                     if editingServer {
-                        TextField("https://vault.yourdomain.com", text: $serverInput)
+                        TextField("https://pss.yourdomain.com", text: $serverInput)
                             .textInputAutocapitalization(.never)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
@@ -113,10 +130,10 @@ struct ServerConnectAndAuthView: View {
                             .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
                             .padding(.top, 8)
 
-                        Text("轻触使用 \(store.biometricCapability.displayName) 解锁")
+                        Text("轻触使用 \(store.biometricCapability.displayName) 验证会话")
                             .font(.headline)
 
-                        Text("本地离线快照由 iOS Keychain 硬件级 AES-256-GCM 密钥保护")
+                        Text("本机离线缓存受 iOS Keychain 硬件级密钥保护")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -126,7 +143,7 @@ struct ServerConnectAndAuthView: View {
                         } label: {
                             HStack {
                                 Image(systemName: store.biometricCapability.systemImage)
-                                Text("通过 \(store.biometricCapability.displayName) 立即解锁")
+                                Text("通过 \(store.biometricCapability.displayName) 继续")
                                     .fontWeight(.semibold)
                             }
                             .frame(maxWidth: .infinity)
@@ -135,7 +152,7 @@ struct ServerConnectAndAuthView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(MineralPineTheme.primaryAccent(for: colorScheme))
 
-                        Button("改用管理员主密码验证") {
+                        Button("改用主访问口令验证") {
                             store.phase = .passwordLocked(
                                 vaultName: store.vaultName,
                                 fingerprint: store.keyFingerprint
@@ -158,20 +175,20 @@ struct ServerConnectAndAuthView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         if isSetupMode {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("空间显示名称")
+                                Text("节点显示名称")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
-                                TextField("PrivateSpace", text: $setupVaultName)
+                                TextField("PSS", text: $setupVaultName)
                                     .padding(12)
                                     .background(MineralPineTheme.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10))
                             }
                         }
 
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("唯一管理员主密码")
+                            Text("主访问口令")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
-                            SecureField("输入至少 8 位高强度主密码", text: $masterPassword)
+                            SecureField("输入至少 8 位访问口令", text: $masterPassword)
                                 .textContentType(.password)
                                 .padding(12)
                                 .background(MineralPineTheme.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10))
@@ -179,10 +196,10 @@ struct ServerConnectAndAuthView: View {
 
                         if isSetupMode {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("确认管理员主密码")
+                                Text("确认主访问口令")
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.secondary)
-                                SecureField("再次输入主密码防止误输", text: $confirmPassword)
+                                SecureField("再次输入访问口令防止误输", text: $confirmPassword)
                                     .textContentType(.newPassword)
                                     .padding(12)
                                     .background(MineralPineTheme.subtleFill(for: colorScheme), in: RoundedRectangle(cornerRadius: 10))
@@ -209,9 +226,9 @@ struct ServerConnectAndAuthView: View {
                                     ProgressView()
                                         .tint(.white)
                                 } else {
-                                    Image(systemName: isSetupMode ? "sparkles" : "lock.open.fill")
+                                    Image(systemName: isSetupMode ? "sparkles" : "arrow.right.circle.fill")
                                 }
-                                Text(isSetupMode ? "生成主密钥并初始化空间" : "解密信封并同步空间")
+                                Text(isSetupMode ? "初始化并连接节点" : "验证并连接节点")
                                     .fontWeight(.semibold)
                             }
                             .frame(maxWidth: .infinity)
@@ -229,11 +246,10 @@ struct ServerConnectAndAuthView: View {
                     )
                 }
 
-                // Cryptographic Spec Footer
+                // Spec Footer
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("PBKDF2-HMAC-SHA256 (310,000 次) + HKDF-SHA256 逐记录子密钥", systemImage: "cpu")
-                    Label("客户端 PSENC001 64 KiB 分块加密原图与 HTTP 206 流式解密影院", systemImage: "film.stack")
-                    Label("iOS Keychain 硬件保护 + 系统级 Safari / App 自动填充扩展", systemImage: "key.viewfinder")
+                    Label("PSS Sync Protocol v2 · TLS / AEAD 实时游标同步", systemImage: "cpu")
+                    Label("支持系统级 Safari / App 自动填充扩展与离线增量队列", systemImage: "key.viewfinder")
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

@@ -177,7 +177,7 @@ async function getOrCreateWebCryptoKey(): Promise<CryptoKey | null> {
 }
 
 function inferBrowserAndroidLabel(): string {
-  if (typeof navigator === 'undefined') return 'Android · PrivateSpace';
+  if (typeof navigator === 'undefined') return 'Android · PSS';
   const ua = navigator.userAgent || '';
   const modelMatch = ua.match(/Android\s+([\d.]+);\s*([^;)]+?)(?:\s+Build\/|\))/i);
   if (modelMatch) {
@@ -186,12 +186,12 @@ function inferBrowserAndroidLabel(): string {
     return `${model} · Android ${ver}`;
   }
   if (/Android/i.test(ua)) {
-    return 'Android Phone · PrivateSpace';
+    return 'Android Phone · PSS';
   }
   if (/iPhone|iPad/i.test(ua)) {
-    return 'iPhone · PrivateSpace Mobile';
+    return 'iPhone · PSS Mobile';
   }
-  return 'Android Companion · PrivateSpace';
+  return 'Android Companion · PSS';
 }
 
 let webClipboardTimer: number | null = null;

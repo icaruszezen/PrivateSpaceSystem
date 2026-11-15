@@ -310,7 +310,7 @@ export function buildAppleOtaManifestPlist(params: {
 }): string {
   const bundleId = (params.bundleId || DEFAULT_IOS_BUNDLE_ID).trim();
   const version = cleanSemverString(params.bundleVersion, CURRENT_APP_VERSION);
-  const title = (params.title || 'PrivateSpace · 私密空间').trim();
+  const title = (params.title || 'PSS').trim();
   const subtitleXml =
     typeof params.buildNumber === 'number' && Number.isFinite(params.buildNumber)
       ? `\n        <key>subtitle</key>\n        <string>${escapeXml(`Build ${Math.trunc(params.buildNumber)}`)}</string>`

@@ -1459,3 +1459,174 @@ select {
   box-shadow: var(--m-shadow-xs);
 }
 
+/* ==================== PSS System Utility Disguise Cover ==================== */
+.m-cover-tabs-wrap {
+  padding: 10px 14px 4px;
+  background: var(--m-bg);
+  flex-shrink: 0;
+}
+
+.m-cover-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.m-cover-display-card {
+  padding: 14px;
+  margin-bottom: 0;
+}
+
+.m-cover-expr-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid var(--m-border);
+  padding-bottom: 6px;
+}
+
+.m-cover-expr-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--m-text-secondary);
+  font-size: 0.95rem;
+  padding: 4px 0;
+}
+
+.m-cover-main-result {
+  font-size: 1.7rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--m-text);
+  text-align: right;
+  padding: 10px 0 8px;
+  word-break: break-all;
+}
+
+.m-cover-radix-list {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--m-border);
+}
+
+.m-cover-radix-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--m-bg-muted);
+  border: 1px solid var(--m-border);
+  min-width: 0;
+}
+
+.m-cover-radix-tag {
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: var(--m-accent);
+  flex-shrink: 0;
+}
+
+.m-cover-radix-val {
+  font-size: 0.74rem;
+  color: var(--m-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.m-cover-copy-mini {
+  border: none;
+  background: transparent;
+  color: var(--m-text-tertiary);
+  padding: 2px;
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.m-cover-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.m-cover-chip {
+  border: 1px solid var(--m-border);
+  background: var(--m-bg-subtle);
+  color: var(--m-text-secondary);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.m-cover-keypad {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.m-cover-key {
+  height: 50px;
+  border-radius: 12px;
+  border: 1px solid var(--m-border);
+  background: var(--m-bg-elevated);
+  color: var(--m-text);
+  font-size: 1.05rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--m-shadow-xs);
+  user-select: none;
+}
+
+.m-cover-key:active {
+  transform: scale(0.96);
+  background: var(--m-bg-subtle);
+}
+
+.m-cover-key.is-fn {
+  background: var(--m-bg-muted);
+  color: var(--m-text-secondary);
+  font-size: 0.84rem;
+}
+
+.m-cover-key.is-op {
+  background: var(--m-accent-soft);
+  border-color: var(--m-accent-border);
+  color: var(--m-accent);
+}
+
+.m-cover-key.is-eq {
+  background: var(--m-accent);
+  border-color: var(--m-accent);
+  color: #ffffff;
+}
+
+.m-cover-footer {
+  margin-top: auto;
+  padding: 8px 0 4px;
+  text-align: center;
+}
+
+.m-cover-version-btn {
+  border: none;
+  background: transparent;
+  color: var(--m-text-tertiary);
+  font-size: 0.72rem;
+  padding: 6px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+

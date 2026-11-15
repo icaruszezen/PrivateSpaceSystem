@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Calculator,
   Copy,
   Download,
+  EyeOff,
   Fingerprint,
   KeyRound,
   Lock,
@@ -16,6 +18,11 @@ import {
   X,
 } from 'lucide-react';
 import { normalizeGithubRepo } from '@shared/appUpdate';
+import {
+  DEFAULT_DISGUISE_SECRET_CODE,
+  normalizeDisguiseSecretCode,
+  type DisguisePreferences,
+} from '@shared/disguise';
 import type {
   AppUpdateCheckResponse,
   CipherEnvelopeInspection,
@@ -50,6 +57,9 @@ interface MobileSecurityTabProps {
   notes: NoteItem[];
   passwords: PasswordItem[];
   media: MediaItem[];
+  disguisePrefs: DisguisePreferences;
+  onDisguisePrefsChange: (next: DisguisePreferences) => void;
+  onActivateCoverNow: () => void;
   updatePrefs: MobileUpdatePreferences;
   updateInfo: AppUpdateCheckResponse | null;
   checkingUpdate: boolean;
@@ -82,6 +92,9 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   notes,
   passwords,
   media,
+  disguisePrefs,
+  onDisguisePrefsChange,
+  onActivateCoverNow,
   updatePrefs,
   updateInfo,
   checkingUpdate,
@@ -104,10 +117,15 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   const [envelope, setEnvelope] = useState<CipherEnvelopeInspection | null>(null);
   const [loading, setLoading] = useState(false);
   const [repoDraft, setRepoDraft] = useState<string>(updatePrefs.customGithubRepo);
+  const [secretCodeDraft, setSecretCodeDraft] = useState<string>(disguisePrefs.secretCode);
 
   useEffect(() => {
     setRepoDraft(updatePrefs.customGithubRepo);
   }, [updatePrefs.customGithubRepo]);
+
+  useEffect(() => {
+    setSecretCodeDraft(disguisePrefs.secretCode);
+  }, [disguisePrefs.secretCode]);
 
   // PIN Setup Modal
   const [pinModalOpen, setPinModalOpen] = useState(false);
@@ -230,8 +248,153 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
     }
   };
 
+  const handleSaveSecretCode = (e: React.FormEvent) => {
+    e.preventDefault();
+    const normalized = normalizeDisguiseSecretCode(secretCodeDraft);
+    if (!normalized) {
+      onNotify('隐藏唤出口令需为 3 ~ 16 位可见 ASCII 字符（不含空格）');
+      return;
+    }
+    onDisguisePrefsChange({
+      ...disguisePrefs,
+      secretCode: normalized,
+    });
+    setSecretCodeDraft(normalized);
+    onNotify(`已更新 PSS 工具页唤出口令为 ${normalized}`);
+  };
+
   return (
     <>
+      {/* 0A. PSS Application Disguise & De-sensitization */}
+      <section className="m-card" data-testid="android-disguise-card">
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            marginBottom: 8,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+            <Calculator size={16} style={{ color: 'var(--m-accent)', flexShrink: 0 }} />
+            <span style={{ fontWeight: 700, fontSize: '0.92rem' }}>
+              应用伪装与图标脱敏 (PSS)
+            </span>
+          </div>
+          <span className="m-crypto-badge mono" style={{ fontSize: '0.68rem', padding: '2px 8px' }}>
+            {disguisePrefs.enabled ? '伪装开启' : '直连模式'}
+          </span>
+        </div>
+
+        <div className="m-probe-box" style={{ marginBottom: 10 }}>
+          桌面图标与系统名称统一显示为 <strong>PSS</strong> (Personal System Service)。开启伪装入口后，启动默认展示「数值换算与节点探测」工具页，在算式框输入隐藏口令并按 <code>=</code> 即可进入工作区。
+        </div>
+
+        <div className="m-switch-row">
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '0.86rem' }}>启动时默认进入 PSS 工具页</div>
+            <div style={{ fontSize: '0.73rem', color: 'var(--m-text-tertiary)' }}>
+              关闭后打开应用将直接进入低调版 PSS 节点验证页
+            </div>
+          </div>
+          <button
+            id="m-disguise-enable-toggle"
+            type="button"
+            className={`m-toggle ${disguisePrefs.enabled ? 'is-on' : ''}`}
+            onClick={() => {
+              const next = !disguisePrefs.enabled;
+              onDisguisePrefsChange({ ...disguisePrefs, enabled: next });
+              onNotify(next ? '已开启启动时默认展示 PSS 工具页' : '已切换为直接进入 PSS 验证页');
+            }}
+            aria-label="切换启动默认伪装工具页"
+          />
+        </div>
+
+        <div className="m-switch-row">
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '0.86rem' }}>切回后台时自动恢复伪装封面</div>
+            <div style={{ fontSize: '0.73rem', color: 'var(--m-text-tertiary)' }}>
+              切换多任务或锁屏时立即覆盖工作区画面
+            </div>
+          </div>
+          <button
+            id="m-disguise-autocover-toggle"
+            type="button"
+            className={`m-toggle ${disguisePrefs.autoCoverOnBackground ? 'is-on' : ''}`}
+            onClick={() =>
+              onDisguisePrefsChange({
+                ...disguisePrefs,
+                autoCoverOnBackground: !disguisePrefs.autoCoverOnBackground,
+              })
+            }
+            aria-label="切换后台自动恢复伪装封面"
+          />
+        </div>
+
+        <div className="m-switch-row">
+          <div>
+            <div style={{ fontWeight: 600, fontSize: '0.86rem' }}>底部版本号连点 5 次手势唤出</div>
+            <div style={{ fontSize: '0.73rem', color: 'var(--m-text-tertiary)' }}>
+              允许连续快速点击底部 PSS Core 版本号进入验证页
+            </div>
+          </div>
+          <button
+            id="m-disguise-gesture-toggle"
+            type="button"
+            className={`m-toggle ${disguisePrefs.gestureUnlockEnabled ? 'is-on' : ''}`}
+            onClick={() =>
+              onDisguisePrefsChange({
+                ...disguisePrefs,
+                gestureUnlockEnabled: !disguisePrefs.gestureUnlockEnabled,
+              })
+            }
+            aria-label="切换版本号连点手势唤出"
+          />
+        </div>
+
+        <form onSubmit={handleSaveSecretCode} style={{ paddingTop: 10 }}>
+          <label htmlFor="m-disguise-secret-input" className="m-label">
+            <span>计算器隐藏唤出口令 (输入后按 =)</span>
+            <span className="mono" style={{ fontSize: '0.72rem' }}>
+              默认 {DEFAULT_DISGUISE_SECRET_CODE}
+            </span>
+          </label>
+          <div className="m-input-group">
+            <input
+              id="m-disguise-secret-input"
+              type="text"
+              className="m-input mono"
+              value={secretCodeDraft}
+              maxLength={16}
+              onChange={(e) => setSecretCodeDraft(e.target.value)}
+              placeholder="例如 2580 或 0x99"
+              autoCapitalize="none"
+              autoCorrect="off"
+            />
+            <button
+              id="m-disguise-secret-save-btn"
+              type="submit"
+              className="m-btn m-btn-soft"
+              style={{ flexShrink: 0 }}
+            >
+              <span>保存口令</span>
+            </button>
+          </div>
+        </form>
+
+        <button
+          id="m-disguise-activate-now-btn"
+          type="button"
+          className="m-btn m-btn-soft m-btn-block"
+          style={{ marginTop: 12 }}
+          onClick={onActivateCoverNow}
+        >
+          <EyeOff size={15} />
+          <span>立即切换至 PSS 伪装工具页</span>
+        </button>
+      </section>
+
       {/* 0. Software Version & GitHub Auto-Update Configuration */}
       <section className="m-card" data-testid="android-auto-update-card">
         <div

@@ -67,7 +67,7 @@ jobs:
               curl -sf "http://127.0.0.1:18080/api/v1/updates/ios-manifest.plist?ipa_url=https://example.com/PrivateSpace.ipa&version=0.4.0" | grep -q 'software-package'
               curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
               curl -sf http://127.0.0.1:18080/ios | grep -q 'ios-root'
-              curl -sf http://127.0.0.1:18080/mobile/ | grep -q 'PrivateSpace'
+              curl -sf http://127.0.0.1:18080/mobile/ | grep -q '<title>PSS</title>'
               node --input-type=module <<'EOF'
           import assert from 'node:assert/strict';
           import crypto from 'node:crypto';
@@ -507,7 +507,7 @@ jobs:
             bundleId,
             bundleVersion: version,
             buildNumber,
-            title: 'PrivateSpace',
+            title: 'PSS',
           });
           fs.writeFileSync('dist-release/ios/ios-ota-manifest.plist', plistXml, 'utf8');
 

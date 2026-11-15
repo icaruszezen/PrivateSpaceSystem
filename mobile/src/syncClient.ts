@@ -554,7 +554,8 @@ export function parsePairingInput(
   const trimmed = raw.trim();
   if (!trimmed) return null;
 
-  if (trimmed.toLowerCase().startsWith('privatespace://')) {
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('privatespace://') || lower.startsWith('pss://')) {
     try {
       const url = new URL(trimmed);
       const srv = url.searchParams.get('server') || url.searchParams.get('url') || '';
