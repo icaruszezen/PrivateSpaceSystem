@@ -329,9 +329,11 @@ jobs:
           npm run build
 
       - name: Run SwiftPM PrivateSpaceKitTests against live PrivateSpace server
+        env:
+          CI_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /tmp/pss-ios-ci-data
-          PORT=18080 DATA_DIR=/tmp/pss-ios-ci-data GITHUB_REPO=${{ github.repository }} \
+          PORT=18080 DATA_DIR=/tmp/pss-ios-ci-data GITHUB_REPO=${{ github.repository }} GITHUB_TOKEN="$CI_GITHUB_TOKEN" \
             node dist/server/server/index.js > /tmp/pss-ios-ci-server.log 2>&1 &
           SERVER_PID=$!
           trap "kill $SERVER_PID 2>/dev/null || true" EXIT
@@ -365,8 +367,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Package iOS Release IPA + OTA Manifest (Tag Release or Manual Dispatch)
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+      - name: Package iOS Release IPA + OTA Manifest
         env:
           IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'io.privatespace.ios' }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
@@ -416,6 +417,7 @@ jobs:
               -scheme PrivateSpaceIOS \
               -configuration Release \
               -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
               -archivePath "$RUNNER_TEMP/PrivateSpaceIOS.xcarchive" \
               DEVELOPMENT_TEAM="${APPLE_TEAM_ID}" \
               MARKETING_VERSION="${APP_VERSION}" \
@@ -463,12 +465,15 @@ jobs:
               -scheme PrivateSpaceIOS \
               -configuration Release \
               -sdk iphoneos \
+              -destination 'generic/platform=iOS' \
               -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+              ONLY_ACTIVE_ARCH=NO \
               MARKETING_VERSION="${APP_VERSION}" \
               CURRENT_PROJECT_VERSION="${APP_BUILD}" \
               CODE_SIGNING_ALLOWED=NO \
               CODE_SIGNING_REQUIRED=NO \
               CODE_SIGN_IDENTITY="" \
+              CODE_SIGN_ENTITLEMENTS="" \
               build
 
             mkdir -p "$RUNNER_TEMP/payload-stage/Payload"

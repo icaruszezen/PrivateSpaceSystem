@@ -348,6 +348,32 @@ export function createUpdateRoutes(
     const channel: UpdateChannel = rawChannel === 'beta' ? 'beta' : 'stable';
     const origin = inferRequestOrigin(c.req.url, c.req.raw.headers);
 
+    const explicitIpaUrl = c.req.query('ipa_url')?.trim();
+    if (explicitIpaUrl && /^https?:\/\//i.test(explicitIpaUrl)) {
+      const explicitVersion = cleanSemverString(
+        c.req.query('version') || CURRENT_APP_VERSION,
+        CURRENT_APP_VERSION,
+      );
+      const explicitBuildRaw = Number.parseInt(c.req.query('build') || '', 10);
+      const explicitBuild = Number.isFinite(explicitBuildRaw)
+        ? explicitBuildRaw
+        : computeVersionCodeFromSemver(explicitVersion);
+      const plistXml = buildAppleOtaManifestPlist({
+        ipaUrl: explicitIpaUrl,
+        bundleId: c.req.query('bundle_id')?.trim() || config.iosBundleId,
+        bundleVersion: explicitVersion,
+        buildNumber: explicitBuild,
+        title: `${config.vaultDefaultName} (v${explicitVersion})`,
+      });
+      return new Response(plistXml, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/xml; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+
     try {
       const { response } = await resolveForPlatform({
         platform: 'ios',
@@ -363,6 +389,7 @@ export function createUpdateRoutes(
         ipaUrl,
         bundleId: config.iosBundleId,
         bundleVersion: response.latestVersion || CURRENT_APP_VERSION,
+        buildNumber: response.latestBuild,
         title: `${config.vaultDefaultName} (v${response.latestVersion})`,
       });
       return new Response(plistXml, {
