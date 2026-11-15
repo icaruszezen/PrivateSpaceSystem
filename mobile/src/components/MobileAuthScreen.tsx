@@ -1,14 +1,14 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Calculator,
   CheckCircle2,
   ClipboardPaste,
   Eye,
   EyeOff,
-  Lock,
+  KeyRound,
   Moon,
   RefreshCw,
   Server,
-  ShieldCheck,
   Smartphone,
   Sun,
   WifiOff,
@@ -20,6 +20,7 @@ import {
   parsePairingInput,
   type PrivateSpaceMobileClient,
 } from '../syncClient';
+import { MobilePssMark } from './MobileDisguiseCover';
 
 interface MobileAuthScreenProps {
   client: PrivateSpaceMobileClient;
@@ -28,6 +29,7 @@ interface MobileAuthScreenProps {
   hasOfflineCache: boolean;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
+  onEnterCover?: () => void;
   onAuthenticated: (params: {
     serverUrl: string;
     vaultName: string;
@@ -45,6 +47,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
   hasOfflineCache,
   theme,
   onToggleTheme,
+  onEnterCover,
   onAuthenticated,
   onEnterOfflineMode,
   onNotify,
@@ -54,7 +57,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
   const [probeStatus, setProbeStatus] = useState<AuthStatusResponse | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
 
-  const [vaultNameInput, setVaultNameInput] = useState('PrivateSpace');
+  const [vaultNameInput, setVaultNameInput] = useState('PSS');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -104,7 +107,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
       }
       setServerInput(parsed.serverUrl);
       if (parsed.vaultName) setVaultNameInput(parsed.vaultName);
-      onNotify('已识别配对节点，正在探测加密状态...');
+      onNotify('已识别节点配对信息，正在检测连通状态...');
       await probeEndpoint(parsed.serverUrl);
     } catch {
       onNotify('请长按输入框直接粘贴配对地址');
@@ -126,17 +129,17 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
     }
 
     if (password.length < 8) {
-      setFormError('唯一管理员主密码长度至少需要 8 位字符');
+      setFormError('主访问口令长度至少需要 8 位字符');
       return;
     }
 
     if (isSetupMode && password !== confirmPassword) {
-      setFormError('两次输入的管理员主密码不一致');
+      setFormError('两次输入的主访问口令不一致');
       return;
     }
 
     if (enableQuickPin && !/^\d{6}$/.test(quickPinInput)) {
-      setFormError('快捷解锁 PIN 码需为 6 位数字');
+      setFormError('快捷校验码需为 6 位数字');
       return;
     }
 
@@ -146,7 +149,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
       const session = isSetupMode
         ? await client.setupAdmin({
             password,
-            vaultName: vaultNameInput.trim() || 'PrivateSpace',
+            vaultName: vaultNameInput.trim() || 'PSS',
           })
         : await client.login(password);
 
@@ -159,7 +162,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
         quickPin: enableQuickPin ? quickPinInput : undefined,
       });
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : '认证失败，请检查网络或密码');
+      setFormError(err instanceof Error ? err.message : '认证失败，请检查网络或访问口令');
     } finally {
       setSubmitting(false);
     }
@@ -169,28 +172,42 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
     <div className="m-app-shell">
       <div className="m-auth-screen">
         <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
             <span className="m-crypto-badge">
-              <ShieldCheck size={13} />
-              <span>AES-256-GCM · Android 安全空间</span>
+              <MobilePssMark size={13} />
+              <span>PSS · Personal System Service</span>
             </span>
-            <button
-              id="m-auth-theme-toggle"
-              type="button"
-              className="m-icon-btn"
-              onClick={onToggleTheme}
-              aria-label="切换深浅色外观"
-            >
-              {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {onEnterCover && (
+                <button
+                  id="m-auth-enter-cover-btn"
+                  type="button"
+                  className="m-btn m-btn-soft m-btn-sm"
+                  onClick={onEnterCover}
+                  title="返回 PSS 工具页"
+                >
+                  <Calculator size={13} />
+                  <span>工具页</span>
+                </button>
+              )}
+              <button
+                id="m-auth-theme-toggle"
+                type="button"
+                className="m-icon-btn"
+                onClick={onToggleTheme}
+                aria-label="切换深浅色外观"
+              >
+                {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+              </button>
+            </div>
           </div>
 
           <div className="m-auth-hero">
             <h1 className="m-auth-title">
-              {isSetupMode ? '初始化私密空间' : 'PrivateSpace 手机端'}
+              {isSetupMode ? '初始化 PSS 节点' : 'PSS 节点连接'}
             </h1>
             <p className="m-auth-sub">
-              自部署、静态零明文存储的密码 (2FA)、原图相册、流式视频与 Markdown 笔记多端同步客户端。
+              自部署多端数据同步与服务节点客户端，请输入访问凭据建立会话。
             </p>
           </div>
 
@@ -231,7 +248,11 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                   value={serverInput}
                   onChange={(e) => {
                     const v = e.target.value;
-                    const maybePair = v.startsWith('privatespace://') ? parsePairingInput(v) : null;
+                    const lower = v.toLowerCase();
+                    const maybePair =
+                      lower.startsWith('privatespace://') || lower.startsWith('pss://')
+                        ? parsePairingInput(v)
+                        : null;
                     if (maybePair) {
                       setServerInput(maybePair.serverUrl);
                       if (maybePair.vaultName) setVaultNameInput(maybePair.vaultName);
@@ -240,7 +261,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                       setServerInput(v);
                     }
                   }}
-                  placeholder="https://vault.yourdomain.com 或 192.168.1.10:8080"
+                  placeholder="https://pss.yourdomain.com 或 192.168.1.10:8080"
                   autoCapitalize="none"
                   autoCorrect="off"
                 />
@@ -273,12 +294,12 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                     <CheckCircle2 size={14} />
                     <span>
                       {probeStatus.initialized
-                        ? `节点在线 · ${probeStatus.vaultName}`
-                        : '节点在线 · 待首次初始化管理员'}
+                        ? `节点在线 · ${probeStatus.vaultName === 'PrivateSpace' ? 'PSS' : probeStatus.vaultName}`
+                        : '节点在线 · 待首次初始化'}
                     </span>
                   </span>
                   <span className="mono" style={{ fontSize: '0.7rem' }}>
-                    {probeStatus.encryption.cipher}
+                    SYNC v2
                   </span>
                 </div>
                 {probeStatus.keyFingerprint && (
@@ -290,7 +311,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                       marginTop: 4,
                     }}
                   >
-                    主密钥指纹: {probeStatus.keyFingerprint}
+                    节点指纹: {probeStatus.keyFingerprint}
                   </div>
                 )}
               </div>
@@ -308,7 +329,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                     onClick={onEnterOfflineMode}
                   >
                     <WifiOff size={14} />
-                    <span>进入本机离线加密缓存模式</span>
+                    <span>进入本机离线缓存视图</span>
                   </button>
                 )}
               </div>
@@ -317,7 +338,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
             {isSetupMode && (
               <div className="m-field">
                 <label htmlFor="m-setup-vault-name" className="m-label">
-                  <span>私密空间名称</span>
+                  <span>节点显示名称</span>
                 </label>
                 <input
                   id="m-setup-vault-name"
@@ -326,14 +347,14 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                   value={vaultNameInput}
                   maxLength={48}
                   onChange={(e) => setVaultNameInput(e.target.value)}
-                  placeholder="例如：个人数字保险箱"
+                  placeholder="例如：PSS"
                 />
               </div>
             )}
 
             <div className="m-field">
               <label htmlFor="m-master-password-input" className="m-label">
-                <span>{isSetupMode ? '创建唯一管理员主密码 (≥8位)' : '唯一管理员主密码'}</span>
+                <span>{isSetupMode ? '创建主访问口令 (≥8位)' : '主访问口令'}</span>
                 {isSetupMode && password && (
                   <span className="mono" style={{ color: 'var(--m-accent)' }}>
                     {pwdEntropy.label} · {pwdEntropy.entropyBits}b
@@ -348,7 +369,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                   style={{ paddingRight: 42 }}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="输入主密码解封 256-bit DEK 信封"
+                  placeholder="输入节点访问口令"
                   autoComplete={isSetupMode ? 'new-password' : 'current-password'}
                 />
                 <button
@@ -356,7 +377,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                   className="m-icon-btn"
                   style={{ position: 'absolute', right: 3, top: 3 }}
                   onClick={() => setShowPassword((v) => !v)}
-                  aria-label="切换密码可见性"
+                  aria-label="切换口令可见性"
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -366,7 +387,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
             {isSetupMode && (
               <div className="m-field">
                 <label htmlFor="m-confirm-password-input" className="m-label">
-                  <span>确认管理员主密码</span>
+                  <span>确认主访问口令</span>
                 </label>
                 <input
                   id="m-confirm-password-input"
@@ -374,7 +395,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                   className="m-input"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="再次输入主密码防止误输"
+                  placeholder="再次输入口令防止误输"
                   autoComplete="new-password"
                 />
               </div>
@@ -397,14 +418,14 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                 }}
               >
                 <span style={{ fontSize: '0.8rem', fontWeight: 600 }}>
-                  设置本机 6 位快捷 PIN 解锁
+                  设置本机 6 位快捷校验码
                 </span>
                 <button
                   id="m-auth-pin-toggle"
                   type="button"
                   className={`m-toggle ${enableQuickPin ? 'is-on' : ''}`}
                   onClick={() => setEnableQuickPin((v) => !v)}
-                  aria-label="启用本机快捷 PIN 解锁"
+                  aria-label="启用本机快捷校验码"
                 />
               </div>
               {enableQuickPin && (
@@ -417,7 +438,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
                     className="m-input mono"
                     value={quickPinInput}
                     onChange={(e) => setQuickPinInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    placeholder="输入 6 位数字 PIN (存入 Android Keystore)"
+                    placeholder="输入 6 位数字校验码"
                   />
                 </div>
               )}
@@ -431,13 +452,13 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
               className="m-btn m-btn-primary m-btn-block"
               disabled={submitting}
             >
-              <Lock size={16} />
+              <KeyRound size={16} />
               <span>
                 {submitting
-                  ? '正在解封密钥并增量同步...'
+                  ? '正在验证并同步节点...'
                   : isSetupMode
-                    ? '初始化并解锁空间'
-                    : '解锁并同步私密空间'}
+                    ? '初始化并连接节点'
+                    : '验证并连接节点'}
               </span>
             </button>
           </form>
@@ -456,7 +477,7 @@ export const MobileAuthScreen: React.FC<MobileAuthScreenProps> = ({
             <span>当前设备标识：{deviceName}</span>
           </div>
           <div style={{ marginTop: 3 }}>
-            端到端零知识加密 (E2EE v2) · PBKDF2-SHA256 + HKDF · PSENC001 流媒体
+            PSS Sync Protocol v2 · TLS / AEAD 会话通道
           </div>
         </div>
       </div>

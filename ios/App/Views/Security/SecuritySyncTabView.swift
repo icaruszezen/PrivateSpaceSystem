@@ -10,10 +10,64 @@ struct SecuritySyncTabView: View {
     @State private var showingRenameAlert = false
     @State private var renamedVault = ""
     @State private var repoDraft = ""
+    @State private var disguiseCodeDraft = ""
 
     var body: some View {
         NavigationStack {
             List {
+                // 0. PSS Application Disguise & Camouflage
+                Section("应用伪装与图标脱敏 (PSS)") {
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.disguiseCoverEnabled },
+                            set: { store.setDisguiseCoverEnabled($0) }
+                        )
+                    ) {
+                        Label("启动时默认进入 PSS 数值换算工具页", systemImage: "function")
+                    }
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.disguiseAutoCoverOnBackground },
+                            set: { store.setDisguiseAutoCoverOnBackground($0) }
+                        )
+                    ) {
+                        Label("切回后台时自动恢复伪装封面", systemImage: "eye.slash")
+                    }
+
+                    Toggle(
+                        isOn: Binding(
+                            get: { store.disguiseGestureUnlockEnabled },
+                            set: { store.setDisguiseGestureUnlockEnabled($0) }
+                        )
+                    ) {
+                        Label("底部版本号连点 5 次手势唤出", systemImage: "hand.tap")
+                    }
+
+                    HStack {
+                        TextField("隐藏唤出口令 (3~16位)", text: $disguiseCodeDraft)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.caption, design: .monospaced))
+                        Button("保存口令") {
+                            if store.setDisguiseSecretCode(disguiseCodeDraft) {
+                                disguiseCodeDraft = store.disguiseSecretCode
+                                store.showToast("已更新隐藏唤出口令为 \(store.disguiseSecretCode)")
+                            } else {
+                                store.showToast("口令需为 3~16 位不含空格字符")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+
+                    Button {
+                        store.isDisguiseCoverActive = true
+                    } label: {
+                        Label("立即切换至 PSS 伪装工具页", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+
                 // 1. Multi-Device Incremental Sync & SSE Status
                 Section("多端实时增量同步 (Web / iOS / Android)") {
                     HStack {
@@ -205,7 +259,7 @@ struct SecuritySyncTabView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("iOS 系统密码与 2FA 自动填充已就绪", systemImage: "key.viewfinder")
                             .font(.subheadline.weight(.medium))
-                        Text("前往「系统设置 → 通用 → 自动填充与密码」勾选 PrivateSpace，即可在 Safari 与任意 App 中一键填充账号密码并自动复制动态口令。")
+                        Text("前往「系统设置 → 通用 → 自动填充与密码」勾选 PSS，即可在 Safari 与任意 App 中一键填充账号密码并自动复制动态口令。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

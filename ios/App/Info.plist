@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh-Hans</string>
     <key>CFBundleDisplayName</key>
-    <string>PrivateSpace</string>
+    <string>PSS</string>
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
@@ -38,11 +38,11 @@
         <true/>
     </dict>
     <key>NSFaceIDUsageDescription</key>
-    <string>使用面容 ID 快速解锁您的 PrivateSpace 本地加密保险箱与自动填充凭据。</string>
+    <string>使用面容 ID 快速完成 PSS 节点会话验证与系统自动填充。</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>选择照片或视频以通过 AES-256-GCM (PSENC001) 分块加密上传至您的自部署私密空间。</string>
+    <string>选择照片或视频文件以同步至您的 PSS 自托管节点。</string>
     <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>将已解密的私密相册原图导出保存至系统相册。</string>
+    <string>将 PSS 同步文件导出保存至系统媒体库。</string>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

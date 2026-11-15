@@ -1,18 +1,30 @@
 {
-  "name": "PrivateSpace iOS · 私密空间",
-  "short_name": "私密空间 iOS",
-  "description": "PrivateSpace iOS 18 全加密密码库 (2FA)、原图相册、HTTP 206 流式影院与 Markdown 笔记客户端",
+  "name": "PSS",
+  "short_name": "PSS",
+  "description": "PSS — Personal System & Sync Service",
   "start_url": "/ios",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#F6F4EF",
-  "theme_color": "#266454",
+  "background_color": "#F6F5F0",
+  "theme_color": "#1F4A40",
   "icons": [
     {
-      "src": "/favicon.svg",
+      "src": "/pss-icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/pss-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/pss-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]

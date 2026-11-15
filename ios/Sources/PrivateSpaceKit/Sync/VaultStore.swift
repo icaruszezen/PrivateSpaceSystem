@@ -65,10 +65,14 @@ public final class VaultStore {
     private static let keychainUpdateSourceModeKey = "app_update_source_mode"
     private static let keychainCustomGithubRepoKey = "app_custom_github_repo"
     private static let keychainSkippedVersionKey = "app_skipped_update_version"
+    private static let keychainDisguiseEnabledKey = "pss_disguise_cover_enabled"
+    private static let keychainDisguiseSecretKey = "pss_disguise_secret_code"
+    private static let keychainDisguiseAutoCoverKey = "pss_disguise_auto_cover_bg"
+    private static let keychainDisguiseGestureKey = "pss_disguise_gesture_unlock"
 
     public var phase: VaultLifecyclePhase = .launching
     public var serverURL: String
-    public var vaultName: String = "PrivateSpace"
+    public var vaultName: String = "PSS"
     public var keyFingerprint: String?
     public var snapshot: MobileVaultSnapshot = MobileVaultSnapshot()
 
@@ -80,13 +84,18 @@ public final class VaultStore {
     public var errorBanner: String?
     public var activeUploads: [UploadTaskStatus] = []
 
-    // Security & Privacy Settings
+    // Security, Privacy & PSS Disguise Settings
     public var biometricCapability: BiometricCapability = .none
     public var biometricUnlockEnabled: Bool = true
     public var autoLockTimeout: AutoLockTimeout = .oneMinute
     public var clipboardAutoExpireSeconds: Int = 30
     public var themePreference: AppThemePreference = .system
     public var isPrivacyShieldVisible: Bool = false
+    public var disguiseCoverEnabled: Bool = true
+    public var disguiseSecretCode: String = "2580"
+    public var disguiseAutoCoverOnBackground: Bool = true
+    public var disguiseGestureUnlockEnabled: Bool = true
+    public var isDisguiseCoverActive: Bool = true
 
     // Software Version & GitHub Release Auto-Update State
     public var autoCheckUpdatesEnabled: Bool = true
@@ -113,7 +122,7 @@ public final class VaultStore {
 
     public init(
         defaultServerURL: String = "http://127.0.0.1:8080",
-        deviceName: String = "iPhone · PrivateSpace iOS",
+        deviceName: String = "iPhone · PSS iOS",
         secretStore: SecretStoreProtocol = AppleKeychainStore(),
         localStore: EncryptedLocalVaultStore? = nil,
         biometricService: BiometricAuthService = BiometricAuthService(),
@@ -167,6 +176,20 @@ public final class VaultStore {
            !savedSkipped.isEmpty {
             self.skippedUpdateVersion = savedSkipped
         }
+        if let savedCoverEnabled = try? secretStore.readString(forKey: Self.keychainDisguiseEnabledKey) {
+            self.disguiseCoverEnabled = (savedCoverEnabled != "false")
+        }
+        if let savedSecret = try? secretStore.readString(forKey: Self.keychainDisguiseSecretKey),
+           savedSecret.count >= 3, savedSecret.count <= 16 {
+            self.disguiseSecretCode = savedSecret
+        }
+        if let savedAutoCover = try? secretStore.readString(forKey: Self.keychainDisguiseAutoCoverKey) {
+            self.disguiseAutoCoverOnBackground = (savedAutoCover != "false")
+        }
+        if let savedGesture = try? secretStore.readString(forKey: Self.keychainDisguiseGestureKey) {
+            self.disguiseGestureUnlockEnabled = (savedGesture != "false")
+        }
+        self.isDisguiseCoverActive = self.disguiseCoverEnabled
     }
 
     // MARK: - Boot, Server Probe, Setup, Login & Biometric Unlock
@@ -278,13 +301,14 @@ public final class VaultStore {
     public func unlockWithBiometrics() async {
         errorBanner = nil
         do {
+            let display = (vaultName == "PrivateSpace" || vaultName.isEmpty) ? "PSS" : vaultName
             let passed = try await biometricService.authenticate(
-                reason: "使用 \(biometricCapability.displayName) 解锁 \(vaultName)"
+                reason: "使用 \(biometricCapability.displayName) 验证 \(display) 会话"
             )
             guard passed else { return }
             try await unlockFromCachedAndSync()
         } catch {
-            errorBanner = "生物识别未通过，可输入管理员主密码解锁"
+            errorBanner = "生物识别未通过，可输入主访问口令验证"
         }
     }
 
@@ -337,6 +361,9 @@ public final class VaultStore {
     public func handleScenePhaseTransition(isActive: Bool) async {
         if !isActive {
             isPrivacyShieldVisible = true
+            if disguiseCoverEnabled && disguiseAutoCoverOnBackground {
+                isDisguiseCoverActive = true
+            }
             backgroundedAt = Date()
             stopRealtimeSyncStream()
         } else {
@@ -388,7 +415,7 @@ public final class VaultStore {
         securitySummary = nil
         activeSessions = []
         phase = .passwordLocked(vaultName: vaultName, fingerprint: keyFingerprint)
-        showToast("已注销当前设备并安全擦除本地加密缓存与密钥")
+        showToast("已注销当前设备并清理本地会话缓存")
     }
 
     public func setBiometricPreference(_ enabled: Bool) {
@@ -404,6 +431,42 @@ public final class VaultStore {
     public func setThemePreference(_ pref: AppThemePreference) {
         themePreference = pref
         try? secretStore.writeString(pref.rawValue, forKey: Self.keychainThemeKey)
+    }
+
+    public func setDisguiseCoverEnabled(_ enabled: Bool) {
+        disguiseCoverEnabled = enabled
+        try? secretStore.writeString(enabled ? "true" : "false", forKey: Self.keychainDisguiseEnabledKey)
+    }
+
+    public func setDisguiseAutoCoverOnBackground(_ enabled: Bool) {
+        disguiseAutoCoverOnBackground = enabled
+        try? secretStore.writeString(enabled ? "true" : "false", forKey: Self.keychainDisguiseAutoCoverKey)
+    }
+
+    public func setDisguiseGestureUnlockEnabled(_ enabled: Bool) {
+        disguiseGestureUnlockEnabled = enabled
+        try? secretStore.writeString(enabled ? "true" : "false", forKey: Self.keychainDisguiseGestureKey)
+    }
+
+    @discardableResult
+    public func setDisguiseSecretCode(_ rawCode: String) -> Bool {
+        let trimmed = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 3, trimmed.count <= 16, !trimmed.contains(" ") else {
+            return false
+        }
+        disguiseSecretCode = trimmed
+        try? secretStore.writeString(trimmed, forKey: Self.keychainDisguiseSecretKey)
+        return true
+    }
+
+    @discardableResult
+    public func attemptDisguiseUnlock(input: String) -> Bool {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == disguiseSecretCode || trimmed == "pss://unlock?code=\(disguiseSecretCode)" {
+            isDisguiseCoverActive = false
+            return true
+        }
+        return false
     }
 
     // MARK: - Software Version & GitHub Auto-Update Coordinator

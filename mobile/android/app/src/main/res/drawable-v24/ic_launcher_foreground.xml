@@ -4,19 +4,17 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Outer subtle safe-zone vault shield -->
+    <!-- Bauhaus geometric P monogram with evenOdd inner bowl cutout inside 66dp safe zone -->
     <path
-        android:fillColor="#F8F7F4"
-        android:pathData="M54,24 L78,34 L78,53 C78,69.5 67.6,81.4 54,86 C40.4,81.4 30,69.5 30,53 L30,34 Z" />
-    <!-- Inner Mineral Pine cutout -->
+        android:fillColor="#F6F5F0"
+        android:fillType="evenOdd"
+        android:pathData="M34.6,33.7 C34.6,31.7 36.2,30.1 38.2,30.1 L52.0,30.1 C57.5,30.1 62.0,34.6 62.0,40.1 L62.0,41.7 C62.0,47.2 57.5,51.7 52.0,51.7 L41.8,51.7 L41.8,74.3 C41.8,76.3 40.2,77.9 38.2,77.9 C36.2,77.9 34.6,76.3 34.6,74.3 Z M41.8,36.9 L41.8,45.0 L50.8,45.0 C53.0,45.0 54.8,43.2 54.8,40.95 C54.8,38.7 53.0,36.9 50.8,36.9 Z" />
+    <!-- Active telemetry status dot -->
     <path
-        android:fillColor="#1D4E41"
-        android:pathData="M54,30.5 L72,38 L72,52.8 C72,65.6 64.2,75.2 54,79.2 C43.8,75.2 36,65.6 36,52.8 L36,38 Z" />
-    <!-- Keyhole circle + stem in Warm Paper & Mineral Gold accent -->
+        android:fillColor="#89C4B2"
+        android:pathData="M67.5,30.9 A3.6,3.6 0 1,1 67.49,30.9 Z" />
+    <!-- Bottom active sync channel bar -->
     <path
-        android:fillColor="#E5B567"
-        android:pathData="M54,44 A6.5,6.5 0 1,1 53.99,44 Z" />
-    <path
-        android:fillColor="#F8F7F4"
-        android:pathData="M51.2,50 L56.8,50 L58.2,65 L49.8,65 Z" />
+        android:fillColor="#89C4B2"
+        android:pathData="M50.0,70.7 L70.4,70.7 A3.6,3.6 0 0,1 74.0,74.3 L74.0,74.3 A3.6,3.6 0 0,1 70.4,77.9 L50.0,77.9 A3.6,3.6 0 0,1 46.4,74.3 L46.4,74.3 A3.6,3.6 0 0,1 50.0,70.7 Z" />
 </vector>

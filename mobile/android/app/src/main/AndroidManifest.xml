@@ -26,20 +26,23 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Android System Share Sheet -> Encrypted Vault Note -->
+            <!-- Android System Share Sheet -> PSS Quick Note -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
 
-            <!-- Quick-Pair URI scheme: privatespace://pair?server=...&vault=... -->
+            <!-- Quick-Pair URI scheme: pss://pair?server=... & privatespace://pair?server=... -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
                     android:scheme="@string/custom_url_scheme"
+                    android:host="pair" />
+                <data
+                    android:scheme="@string/pss_url_scheme"
                     android:host="pair" />
             </intent-filter>
 

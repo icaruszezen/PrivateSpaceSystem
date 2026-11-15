@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Delete, Fingerprint, KeyRound, ShieldCheck } from 'lucide-react';
+import { Calculator, Delete, Fingerprint, KeyRound } from 'lucide-react';
 import { androidBridge, quickLockManager } from '../nativeBridge';
+import { MobilePssMark } from './MobileDisguiseCover';
 
 interface MobilePinLockScreenProps {
   vaultName: string;
   biometricAvailable: boolean;
   biometricEnabled: boolean;
+  onEnterCover?: () => void;
   onUnlockedWithToken: (token: string) => Promise<void>;
   onFallbackMasterPassword: () => void;
 }
@@ -14,12 +16,15 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
   vaultName,
   biometricAvailable,
   biometricEnabled,
+  onEnterCover,
   onUnlockedWithToken,
   onFallbackMasterPassword,
 }) => {
   const [pin, setPin] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
+
+  const displayTitle = !vaultName || vaultName === 'PrivateSpace' ? 'PSS' : vaultName;
 
   const handleBiometric = async () => {
     setError(null);
@@ -28,7 +33,7 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
       androidBridge.haptic('success');
       await onUnlockedWithToken(token);
     } else {
-      setError('生物识别未通过，请输入 6 位快捷 PIN');
+      setError('生物识别未通过，请输入 6 位校验码');
     }
   };
 
@@ -52,7 +57,7 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
         const token = await quickLockManager.verifyPinAndRestoreToken(next);
         if (!token) {
           androidBridge.haptic('warning');
-          setError('PIN 码不正确，请重试');
+          setError('校验码不正确，请重试');
           setPin('');
           return;
         }
@@ -75,15 +80,15 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
       <div className="m-auth-screen" style={{ justifyContent: 'center', textAlign: 'center' }}>
         <div>
           <span className="m-crypto-badge">
-            <ShieldCheck size={13} />
-            <span>Android Keystore 硬件保护已就绪</span>
+            <MobilePssMark size={13} />
+            <span>PSS · 本机硬件校验</span>
           </span>
           <h1 className="m-auth-title" style={{ marginTop: 14 }}>
-            解锁 {vaultName}
+            验证 {displayTitle}
           </h1>
-          <p className="m-auth-sub">请输入 6 位快捷 PIN 码或验证生物识别</p>
+          <p className="m-auth-sub">请输入 6 位快捷校验码或验证生物识别</p>
 
-          <div className="m-pin-dots" aria-label="PIN 输入进度">
+          <div className="m-pin-dots" aria-label="校验码输入进度">
             {[0, 1, 2, 3, 4, 5].map((idx) => (
               <span key={idx} className={`m-pin-dot ${pin.length > idx ? 'is-filled' : ''}`} />
             ))}
@@ -114,7 +119,7 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
                 className="m-pin-key"
                 style={{ color: 'var(--m-accent)' }}
                 onClick={() => void handleBiometric()}
-                aria-label="指纹或面容解锁"
+                aria-label="指纹或面容验证"
               >
                 <Fingerprint size={24} />
               </button>
@@ -140,16 +145,36 @@ export const MobilePinLockScreen: React.FC<MobilePinLockScreenProps> = ({
             </button>
           </div>
 
-          <button
-            id="m-pin-fallback-master-btn"
-            type="button"
-            className="m-btn m-btn-sm"
-            style={{ marginTop: 26 }}
-            onClick={onFallbackMasterPassword}
+          <div
+            style={{
+              display: 'flex',
+              justifyContent: 'center',
+              gap: 8,
+              flexWrap: 'wrap',
+              marginTop: 26,
+            }}
           >
-            <KeyRound size={14} />
-            <span>改用管理员主密码登录</span>
-          </button>
+            <button
+              id="m-pin-fallback-master-btn"
+              type="button"
+              className="m-btn m-btn-sm"
+              onClick={onFallbackMasterPassword}
+            >
+              <KeyRound size={14} />
+              <span>改用主访问口令验证</span>
+            </button>
+            {onEnterCover && (
+              <button
+                id="m-pin-enter-cover-btn"
+                type="button"
+                className="m-btn m-btn-soft m-btn-sm"
+                onClick={onEnterCover}
+              >
+                <Calculator size={14} />
+                <span>返回工具页</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>

@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core';
 import {
   CheckCircle2,
   Download,
+  EyeOff,
   Film,
   FileText,
   Image as ImageIcon,
@@ -19,6 +20,11 @@ import {
   CURRENT_APP_VERSION,
   DEFAULT_ANDROID_APP_ID,
 } from '@shared/appUpdate';
+import {
+  loadDisguisePreferences,
+  saveDisguisePreferences,
+  type DisguisePreferences,
+} from '@shared/disguise';
 import type {
   AppUpdateCheckResponse,
   CreateNoteRequest,
@@ -35,6 +41,7 @@ import type {
   UpdatePasswordRequest,
 } from '@shared/types';
 import { MobileAuthScreen } from './src/components/MobileAuthScreen';
+import { MobileDisguiseCover, MobilePssMark } from './src/components/MobileDisguiseCover';
 import { MobileNotesTab } from './src/components/MobileNotesTab';
 import { MobilePasswordsTab } from './src/components/MobilePasswordsTab';
 import { MobilePhotosTab } from './src/components/MobilePhotosTab';
@@ -67,6 +74,7 @@ const LS_VAULT_NAME = 'pss_android_vault_name';
 const LS_THEME = 'pss_android_theme';
 const LS_CLIP_CLEAR = 'pss_android_clip_autoclear';
 const LS_UPDATE_PREFS = 'pss_android_update_prefs_v1';
+const LS_DISGUISE_PREFS = 'pss_android_disguise_prefs_v1';
 
 function resolveDefaultServerUrl(): string {
   if (typeof localStorage !== 'undefined') {
@@ -91,7 +99,7 @@ export default function PrivateSpaceMobileApp() {
   const [stage, setStage] = useState<AppStage>('booting');
   const [serverUrl, setServerUrl] = useState<string>(resolveDefaultServerUrl);
   const [vaultName, setVaultName] = useState<string>(() =>
-    (typeof localStorage !== 'undefined' && localStorage.getItem(LS_VAULT_NAME)) || 'PrivateSpace',
+    (typeof localStorage !== 'undefined' && localStorage.getItem(LS_VAULT_NAME)) || 'PSS',
   );
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(LS_THEME) : null;
@@ -101,11 +109,17 @@ export default function PrivateSpaceMobileApp() {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(LS_CLIP_CLEAR) : null;
     return saved !== 'false';
   });
+  const [disguisePrefs, setDisguisePrefs] = useState<DisguisePreferences>(() =>
+    loadDisguisePreferences(LS_DISGUISE_PREFS),
+  );
+  const [isCoverActive, setIsCoverActive] = useState<boolean>(
+    () => loadDisguisePreferences(LS_DISGUISE_PREFS).enabled,
+  );
 
   const [deviceMeta, setDeviceMeta] = useState<NativeDeviceMetadata>({
     isNativeAndroid: false,
     platform: 'android',
-    deviceName: 'Android · PrivateSpace',
+    deviceName: 'Android · PSS',
     sdkInt: 35,
     biometricAvailable: false,
     screenshotProtected: true,
@@ -158,7 +172,27 @@ export default function PrivateSpaceMobileApp() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem(LS_THEME, theme);
+    document.title = 'PSS';
   }, [theme]);
+
+  const handleDisguisePrefsChange = useCallback((next: DisguisePreferences) => {
+    const saved = saveDisguisePreferences(next, LS_DISGUISE_PREFS);
+    setDisguisePrefs(saved);
+  }, []);
+
+  useEffect(() => {
+    const onVis = () => {
+      if (
+        document.visibilityState === 'hidden' &&
+        disguisePrefs.enabled &&
+        disguisePrefs.autoCoverOnBackground
+      ) {
+        setIsCoverActive(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [disguisePrefs.autoCoverOnBackground, disguisePrefs.enabled]);
 
   const persistence = useMemo(
     () => new IndexedDbVaultPersistence(serverUrl || 'default_server'),
@@ -335,7 +369,8 @@ export default function PrivateSpaceMobileApp() {
 
       if (
         payload.mimeType === 'application/x-privatespace-pair' ||
-        rawText.toLowerCase().startsWith('privatespace://')
+        rawText.toLowerCase().startsWith('privatespace://') ||
+        rawText.toLowerCase().startsWith('pss://')
       ) {
         const pair = parsePairingInput(rawText);
         if (pair) {
@@ -698,14 +733,27 @@ export default function PrivateSpaceMobileApp() {
 
   // ==================== Stage Views ====================
 
+  if (isCoverActive) {
+    return (
+      <MobileDisguiseCover
+        theme={theme}
+        prefs={disguisePrefs}
+        deviceMeta={deviceMeta}
+        defaultProbeUrl={serverUrl}
+        onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+        onUnlockCover={() => setIsCoverActive(false)}
+      />
+    );
+  }
+
   if (stage === 'booting') {
     return (
       <div className="m-app-shell" style={{ justifyContent: 'center', alignItems: 'center' }}>
         <div className="m-brand-mark" style={{ width: 48, height: 48, borderRadius: 14 }}>
-          <ShieldCheck size={24} />
+          <MobilePssMark size={24} />
         </div>
         <div style={{ marginTop: 12, fontSize: '0.88rem', color: 'var(--m-text-secondary)' }}>
-          正在启动 Android 零知识加密空间...
+          正在加载 PSS 服务组件...
         </div>
       </div>
     );
@@ -717,6 +765,7 @@ export default function PrivateSpaceMobileApp() {
         vaultName={vaultName}
         biometricAvailable={deviceMeta.biometricAvailable}
         biometricEnabled={Boolean(quickLockCfg?.biometricEnabled)}
+        onEnterCover={() => setIsCoverActive(true)}
         onUnlockedWithToken={async (restoredToken) => {
           await client.setSessionToken(restoredToken);
           if (!client.hasUnlockedKey()) {
@@ -741,6 +790,7 @@ export default function PrivateSpaceMobileApp() {
           hasOfflineCache={hasOfflineCache}
           theme={theme}
           onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+          onEnterCover={() => setIsCoverActive(true)}
           onAuthenticated={async ({ serverUrl: nextUrl, vaultName: vName, quickPin }) => {
             setServerUrl(nextUrl);
             setVaultName(vName);
@@ -775,7 +825,7 @@ export default function PrivateSpaceMobileApp() {
               setIsOfflineMode(true);
               await refreshPendingCount();
               setStage('unlocked');
-              notify('已进入离线加密缓存视图');
+              notify('已进入本机离线缓存视图');
             }
           }}
           onNotify={notify}
@@ -798,10 +848,12 @@ export default function PrivateSpaceMobileApp() {
       <header className="m-topbar">
         <div className="m-topbar-brand">
           <div className="m-brand-mark">
-            <ShieldCheck size={18} />
+            <MobilePssMark size={18} />
           </div>
           <div className="m-topbar-titles">
-            <h1 className="m-topbar-title">{vaultName}</h1>
+            <h1 className="m-topbar-title">
+              {vaultName === 'PrivateSpace' ? 'PSS' : vaultName}
+            </h1>
             <div className="m-sync-status">
               <span
                 className={`m-sync-dot ${
@@ -820,6 +872,16 @@ export default function PrivateSpaceMobileApp() {
         </div>
 
         <div className="m-topbar-actions">
+          <button
+            id="m-top-cover-btn"
+            type="button"
+            className="m-icon-btn"
+            onClick={() => setIsCoverActive(true)}
+            aria-label="切换至 PSS 工具页"
+            title="立即切换至 PSS 伪装工具页"
+          >
+            <EyeOff size={17} />
+          </button>
           <button
             id="m-top-sync-btn"
             type="button"
@@ -843,7 +905,7 @@ export default function PrivateSpaceMobileApp() {
             type="button"
             className="m-icon-btn"
             onClick={() => void handleLockApp()}
-            aria-label="锁定私密空间"
+            aria-label="锁定会话"
           >
             <Lock size={17} />
           </button>
@@ -968,6 +1030,9 @@ export default function PrivateSpaceMobileApp() {
             notes={noteList}
             passwords={passwordList}
             media={mediaList}
+            disguisePrefs={disguisePrefs}
+            onDisguisePrefsChange={handleDisguisePrefsChange}
+            onActivateCoverNow={() => setIsCoverActive(true)}
             updatePrefs={updatePrefs}
             updateInfo={updateInfo}
             checkingUpdate={checkingUpdate}
