@@ -4,6 +4,41 @@
 
 一个自部署、现代简洁、**端到端零知识加密（Zero-Knowledge E2EE v2）** 的个人 **文本、密码、图片、视频** 存储与 **网页 / Android / iOS** 多端同步空间。
 
+## 应用界面预览
+
+### 1. 桌面网页工作台（四大零知识加密空间 + 安全审计）
+
+![零知识密码保险箱工作台](docs/screenshots/web-passwords-vault.png)
+
+| Markdown 分栏笔记（交互式待办与实时预览） | `PSENC001` 分块加密相册（本地加密缩略图） |
+| :---: | :---: |
+| ![加密文本记录分栏编辑与预览](docs/screenshots/web-notes-split.png) | ![客户端分块加密图库](docs/screenshots/web-photos-gallery.png) |
+
+| 私密视频影院（`HTTP 206` 按需分块解密流式播放） | 零知识安全中心（`AES-256-GCM` 密文信封实时透视） |
+| :---: | :---: |
+| ![私密视频流式解密影院](docs/screenshots/web-videos-cinema.png) | ![零知识密文信封透视](docs/screenshots/web-security-cipher.png) |
+
+### 2. 双层隐蔽伪装与多端实时同步（Web「松间手记」+ 移动端 `PSS` 系统工具）
+
+| 未登录默认伪装静态文集「松间手记」 | 快捷键 / 暗语唤醒「作者后台验证」 |
+| :---: | :---: |
+| ![松间手记静态伪装首页](docs/screenshots/web-disguise-journal.png) | ![作者后台口令验证窗口](docs/screenshots/web-author-portal.png) |
+
+| 移动端 `PSS` 系统工具伪装层 | Android 客户端（深色模式 · 实时 TOTP） | Apple iOS 客户端（加密相册与游标同步） |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/mobile-pss-disguise.png" width="260" alt="移动端 PSS 数值换算与节点探测伪装页" /> | <img src="docs/screenshots/mobile-android-vault.png" width="260" alt="Android 零知识密码库与实时 TOTP" /> | <img src="docs/screenshots/mobile-ios-photos.png" width="260" alt="iOS 端 PSENC001 加密相册" /> |
+
+<details>
+<summary>展开查看：多端在线设备管理、配对码与 GitHub Releases 自动更新网关</summary>
+
+<br />
+
+![多端同步与自动更新中心](docs/screenshots/web-multidevice-sync.png)
+
+</details>
+
+---
+
 ## 核心安全与能力全景
 
 - **端到端零知识加密（`ZERO_KNOWLEDGE_E2EE_V2`）—— 即使部署服务器密码/Root 权限泄露也不泄密**：
@@ -18,8 +53,9 @@
   2. **密码保险箱（Passwords）**：客户端加密存储站点、账号、密码、**RFC 6238 动态两步验证码（TOTP `SHA-1` / `SHA-256` 实时倒计时环）**、自定义隐藏字段与最近 15 次历史密码版本；内置 **无偏拒绝采样 CSPRNG 随机密码与助记词组生成器**、**安全健康度审计面板**（弱口令、重复密码、未启用 2FA 筛选）以及主流密码管理器 CSV 本地加密批量导入。
   3. **加密相册（Images）**：支持拖拽、手机相机直拍与 `PhotosPicker` 多图客户端加密上传、客户端纯本地探测 PNG/JPEG/GIF/WebP 尺寸与生成加密缩略图、加密相册分类管理、**暗房级灯箱预览**（缩放、90° 旋转、镜像翻转、幻灯片播放、信息编辑）与 `.psenc` 分块密文透视。
   4. **私密视频影院（Videos）**：支持大文件 **客户端分片加密断点续传 + SHA-256 完整性校验**、客户端封面帧提取加密，以及 **`PSENC001` HTTP `206` 客户端按需分块解密流式播放**（倍速、`±10s` 快进退、循环、画中画 PiP）。
-- **未登录官网隐蔽伪装层（Stealth Editorial Disguise）**：
-  - 未登录访问 `/` 时默认伪装为可正常阅读、检索与分类浏览的个人阅读与工程静态文集 **「松间手记」**，浏览器标题、Favicon、Manifest、首屏 DOM 及初始网络请求均零私密空间特征暴露；本人可通过 **连点左上角站点标题/页脚版权 5 次**、**`Ctrl/Cmd + Shift + L` 快捷键** 或在搜索框输入唤醒暗语（默认 `:unlock`）唤出低调的「作者后台」口令验证框，解锁后亦支持 `Ctrl/Cmd + Shift + L` 一键紧急锁定切回手记页，并可在「安全中心 → 首页伪装」自定义站点名与暗语。
+- **全平台双层隐蔽伪装体系（Web「松间手记」+ 移动端 `PSS` 系统工具）**：
+  - **桌面网页端静态文集伪装**：未登录访问 `/` 时默认伪装为可正常阅读、检索与分类浏览的个人阅读与工程静态文集 **「松间手记」**，浏览器标题、Favicon、Manifest、首屏 DOM 及初始网络请求均零私密空间特征暴露；本人可通过 **连点左上角站点标题/页脚版权 5 次**、**`Ctrl/Cmd + Shift + L` 快捷键** 或在搜索框输入唤醒暗语（默认 `:unlock`）唤出低调的「作者后台」口令验证框，解锁后亦支持 `Ctrl/Cmd + Shift + L` 一键紧急锁定切回手记页。
+  - **Android & iOS 移动端 `PSS` 工具伪装**：移动端应用图标与名称脱敏为 **`PSS`（Personal System Service）**，默认启动呈现程序员进制/字节换算与节点延迟探测工具封面，输入自定义暗码（默认 `2580`）或连点底部版本号 5 次即可进入保险库，切入后台可自动恢复伪装层。
 - **Android 原生手机客户端（[`mobile/`](mobile/README.md)，`com.privatespace.mobile`）**：
   - 基于 **Capacitor 6 + Kotlin 原生安全插件** 构建，支持 **`AndroidKeyStore` 硬件级 `AES-256-GCM` 封装 `{ token, dek }`、`BiometricPrompt` 指纹/面容零知识快锁、`FLAG_SECURE` 防截屏与多任务遮蔽、Android 13+ 敏感剪贴板隐私遮罩与 30s 自动擦除、系统分享直存加密笔记、`privatespace://pair?...` 一键配对、离线加密队列重放与相机直拍 `.psenc` 入库**；服务端亦在 `/mobile/` 托管移动端伴侣包。
 - **完备的 Apple iOS 客户端体系（原生 SwiftUI + `/ios` 独立应用）**：
