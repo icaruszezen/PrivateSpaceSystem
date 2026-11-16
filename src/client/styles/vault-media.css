@@ -289,6 +289,13 @@
 
 .pss-pwd-card {
   padding: 10px 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pss-pwd-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .pss-pwd-card-row {
@@ -357,6 +364,52 @@
   min-width: 0;
 }
 
+.pss-pwd-card-right-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.pss-card-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.pss-pwd-card:hover .pss-card-quick-actions,
+.pss-pwd-card:focus-within .pss-card-quick-actions,
+.pss-pwd-card.is-selected .pss-card-quick-actions {
+  opacity: 1;
+}
+
+.pss-quick-copy-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.pss-quick-copy-btn:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+.pss-quick-copy-btn.is-copied {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
 .pss-pwd-card-cat {
   font-size: 0.7rem;
   color: var(--text-tertiary);
@@ -393,6 +446,11 @@
   border-radius: 4px;
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.pss-2fa-mini.is-invalid {
+  background: var(--amber-soft);
+  color: var(--amber);
 }
 
 /* Column 3: Vault Empty Onboarding & Detail Pane */
@@ -517,6 +575,17 @@
   white-space: nowrap;
 }
 
+.pss-detail-2fa-pill {
+  font-size: 0.7rem;
+  font-weight: 580;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
 .pss-detail-actions {
   display: flex;
   align-items: center;
@@ -524,33 +593,49 @@
   flex-shrink: 0;
 }
 
-/* Live TOTP Card */
+/* Optional Live TOTP Card (shown below primary credentials only when configured) */
 .pss-totp-card {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
-  padding: 15px 20px;
+  padding: 13px 18px;
   border-radius: var(--radius-md);
   background: var(--accent-soft);
   border: 1px solid var(--accent-border);
 }
 
+.pss-totp-label-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
 .pss-totp-label {
-  font-size: 0.76rem;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--accent);
 }
 
+.pss-totp-opt-tag {
+  font-size: 0.67rem;
+  font-weight: 540;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent-border);
+  color: var(--text-secondary);
+}
+
 .pss-totp-code {
-  display: inline-block;
-  font-size: 1.68rem;
-  font-weight: 740;
+  display: block;
+  font-size: 1.54rem;
+  font-weight: 720;
   letter-spacing: 0.08em;
   font-variant-numeric: tabular-nums;
   color: var(--text-primary);
-  margin-top: 2px;
+  margin-top: 3px;
   text-align: left;
   transition: color var(--transition-fast);
 }
@@ -571,6 +656,40 @@
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
   min-width: 24px;
+}
+
+.pss-totp-invalid-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  border-radius: var(--radius-md);
+  background: var(--amber-soft);
+  border: 1px solid hsla(30, 76%, 42%, 0.28);
+}
+
+.pss-totp-invalid-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  flex: 1;
+  min-width: 220px;
+}
+
+.pss-totp-invalid-text strong {
+  display: block;
+  font-size: 0.84rem;
+  font-weight: 620;
+  color: var(--text-primary);
+}
+
+.pss-totp-invalid-text p {
+  margin: 2px 0 0;
+  font-size: 0.77rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
 }
 
 /* Credentials & Section Cards */
@@ -651,6 +770,19 @@
   color: var(--text-secondary);
 }
 
+.pss-field-value.is-empty {
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+}
+
+.pss-detail-strength-bars {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  max-width: 176px;
+  margin-top: 7px;
+}
+
 .pss-entropy-pill {
   font-family: var(--font-mono);
   font-size: 0.69rem;
@@ -728,13 +860,13 @@
 }
 
 .pss-editor-form-body {
-  gap: 14px;
-  padding: 18px 22px;
+  gap: 13px;
+  padding: 16px 22px;
 }
 
 .pss-form-grid-title {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 156px;
+  grid-template-columns: minmax(0, 1fr) 152px;
   gap: 12px;
 }
 
@@ -744,23 +876,227 @@
   gap: 12px;
 }
 
+.pss-label-opt {
+  font-size: 0.71rem;
+  font-weight: 450;
+  color: var(--text-tertiary);
+}
+
 .pss-modal-input {
-  height: 38px;
-  font-size: 0.9rem;
+  height: 37px;
+  font-size: 0.89rem;
 }
 
 .pss-modal-input.is-sm {
   height: 34px;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
   padding: 0 10px;
 }
 
 .pss-modal-textarea {
-  min-height: 74px;
-  padding: 9px 12px;
-  font-size: 0.89rem;
-  line-height: 1.55;
+  min-height: 58px;
+  padding: 8px 12px;
+  font-size: 0.87rem;
+  line-height: 1.5;
   resize: vertical;
+}
+
+/* Optional 2FA Switch Card in Modal */
+.pss-optional-card {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-list);
+  transition:
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.pss-optional-card.is-enabled {
+  border-color: var(--accent-border);
+  background: var(--bg-canvas);
+}
+
+.pss-optional-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pss-optional-head-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.pss-optional-title-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pss-opt-pill {
+  font-size: 0.68rem;
+  font-weight: 550;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-tertiary);
+}
+
+.pss-opt-pill.is-accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pss-optional-desc {
+  margin: 2px 0 0;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+
+.pss-switch {
+  position: relative;
+  width: 38px;
+  height: 21px;
+  border-radius: 999px;
+  padding: 2px;
+  background: var(--border-default);
+  border: none;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color var(--transition-fast);
+}
+
+.pss-switch.is-on {
+  background: var(--accent);
+}
+
+.pss-switch-thumb {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+  transform: translateX(0);
+  transition: transform var(--transition-fast);
+}
+
+.pss-switch.is-on .pss-switch-thumb {
+  transform: translateX(17px);
+}
+
+.pss-optional-body {
+  padding: 11px 14px 13px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.pss-totp-live-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 7px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+}
+
+.pss-totp-live-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pss-totp-live-badge {
+  font-size: 0.69rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.pss-totp-live-code {
+  font-size: 0.96rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-primary);
+}
+
+.pss-totp-live-meta {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.pss-totp-inline-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  color: var(--amber);
+  font-size: 0.76rem;
+}
+
+.pss-totp-inline-hint {
+  font-size: 0.74rem;
+  color: var(--text-tertiary);
+  line-height: 1.45;
+}
+
+.pss-totp-removed-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 14px 10px;
+  border-top: 1px dashed var(--border-subtle);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* Collapsible Extras Disclosure in Modal */
+.pss-extras-section {
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-list);
+}
+
+.pss-extras-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 13px;
+  font-size: 0.81rem;
+  font-weight: 560;
+  color: var(--text-secondary);
+  background: transparent;
+  text-align: left;
+  transition: color var(--transition-fast);
+}
+
+.pss-extras-toggle:hover {
+  color: var(--text-primary);
+}
+
+.pss-extras-body {
+  padding: 11px 14px 13px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .pss-custom-fields-stack {

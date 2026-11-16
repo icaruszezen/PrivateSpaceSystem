@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Edit3,
   ExternalLink,
@@ -24,7 +27,7 @@ import {
   generateMemorablePassphrase,
   generateSecurePassword,
 } from '@shared/passwordGenerator';
-import { generateTotp } from '@shared/totp';
+import { parseTotpInput, tryGenerateTotp } from '@shared/totp';
 import type {
   CreatePasswordRequest,
   ImportPasswordEntryInput,
@@ -60,8 +63,8 @@ interface MobilePasswordsTabProps {
   onClearInitialDraft?: () => void;
 }
 
-type CategoryChip = 'all' | 'starred' | 'trash' | PasswordCategory;
-type AuditChip = 'none' | 'weak' | 'reused' | 'no2fa';
+type CategoryChip = 'all' | 'starred' | 'has2fa' | 'trash' | PasswordCategory;
+type AuditChip = 'none' | 'weak' | 'reused' | 'stale';
 
 export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
   passwords,
@@ -100,10 +103,13 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
   const [fTitle, setFTitle] = useState('');
   const [fUsername, setFUsername] = useState('');
   const [fPassword, setFPassword] = useState('');
+  const [fShowPwd, setFShowPwd] = useState(true);
   const [fUrl, setFUrl] = useState('');
+  const [fEnableTotp, setFEnableTotp] = useState(false);
   const [fTotp, setFTotp] = useState('');
   const [fCategory, setFCategory] = useState<PasswordCategory>('login');
   const [fNotes, setFNotes] = useState('');
+  const [fShowExtras, setFShowExtras] = useState(false);
   const [fTags, setFTags] = useState('');
   const [fPinned, setFPinned] = useState(false);
   const [fCustomFields, setFCustomFields] = useState<PasswordCustomField[]>([]);
@@ -124,11 +130,6 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
   );
 
   const csvRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, []);
 
   useEffect(() => {
     if (initialDraft) {
@@ -180,13 +181,15 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
     phraseSep,
   ]);
 
-  const audit = useMemo(() => auditPasswordVault(passwords, nowMs), [passwords, nowMs]);
+  const audit = useMemo(() => auditPasswordVault(passwords), [passwords]);
+  const totpSet = useMemo(() => new Set(audit.totpIds), [audit.totpIds]);
+  const invalidTotpSet = useMemo(() => new Set(audit.invalidTotpIds), [audit.invalidTotpIds]);
 
   const visiblePasswords = useMemo(() => {
     const q = search.trim().toLowerCase();
     const weakSet = new Set(audit.weakIds);
     const reusedSet = new Set(audit.reusedIds);
-    const no2faSet = new Set(audit.missingTotpIds);
+    const staleSet = new Set(audit.staleIds);
 
     return passwords
       .filter((item) => {
@@ -195,14 +198,20 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
         } else {
           if (item.isTrashed) return false;
           if (catFilter === 'starred' && !item.isPinned) return false;
-          if (catFilter !== 'all' && catFilter !== 'starred' && item.category !== catFilter) {
+          if (catFilter === 'has2fa' && !totpSet.has(item.id)) return false;
+          if (
+            catFilter !== 'all' &&
+            catFilter !== 'starred' &&
+            catFilter !== 'has2fa' &&
+            item.category !== catFilter
+          ) {
             return false;
           }
         }
 
         if (auditFilter === 'weak' && !weakSet.has(item.id)) return false;
         if (auditFilter === 'reused' && !reusedSet.has(item.id)) return false;
-        if (auditFilter === 'no2fa' && !no2faSet.has(item.id)) return false;
+        if (auditFilter === 'stale' && !staleSet.has(item.id)) return false;
 
         if (q) {
           const hit =
@@ -218,21 +227,38 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
         return b.updatedAt.localeCompare(a.updatedAt);
       });
-  }, [passwords, catFilter, auditFilter, search, audit]);
+  }, [passwords, catFilter, auditFilter, search, audit, totpSet]);
 
   const detailItem = useMemo(
     () => (detailId ? passwords.find((p) => p.id === detailId) ?? null : null),
     [passwords, detailId],
   );
 
+  // Only tick the 1s clock when at least one visible card, detail sheet, or active editor uses TOTP
+  const needsTotpClock = useMemo(() => {
+    if (editorState.open && fEnableTotp && Boolean(fTotp.trim())) return true;
+    if (detailItem && totpSet.has(detailItem.id)) return true;
+    return visiblePasswords.some((item) => totpSet.has(item.id));
+  }, [editorState.open, fEnableTotp, fTotp, detailItem, visiblePasswords, totpSet]);
+
+  useEffect(() => {
+    if (!needsTotpClock) return;
+    setNowMs(Date.now());
+    const t = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [needsTotpClock]);
+
   function openCreateEditor(draft?: { title?: string; url?: string; notes?: string }) {
     setFTitle(draft?.title ?? '');
     setFUsername('');
-    setFPassword(generateSecurePassword({ length: 20 }));
+    setFPassword('');
+    setFShowPwd(true);
     setFUrl(draft?.url ?? '');
+    setFEnableTotp(false);
     setFTotp('');
     setFCategory('login');
     setFNotes(draft?.notes ?? '');
+    setFShowExtras(false);
     setFTags('');
     setFPinned(false);
     setFCustomFields([]);
@@ -240,23 +266,51 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
   }
 
   function openEditEditor(item: PasswordItem) {
+    const hasTotp = Boolean(item.totpSecret?.trim());
     setFTitle(item.title);
     setFUsername(item.username);
     setFPassword(item.password);
+    setFShowPwd(false);
     setFUrl(item.url);
+    setFEnableTotp(hasTotp);
     setFTotp(item.totpSecret);
     setFCategory(item.category);
     setFNotes(item.notes);
+    setFShowExtras(item.tags.length > 0 || item.customFields.length > 0);
     setFTags(item.tags.join(', '));
     setFPinned(item.isPinned);
     setFCustomFields(item.customFields.map((cf) => ({ ...cf })));
     setEditorState({ open: true, editing: item });
   }
 
+  const editorTotpValidation = useMemo(() => {
+    if (!fEnableTotp || !fTotp.trim()) {
+      return { valid: false, error: null as string | null };
+    }
+    try {
+      parseTotpInput(fTotp);
+      return { valid: true, error: null as string | null };
+    } catch (err) {
+      return {
+        valid: false,
+        error: err instanceof Error ? err.message : '2FA 密钥格式无效',
+      };
+    }
+  }, [fEnableTotp, fTotp]);
+
+  const editorTotpPreview = useMemo(
+    () => (editorTotpValidation.valid ? tryGenerateTotp(fTotp, nowMs) : null),
+    [editorTotpValidation.valid, fTotp, nowMs],
+  );
+
   async function handleSaveEditor(e: React.FormEvent) {
     e.preventDefault();
     if (!fTitle.trim() && !fUrl.trim()) {
-      onNotify('请填写条目标题或网址');
+      onNotify('请填写网站/应用名称或网址');
+      return;
+    }
+    if (fEnableTotp && fTotp.trim() && editorTotpValidation.error) {
+      onNotify(`2FA 密钥格式有误：${editorTotpValidation.error}`);
       return;
     }
     setSavingForm(true);
@@ -266,6 +320,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
         .map((t) => t.trim())
         .filter(Boolean);
       const cleanFields = fCustomFields.filter((cf) => cf.label.trim() || cf.value.trim());
+      const finalTotp = fEnableTotp ? fTotp.trim() : '';
 
       if (editorState.editing) {
         await onUpdatePassword(editorState.editing.id, {
@@ -273,7 +328,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
           username: fUsername.trim(),
           password: fPassword,
           url: fUrl.trim(),
-          totpSecret: fTotp.trim(),
+          totpSecret: finalTotp,
           category: fCategory,
           notes: fNotes,
           tags,
@@ -287,7 +342,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
           username: fUsername.trim(),
           password: fPassword,
           url: fUrl.trim(),
-          totpSecret: fTotp.trim(),
+          totpSecret: finalTotp,
           category: fCategory,
           notes: fNotes,
           tags,
@@ -323,18 +378,19 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
     }
   }
 
-  const detailTotp = useMemo(() => {
-    if (!detailItem?.totpSecret?.trim()) return null;
-    try {
-      return generateTotp(detailItem.totpSecret, nowMs);
-    } catch {
-      return null;
-    }
-  }, [detailItem?.totpSecret, nowMs]);
+  const detailTotp = useMemo(
+    () => tryGenerateTotp(detailItem?.totpSecret, nowMs),
+    [detailItem?.totpSecret, nowMs],
+  );
 
   const detailEntropy = useMemo(
     () => evaluatePasswordEntropy(detailItem?.password ?? ''),
     [detailItem?.password],
+  );
+
+  const editorPasswordEntropy = useMemo(
+    () => evaluatePasswordEntropy(fPassword),
+    [fPassword],
   );
 
   const generatedEntropy = useMemo(
@@ -344,7 +400,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
 
   return (
     <>
-      {/* Security Health Audit Card */}
+      {/* Security Health Audit Card (Password Strength & Reuse — Missing 2FA Never Penalized) */}
       <div className="m-health-card">
         <div className={`m-health-score-ring ${audit.healthScore < 75 ? 'is-warn' : ''}`}>
           <span className="m-health-num mono">{audit.healthScore}</span>
@@ -353,7 +409,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
         <div className="m-health-meta">
           <div className="m-health-title">
             <ShieldCheck size={14} style={{ color: 'var(--m-accent)' }} />
-            <span>密码安全审计 · 共 {audit.totalCount} 项凭据</span>
+            <span>密码健康审计 · 共 {audit.totalCount} 项凭据</span>
           </div>
           <div className="m-health-pills">
             <button
@@ -372,10 +428,10 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
             </button>
             <button
               type="button"
-              className={`m-mini-pill ${auditFilter === 'no2fa' ? 'is-active' : ''}`}
-              onClick={() => setAuditFilter((f) => (f === 'no2fa' ? 'none' : 'no2fa'))}
+              className={`m-mini-pill ${auditFilter === 'stale' ? 'is-active' : ''}`}
+              onClick={() => setAuditFilter((f) => (f === 'stale' ? 'none' : 'stale'))}
             >
-              未启用2FA {audit.missingTotpIds.length}
+              久未更换 {audit.staleIds.length}
             </button>
           </div>
         </div>
@@ -399,7 +455,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
             id="m-pw-search-input"
             type="search"
             className="m-search-input"
-            placeholder="搜索站点、账号、域名或标签..."
+            placeholder="搜索网站/应用、账号、域名或标签..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -457,6 +513,15 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
           <Star size={12} />
           <span>收藏</span>
         </button>
+        {(audit.totpIds.length > 0 || catFilter === 'has2fa') && (
+          <button
+            type="button"
+            className={`m-chip ${catFilter === 'has2fa' ? 'is-active' : ''}`}
+            onClick={() => setCatFilter('has2fa')}
+          >
+            <span>含 2FA ({audit.totpIds.length})</span>
+          </button>
+        )}
         {PASSWORD_CATEGORIES.map((c) => (
           <button
             key={c.id}
@@ -498,19 +563,12 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
           </div>
           <div style={{ fontWeight: 700, color: 'var(--m-text)' }}>暂无匹配的加密凭据</div>
           <div style={{ fontSize: '0.82rem', marginTop: 4 }}>
-            点击右下角「新建密码」加密保存账号口令与 TOTP 动态验证码
+            点击右下角「新建密码」加密保存网站与应用账号密码（2FA 可按需选配）
           </div>
         </div>
       ) : (
         visiblePasswords.map((item) => {
-          let totp = null;
-          if (item.totpSecret?.trim()) {
-            try {
-              totp = generateTotp(item.totpSecret, nowMs);
-            } catch {
-              totp = null;
-            }
-          }
+          const totp = totpSet.has(item.id) ? tryGenerateTotp(item.totpSecret, nowMs) : null;
           return (
             <article
               key={item.id}
@@ -534,22 +592,41 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                         style={{ color: 'var(--m-amber)', flexShrink: 0 }}
                       />
                     )}
+                    {!totp && (
+                      <span className="m-pw-cat-inline">
+                        {PASSWORD_CATEGORY_MAP[item.category]}
+                      </span>
+                    )}
                   </div>
                   <div className="m-pw-sub">
-                    {item.username || item.url || PASSWORD_CATEGORY_MAP[item.category]}
+                    {item.username || item.url || '仅密码凭据'}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  className="m-btn m-btn-sm m-btn-soft"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void onCopySensitive(item.password, `${item.title} 密码`);
-                  }}
-                >
-                  <Copy size={13} />
-                  <span>密码</span>
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  {item.username && (
+                    <button
+                      type="button"
+                      className="m-btn m-btn-sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void onCopySensitive(item.username, `${item.title} 账号`);
+                      }}
+                    >
+                      <span>账号</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="m-btn m-btn-sm m-btn-soft"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onCopySensitive(item.password, `${item.title} 密码`);
+                    }}
+                  >
+                    <Copy size={13} />
+                    <span>密码</span>
+                  </button>
+                </div>
               </div>
 
               {totp && (
@@ -567,7 +644,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                     <Copy size={12} />
                   </button>
                   <span style={{ fontSize: '0.72rem', color: 'var(--m-text-tertiary)' }}>
-                    {PASSWORD_CATEGORY_MAP[item.category]}
+                    {PASSWORD_CATEGORY_MAP[item.category]} · 已选配 2FA
                   </span>
                 </div>
               )}
@@ -587,7 +664,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
         <span>新建密码</span>
       </button>
 
-      {/* ==================== Password Detail Bottom Sheet ==================== */}
+      {/* ==================== Password Detail Bottom Sheet (Password-First Hierarchy) ==================== */}
       {detailItem && (
         <div
           className="m-sheet-backdrop"
@@ -632,92 +709,11 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
             </div>
 
             <div className="m-sheet-body">
-              {detailTotp && (
-                <div
-                  className="m-card"
-                  style={{
-                    background: 'var(--m-accent-soft)',
-                    borderColor: 'var(--m-accent-border)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                  }}
-                >
-                  <div>
-                    <div
-                      style={{
-                        fontSize: '0.72rem',
-                        fontWeight: 700,
-                        color: 'var(--m-accent)',
-                      }}
-                    >
-                      动态两步验证码 (RFC 6238 TOTP)
-                    </div>
-                    <div
-                      className="mono"
-                      style={{
-                        fontSize: '1.55rem',
-                        fontWeight: 800,
-                        letterSpacing: '0.08em',
-                        color: 'var(--m-accent)',
-                        marginTop: 2,
-                      }}
-                    >
-                      {detailTotp.formattedCode}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <svg width="38" height="38" viewBox="0 0 38 38">
-                      <circle
-                        cx="19"
-                        cy="19"
-                        r="15"
-                        fill="none"
-                        stroke="var(--m-border)"
-                        strokeWidth="3.5"
-                      />
-                      <circle
-                        cx="19"
-                        cy="19"
-                        r="15"
-                        fill="none"
-                        stroke="var(--m-accent)"
-                        strokeWidth="3.5"
-                        strokeDasharray={2 * Math.PI * 15}
-                        strokeDashoffset={2 * Math.PI * 15 * detailTotp.progress}
-                        transform="rotate(-90 19 19)"
-                        strokeLinecap="round"
-                      />
-                      <text
-                        x="19"
-                        y="23"
-                        textAnchor="middle"
-                        fontSize="10"
-                        fontWeight="700"
-                        fill="var(--m-accent)"
-                      >
-                        {detailTotp.remainingSeconds}s
-                      </text>
-                    </svg>
-                    <button
-                      type="button"
-                      className="m-btn m-btn-primary m-btn-sm"
-                      onClick={() =>
-                        void onCopySensitive(detailTotp.code, `${detailItem.title} 动态验证码`)
-                      }
-                    >
-                      <Copy size={13} />
-                      <span>复制</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {/* Username */}
+              {/* 1. Username */}
               {detailItem.username && (
                 <div className="m-card" style={{ padding: '10px 12px' }}>
                   <div style={{ fontSize: '0.72rem', color: 'var(--m-text-tertiary)' }}>
-                    用户名 / 登录邮箱
+                    用户名 / 登录账号
                   </div>
                   <div
                     style={{
@@ -743,7 +739,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                 </div>
               )}
 
-              {/* Password */}
+              {/* 2. Password */}
               <div className="m-card" style={{ padding: '10px 12px' }}>
                 <div
                   style={{
@@ -753,7 +749,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                     color: 'var(--m-text-tertiary)',
                   }}
                 >
-                  <span>加密主口令</span>
+                  <span>登录密码</span>
                   <span className="mono" style={{ color: 'var(--m-accent)', fontWeight: 700 }}>
                     {detailEntropy.label} · {detailEntropy.entropyBits} bits
                   </span>
@@ -802,7 +798,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                 </div>
               </div>
 
-              {/* Website URL */}
+              {/* 3. Website URL */}
               {detailItem.url && (
                 <div className="m-card" style={{ padding: '10px 12px' }}>
                   <div style={{ fontSize: '0.72rem', color: 'var(--m-text-tertiary)' }}>
@@ -845,6 +841,104 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* 4. Optional 2FA Card (Only shown when configured) */}
+              {detailTotp ? (
+                <div
+                  className="m-card"
+                  style={{
+                    background: 'var(--m-accent-soft)',
+                    borderColor: 'var(--m-accent-border)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}
+                >
+                  <div>
+                    <div
+                      style={{
+                        fontSize: '0.72rem',
+                        fontWeight: 700,
+                        color: 'var(--m-accent)',
+                      }}
+                    >
+                      两步验证动态口令 (可选已启用)
+                    </div>
+                    <div
+                      className="mono"
+                      style={{
+                        fontSize: '1.48rem',
+                        fontWeight: 800,
+                        letterSpacing: '0.08em',
+                        color: 'var(--m-accent)',
+                        marginTop: 2,
+                      }}
+                    >
+                      {detailTotp.formattedCode}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <svg width="36" height="36" viewBox="0 0 38 38">
+                      <circle
+                        cx="19"
+                        cy="19"
+                        r="15"
+                        fill="none"
+                        stroke="var(--m-border)"
+                        strokeWidth="3.5"
+                      />
+                      <circle
+                        cx="19"
+                        cy="19"
+                        r="15"
+                        fill="none"
+                        stroke="var(--m-accent)"
+                        strokeWidth="3.5"
+                        strokeDasharray={2 * Math.PI * 15}
+                        strokeDashoffset={2 * Math.PI * 15 * detailTotp.progress}
+                        transform="rotate(-90 19 19)"
+                        strokeLinecap="round"
+                      />
+                      <text
+                        x="19"
+                        y="23"
+                        textAnchor="middle"
+                        fontSize="10"
+                        fontWeight="700"
+                        fill="var(--m-accent)"
+                      >
+                        {detailTotp.remainingSeconds}s
+                      </text>
+                    </svg>
+                    <button
+                      type="button"
+                      className="m-btn m-btn-sm"
+                      onClick={() =>
+                        void onCopySensitive(detailTotp.code, `${detailItem.title} 动态验证码`)
+                      }
+                    >
+                      <Copy size={13} />
+                      <span>复制</span>
+                    </button>
+                  </div>
+                </div>
+              ) : invalidTotpSet.has(detailItem.id) ? (
+                <div
+                  className="m-card"
+                  style={{
+                    padding: '10px 12px',
+                    borderColor: 'var(--m-amber)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                  }}
+                >
+                  <span style={{ fontSize: '0.78rem', color: 'var(--m-amber)', fontWeight: 600 }}>
+                    2FA 密钥格式有误，可编辑修正或关闭两步验证
+                  </span>
+                </div>
+              ) : null}
 
               {/* Custom Fields */}
               {detailItem.customFields.length > 0 && (
@@ -923,7 +1017,9 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                   >
                     <History size={14} />
                     <span>
-                      {showHistory ? '收起历史密码版本' : `查看历史密码 (${detailItem.history.length} 个版本)`}
+                      {showHistory
+                        ? '收起历史密码版本'
+                        : `查看历史密码 (${detailItem.history.length} 个版本)`}
                     </span>
                   </button>
                   {showHistory && (
@@ -1056,7 +1152,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
             <form onSubmit={(e) => void handleSaveEditor(e)} className="m-sheet-body">
               <div className="m-field">
                 <label className="m-label">
-                  <span>站点或服务名称 *</span>
+                  <span>网站或应用名称 *</span>
                 </label>
                 <input
                   id="m-pw-form-title"
@@ -1064,7 +1160,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                   className="m-input"
                   value={fTitle}
                   onChange={(e) => setFTitle(e.target.value)}
-                  placeholder="例如：GitHub / 招商银行 / AWS Root"
+                  placeholder="例如：京东商城 / 家庭软路由 / GitHub"
                   required
                 />
               </div>
@@ -1088,7 +1184,7 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                 </div>
                 <div className="m-field">
                   <label className="m-label">
-                    <span>用户名 / 邮箱</span>
+                    <span>账号 / 邮箱（选填）</span>
                   </label>
                   <input
                     id="m-pw-form-username"
@@ -1097,67 +1193,14 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                     value={fUsername}
                     onChange={(e) => setFUsername(e.target.value)}
                     autoCapitalize="none"
-                    placeholder="user@example.com"
+                    placeholder="手机号或邮箱"
                   />
                 </div>
               </div>
 
               <div className="m-field">
                 <label className="m-label">
-                  <span>登录密码</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setGeneratorSheet({
-                        open: true,
-                        onApply: (pwd) => setFPassword(pwd),
-                      })
-                    }
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: 'var(--m-accent)',
-                      fontWeight: 700,
-                      fontSize: '0.75rem',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 4,
-                      cursor: 'pointer',
-                      padding: 0,
-                    }}
-                  >
-                    <Sparkles size={12} />
-                    <span>CSPRNG 随机生成</span>
-                  </button>
-                </label>
-                <input
-                  id="m-pw-form-password"
-                  type="text"
-                  className="m-input mono"
-                  value={fPassword}
-                  onChange={(e) => setFPassword(e.target.value)}
-                  placeholder="输入或生成高强度随机密码"
-                />
-              </div>
-
-              <div className="m-field">
-                <label className="m-label">
-                  <span>两步验证密钥 (TOTP Secret 或 otpauth://)</span>
-                </label>
-                <input
-                  id="m-pw-form-totp"
-                  type="text"
-                  className="m-input mono"
-                  value={fTotp}
-                  onChange={(e) => setFTotp(e.target.value)}
-                  autoCapitalize="none"
-                  placeholder="JBSWY3DPEHPK3PXP 或 otpauth://totp/..."
-                />
-              </div>
-
-              <div className="m-field">
-                <label className="m-label">
-                  <span>关联网址 URL</span>
+                  <span>关联网址 URL（选填）</span>
                 </label>
                 <input
                   id="m-pw-form-url"
@@ -1166,112 +1209,267 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
                   value={fUrl}
                   onChange={(e) => setFUrl(e.target.value)}
                   autoCapitalize="none"
-                  placeholder="https://github.com"
+                  placeholder="https://example.com 或 192.168.1.1"
                 />
               </div>
 
-              <div className="m-field">
-                <label className="m-label">
-                  <span>标签（逗号分隔）</span>
-                </label>
-                <input
-                  type="text"
-                  className="m-input"
-                  value={fTags}
-                  onChange={(e) => setFTags(e.target.value)}
-                  placeholder="核心生产, 2FA, 云主机"
-                />
-              </div>
-
-              {/* Custom Hidden Fields */}
               <div className="m-field">
                 <div className="m-label">
-                  <span>自定义加密字段（恢复码 / API Key）</span>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setFCustomFields((prev) => [
-                        ...prev,
-                        {
-                          id: crypto.randomUUID(),
-                          label: '',
-                          value: '',
-                          hidden: true,
-                        },
-                      ])
-                    }
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: 'var(--m-accent)',
-                      fontWeight: 700,
-                      fontSize: '0.75rem',
-                      cursor: 'pointer',
-                      padding: 0,
-                    }}
-                  >
-                    + 添加字段
-                  </button>
-                </div>
-                {fCustomFields.map((cf, idx) => (
-                  <div
-                    key={cf.id}
-                    style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}
-                  >
-                    <input
-                      type="text"
-                      className="m-input"
-                      style={{ flex: 1, height: 38 }}
-                      placeholder="字段名"
-                      value={cf.label}
-                      onChange={(e) =>
-                        setFCustomFields((prev) =>
-                          prev.map((p, i) => (i === idx ? { ...p, label: e.target.value } : p)),
-                        )
-                      }
-                    />
-                    <input
-                      type="text"
-                      className="m-input mono"
-                      style={{ flex: 1.3, height: 38 }}
-                      placeholder="字段值"
-                      value={cf.value}
-                      onChange={(e) =>
-                        setFCustomFields((prev) =>
-                          prev.map((p, i) => (i === idx ? { ...p, value: e.target.value } : p)),
-                        )
-                      }
-                    />
+                  <span>
+                    登录密码
+                    {fPassword
+                      ? ` (${editorPasswordEntropy.label} · ${editorPasswordEntropy.entropyBits}b)`
+                      : ''}
+                  </span>
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
                     <button
                       type="button"
-                      className="m-icon-btn"
-                      style={{ width: 32, height: 32 }}
-                      onClick={() =>
-                        setFCustomFields((prev) => prev.filter((_, i) => i !== idx))
-                      }
+                      onClick={() => {
+                        setFPassword(generateSecurePassword({ length: 20 }));
+                        setFShowPwd(true);
+                      }}
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        color: 'var(--m-accent)',
+                        fontWeight: 700,
+                        fontSize: '0.75rem',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 3,
+                        cursor: 'pointer',
+                        padding: 0,
+                      }}
                     >
-                      <X size={14} />
+                      <RefreshCw size={12} />
+                      <span>一键随机</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setGeneratorSheet({
+                          open: true,
+                          onApply: (pwd) => {
+                            setFPassword(pwd);
+                            setFShowPwd(true);
+                          },
+                        })
+                      }
+                      style={{
+                        border: 'none',
+                        background: 'transparent',
+                        color: 'var(--m-accent)',
+                        fontWeight: 700,
+                        fontSize: '0.75rem',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 3,
+                        cursor: 'pointer',
+                        padding: 0,
+                      }}
+                    >
+                      <Sparkles size={12} />
+                      <span>高级生成</span>
                     </button>
                   </div>
-                ))}
+                </div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <input
+                    id="m-pw-form-password"
+                    type={fShowPwd ? 'text' : 'password'}
+                    className="m-input mono"
+                    style={{ flex: 1 }}
+                    value={fPassword}
+                    onChange={(e) => setFPassword(e.target.value)}
+                    placeholder="输入现有密码，或点击上方随机生成"
+                  />
+                  <button
+                    type="button"
+                    className="m-icon-btn"
+                    style={{ width: 38, height: 38, flexShrink: 0 }}
+                    onClick={() => setFShowPwd((v) => !v)}
+                    aria-label={fShowPwd ? '隐藏密码' : '显示密码'}
+                  >
+                    {fShowPwd ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
               </div>
 
               <div className="m-field">
                 <label className="m-label">
-                  <span>备注说明</span>
+                  <span>备注说明（选填）</span>
                 </label>
                 <textarea
                   className="m-textarea"
                   value={fNotes}
                   onChange={(e) => setFNotes(e.target.value)}
-                  placeholder="加密存储恢复码、SSH 端口等敏感备注..."
+                  placeholder="绑定手机、客服安全问题、端口等备注..."
                 />
+              </div>
+
+              {/* Optional 2FA Switch Card */}
+              <div className={`m-opt-card ${fEnableTotp ? 'is-enabled' : ''}`}>
+                <div
+                  className="m-opt-head"
+                  onClick={() => setFEnableTotp((v) => !v)}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="m-opt-title">
+                      <span>两步验证 (2FA / TOTP)</span>
+                      <span className="m-opt-badge">可选项</span>
+                    </div>
+                    <div className="m-opt-sub">
+                      仅在网站或应用支持身份验证器时按需开启
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={fEnableTotp}
+                    aria-label="启用两步验证"
+                    className={`m-opt-switch ${fEnableTotp ? 'is-on' : ''}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFEnableTotp((v) => !v);
+                    }}
+                  >
+                    <span className="m-opt-switch-thumb" />
+                  </button>
+                </div>
+
+                {fEnableTotp && (
+                  <div className="m-opt-body">
+                    <input
+                      id="m-pw-form-totp"
+                      type="text"
+                      className="m-input mono"
+                      value={fTotp}
+                      onChange={(e) => setFTotp(e.target.value)}
+                      autoCapitalize="none"
+                      placeholder="Base32 密钥或 otpauth://totp/..."
+                    />
+                    {editorTotpPreview ? (
+                      <div className="m-opt-preview">
+                        <span>实时验证码：{editorTotpPreview.formattedCode}</span>
+                        <span className="mono">{editorTotpPreview.remainingSeconds}s</span>
+                      </div>
+                    ) : editorTotpValidation.error ? (
+                      <div className="m-opt-err">
+                        <AlertTriangle size={13} />
+                        <span>{editorTotpValidation.error}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+
+              {/* Collapsible Extras */}
+              <div className="m-opt-card">
+                <button
+                  type="button"
+                  className="m-opt-disclosure"
+                  onClick={() => setFShowExtras((v) => !v)}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    {fShowExtras ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    <span>更多选填项（标签 / 自定义字段）</span>
+                  </span>
+                </button>
+                {fShowExtras && (
+                  <div className="m-opt-body">
+                    <div className="m-field" style={{ marginBottom: 8 }}>
+                      <label className="m-label">
+                        <span>标签（逗号分隔）</span>
+                      </label>
+                      <input
+                        type="text"
+                        className="m-input"
+                        value={fTags}
+                        onChange={(e) => setFTags(e.target.value)}
+                        placeholder="日常购物, 家庭网络, 云主机"
+                      />
+                    </div>
+
+                    <div className="m-field" style={{ marginBottom: 0 }}>
+                      <div className="m-label">
+                        <span>自定义加密字段（恢复码 / PIN）</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFCustomFields((prev) => [
+                              ...prev,
+                              {
+                                id: crypto.randomUUID(),
+                                label: '',
+                                value: '',
+                                hidden: true,
+                              },
+                            ])
+                          }
+                          style={{
+                            border: 'none',
+                            background: 'transparent',
+                            color: 'var(--m-accent)',
+                            fontWeight: 700,
+                            fontSize: '0.75rem',
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                        >
+                          + 添加字段
+                        </button>
+                      </div>
+                      {fCustomFields.map((cf, idx) => (
+                        <div
+                          key={cf.id}
+                          style={{ display: 'flex', gap: 6, marginBottom: 6, alignItems: 'center' }}
+                        >
+                          <input
+                            type="text"
+                            className="m-input"
+                            style={{ flex: 1, height: 38 }}
+                            placeholder="字段名"
+                            value={cf.label}
+                            onChange={(e) =>
+                              setFCustomFields((prev) =>
+                                prev.map((p, i) => (i === idx ? { ...p, label: e.target.value } : p)),
+                              )
+                            }
+                          />
+                          <input
+                            type="text"
+                            className="m-input mono"
+                            style={{ flex: 1.3, height: 38 }}
+                            placeholder="字段值"
+                            value={cf.value}
+                            onChange={(e) =>
+                              setFCustomFields((prev) =>
+                                prev.map((p, i) => (i === idx ? { ...p, value: e.target.value } : p)),
+                              )
+                            }
+                          />
+                          <button
+                            type="button"
+                            className="m-icon-btn"
+                            style={{ width: 32, height: 32 }}
+                            onClick={() =>
+                              setFCustomFields((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <button
                 id="m-pw-form-submit"
                 type="submit"
                 className="m-btn m-btn-primary m-btn-block"
+                style={{ marginTop: 6 }}
                 disabled={savingForm}
               >
                 <ShieldCheck size={16} />

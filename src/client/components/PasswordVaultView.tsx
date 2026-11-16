@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
+  Check,
+  ChevronDown,
+  ChevronRight,
   Clock,
   Copy,
   Edit3,
@@ -22,6 +25,7 @@ import {
   Star,
   Trash2,
   Upload,
+  User,
   X,
 } from 'lucide-react';
 import {
@@ -34,7 +38,7 @@ import {
   PASSWORD_IMPORT_BATCH_SIZE,
   parsePasswordCsv,
 } from '@shared/passwordCsv';
-import { generateTotp } from '@shared/totp';
+import { parseTotpInput, tryGenerateTotp } from '@shared/totp';
 import type {
   CreatePasswordRequest,
   ImportPasswordEntryInput,
@@ -49,19 +53,19 @@ import { formatBytes, formatFullDateTime, formatShortDate } from '../utils/forma
 import { PasswordGeneratorModal } from './PasswordGeneratorModal';
 
 export const PASSWORD_CATEGORY_LABELS: Record<PasswordCategory, string> = {
-  login: '网站登录',
+  login: '网站与应用',
   finance: '金融银行',
   work: '办公协作',
   dev: '研发与云',
-  server: '服务器/SSH',
+  server: '服务器/设备',
   social: '社交邮箱',
   other: '其他凭据',
 };
 
 const CATEGORY_SHORT_LABELS: Record<PasswordCategory, string> = {
-  login: '登录',
+  login: '网站',
   dev: '研发',
-  server: '服务器',
+  server: '设备',
   finance: '金融',
   work: '办公',
   social: '社交',
@@ -87,8 +91,8 @@ interface PasswordVaultViewProps {
   onNotify: (msg: string) => void;
 }
 
-type CategoryFilter = 'all' | 'starred' | 'trash' | PasswordCategory;
-type AuditFilter = 'none' | 'weak' | 'reused' | 'no2fa';
+type CategoryFilter = 'all' | 'starred' | 'has2fa' | 'trash' | PasswordCategory;
+type AuditFilter = 'none' | 'weak' | 'reused' | 'stale';
 
 function extractDisplayHost(rawUrl: string): string {
   if (!rawUrl.trim()) return '';
@@ -126,6 +130,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
   const [revealedFieldIds, setRevealedFieldIds] = useState<Record<string, boolean>>({});
   const [showHistory, setShowHistory] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Modals & CSV Batch Import state
   const [generatorOpen, setGeneratorOpen] = useState(false);
@@ -142,15 +147,21 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
     defaultCategory?: PasswordCategory;
   }>({ open: false, editing: null });
 
+  const copyTimerRef = useRef<number | null>(null);
   useEffect(() => {
-    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
-    return () => window.clearInterval(timer);
+    return () => {
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+    };
   }, []);
 
-  const audit = useMemo(() => auditPasswordVault(passwords, nowMs), [passwords, nowMs]);
+  const audit = useMemo(() => auditPasswordVault(passwords), [passwords]);
   const weakSet = useMemo(() => new Set(audit.weakIds), [audit.weakIds]);
   const reusedSet = useMemo(() => new Set(audit.reusedIds), [audit.reusedIds]);
-  const no2faSet = useMemo(() => new Set(audit.missingTotpIds), [audit.missingTotpIds]);
+  const staleSet = useMemo(() => new Set(audit.staleIds), [audit.staleIds]);
+  const totpSet = useMemo(() => new Set(audit.totpIds), [audit.totpIds]);
+  const invalidTotpSet = useMemo(() => new Set(audit.invalidTotpIds), [audit.invalidTotpIds]);
 
   const trashCount = useMemo(
     () => passwords.reduce((acc, p) => acc + (p.isTrashed ? 1 : 0), 0),
@@ -166,11 +177,18 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
     const chips: Array<[CategoryFilter, string]> = [
       ['all', '全部'],
       ['starred', '收藏'],
+    ];
+
+    if (audit.totpIds.length > 0 || catFilter === 'has2fa') {
+      chips.push(['has2fa', `含2FA ${audit.totpIds.length}`]);
+    }
+
+    chips.push(
       ['login', CATEGORY_SHORT_LABELS.login],
       ['dev', CATEGORY_SHORT_LABELS.dev],
       ['server', CATEGORY_SHORT_LABELS.server],
       ['finance', CATEGORY_SHORT_LABELS.finance],
-    ];
+    );
 
     for (const extra of ['work', 'social', 'other'] as PasswordCategory[]) {
       if (usedCategories.has(extra) || catFilter === extra) {
@@ -180,7 +198,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
 
     chips.push(['trash', trashCount > 0 ? `回收站 ${trashCount}` : '回收站']);
     return chips;
-  }, [passwords, catFilter, trashCount]);
+  }, [passwords, catFilter, trashCount, audit.totpIds.length]);
 
   const visiblePasswords = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -192,9 +210,11 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
         } else {
           if (item.isTrashed) return false;
           if (catFilter === 'starred' && !item.isPinned) return false;
+          if (catFilter === 'has2fa' && !totpSet.has(item.id)) return false;
           if (
             catFilter !== 'all' &&
             catFilter !== 'starred' &&
+            catFilter !== 'has2fa' &&
             item.category !== catFilter
           ) {
             return false;
@@ -203,7 +223,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
 
         if (auditFilter === 'weak' && !weakSet.has(item.id)) return false;
         if (auditFilter === 'reused' && !reusedSet.has(item.id)) return false;
-        if (auditFilter === 'no2fa' && !no2faSet.has(item.id)) return false;
+        if (auditFilter === 'stale' && !staleSet.has(item.id)) return false;
 
         if (q) {
           const hit =
@@ -219,12 +239,21 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
         if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
         return b.updatedAt.localeCompare(a.updatedAt);
       });
-  }, [passwords, catFilter, auditFilter, search, weakSet, reusedSet, no2faSet]);
+  }, [passwords, catFilter, auditFilter, search, weakSet, reusedSet, staleSet, totpSet]);
 
   const selectedItem = useMemo(() => {
     if (visiblePasswords.length === 0) return null;
     return visiblePasswords.find((p) => p.id === selectedId) ?? visiblePasswords[0];
   }, [visiblePasswords, selectedId]);
+
+  // Only tick the 1-second clock when viewing an entry with an active optional 2FA secret
+  const selectedHasValidTotp = Boolean(selectedItem && totpSet.has(selectedItem.id));
+  useEffect(() => {
+    if (!selectedHasValidTotp) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [selectedHasValidTotp, selectedItem?.id]);
 
   useEffect(() => {
     const nextId = selectedItem?.id ?? null;
@@ -239,14 +268,10 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
     setShowHistory(false);
   }, [selectedItem?.id]);
 
-  const totpSnapshot = useMemo(() => {
-    if (!selectedItem?.totpSecret?.trim()) return null;
-    try {
-      return generateTotp(selectedItem.totpSecret, nowMs);
-    } catch {
-      return null;
-    }
-  }, [selectedItem?.totpSecret, nowMs]);
+  const totpSnapshot = useMemo(
+    () => tryGenerateTotp(selectedItem?.totpSecret, nowMs),
+    [selectedItem?.totpSecret, nowMs],
+  );
 
   const selectedEntropy = useMemo(
     () => evaluatePasswordEntropy(selectedItem?.password ?? ''),
@@ -265,14 +290,26 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
   function openCreateModal(presetCategory?: PasswordCategory) {
     const cat =
       presetCategory ??
-      (catFilter !== 'all' && catFilter !== 'starred' && catFilter !== 'trash'
+      (catFilter !== 'all' &&
+      catFilter !== 'starred' &&
+      catFilter !== 'has2fa' &&
+      catFilter !== 'trash'
         ? catFilter
         : 'login');
     setFormState({ open: true, editing: null, defaultCategory: cat });
   }
 
-  async function copyText(val: string, label: string) {
+  async function copyText(val: string, label: string, feedbackKey?: string) {
     await navigator.clipboard.writeText(val);
+    if (feedbackKey) {
+      setCopiedKey(feedbackKey);
+      if (copyTimerRef.current !== null) {
+        window.clearTimeout(copyTimerRef.current);
+      }
+      copyTimerRef.current = window.setTimeout(() => {
+        setCopiedKey(null);
+      }, 1600);
+    }
     onNotify(`${label}已复制到剪贴板`);
   }
 
@@ -437,7 +474,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
             </div>
           ) : null}
 
-          {/* Security Health Audit Banner */}
+          {/* Security Health Audit Banner (Password Strength, Reuse & Rotation — 2FA never penalized) */}
           <div className="pss-health-card">
             <div className="pss-health-top">
               <span className="pss-health-score">
@@ -451,7 +488,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                 ) : (
                   <ShieldCheck size={14} style={{ color: 'var(--accent)' }} />
                 )}
-                <span>安全评分</span>
+                <span>密码健康分</span>
                 <strong className="mono pss-health-num">{audit.healthScore}/100</strong>
               </span>
 
@@ -471,7 +508,9 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
             <div className="pss-health-bar" aria-hidden="true">
               <span
                 className={`pss-health-bar-fill is-${healthTone}`}
-                style={{ width: `${audit.totalCount === 0 ? 100 : Math.max(6, audit.healthScore)}%` }}
+                style={{
+                  width: `${audit.totalCount === 0 ? 100 : Math.max(6, audit.healthScore)}%`,
+                }}
               />
             </div>
 
@@ -496,10 +535,13 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               </button>
               <button
                 type="button"
-                className={`pss-audit-pill ${auditFilter === 'no2fa' ? 'is-active' : ''}`}
-                onClick={() => setAuditFilter((f) => (f === 'no2fa' ? 'none' : 'no2fa'))}
+                className={`pss-audit-pill ${auditFilter === 'stale' ? 'is-active' : ''} ${
+                  audit.staleIds.length > 0 ? 'has-issue' : ''
+                }`}
+                onClick={() => setAuditFilter((f) => (f === 'stale' ? 'none' : 'stale'))}
+                title="超过 180 天未更新的密码"
               >
-                未设2FA ({audit.missingTotpIds.length})
+                久未换 ({audit.staleIds.length})
               </button>
             </div>
           </div>
@@ -510,7 +552,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               id="password-search-input"
               type="search"
               className="search-input"
-              placeholder="搜索账号标题、用户名、域名或标签..."
+              placeholder="搜索名称、账号、域名或标签..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -583,8 +625,8 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               </>
             ) : catFilter !== 'all' ? (
               <>
-                <p className="pss-list-empty-title">当前分类暂无密码条目</p>
-                {catFilter !== 'starred' && (
+                <p className="pss-list-empty-title">当前筛选暂无密码条目</p>
+                {catFilter !== 'starred' && catFilter !== 'has2fa' && (
                   <button
                     type="button"
                     className="btn btn-secondary"
@@ -600,7 +642,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               <>
                 <p className="pss-list-empty-title">暂无加密密码条目</p>
                 <span className="pss-list-empty-sub">
-                  点击右上角「新建」或导入 CSV 开始加密托管
+                  点击右上角「新建」或导入 CSV 开始加密托管网站与应用密码
                 </span>
               </>
             )}
@@ -610,22 +652,39 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
             {visiblePasswords.map((item) => {
               const isSelected = selectedItem?.id === item.id;
               const initial = (item.title.trim()[0] || 'P').toUpperCase();
-              const hasRisk = weakSet.has(item.id) || reusedSet.has(item.id);
-              const subtitle =
-                item.username ||
-                extractDisplayHost(item.url) ||
-                PASSWORD_CATEGORY_LABELS[item.category];
+              const hasValidTotp = totpSet.has(item.id);
+              const hasInvalidTotp = invalidTotpSet.has(item.id);
+              const hasRisk =
+                weakSet.has(item.id) || reusedSet.has(item.id) || hasInvalidTotp;
+              const host = extractDisplayHost(item.url);
+              const subtitle = item.username
+                ? item.username
+                : host
+                  ? host
+                  : '仅密码凭据';
+              const riskTooltip = weakSet.has(item.id)
+                ? '弱密码风险'
+                : reusedSet.has(item.id)
+                  ? '存在重复使用密码'
+                  : '两步验证密钥格式有误';
 
               return (
-                <button
+                <div
                   key={item.id}
-                  type="button"
                   role="option"
+                  tabIndex={0}
                   aria-selected={isSelected}
                   className={`note-card pss-pwd-card ${isSelected ? 'is-selected' : ''}`}
                   onClick={() => {
                     onSelectId(item.id);
                     onOpenMobileDetail?.();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelectId(item.id);
+                      onOpenMobileDetail?.();
+                    }
                   }}
                 >
                   <div className="pss-pwd-card-row">
@@ -635,12 +694,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                         <span className="pss-pwd-card-title">{item.title}</span>
                         <span className="pss-pwd-card-badges">
                           {hasRisk && !item.isTrashed && (
-                            <span
-                              className="pss-risk-dot"
-                              title={
-                                weakSet.has(item.id) ? '弱密码风险' : '存在重复使用密码'
-                              }
-                            />
+                            <span className="pss-risk-dot" title={riskTooltip} />
                           )}
                           {item.isPinned && (
                             <Star
@@ -649,25 +703,80 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                               style={{ color: 'var(--amber)', flexShrink: 0 }}
                             />
                           )}
-                          {item.totpSecret && <span className="pss-2fa-mini">2FA</span>}
+                          {hasValidTotp && (
+                            <span className="pss-2fa-mini" title="已启用可选两步验证 (2FA)">
+                              2FA
+                            </span>
+                          )}
+                          {hasInvalidTotp && (
+                            <span className="pss-2fa-mini is-invalid" title="2FA 密钥格式有误">
+                              2FA异常
+                            </span>
+                          )}
                         </span>
                       </div>
                       <div className="pss-pwd-card-sub">
                         <span className="pss-pwd-card-account">{subtitle}</span>
-                        <span className="pss-pwd-card-cat">
-                          {CATEGORY_SHORT_LABELS[item.category]}
+                        <span className="pss-pwd-card-right-meta">
+                          {!item.isTrashed && (
+                            <span className="pss-card-quick-actions">
+                              {item.username && (
+                                <button
+                                  type="button"
+                                  className={`pss-quick-copy-btn ${
+                                    copiedKey === `list-u-${item.id}` ? 'is-copied' : ''
+                                  }`}
+                                  title={`复制账号：${item.username}`}
+                                  aria-label={`复制 ${item.title} 的账号`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void copyText(item.username, '账号', `list-u-${item.id}`);
+                                  }}
+                                >
+                                  {copiedKey === `list-u-${item.id}` ? (
+                                    <Check size={12} />
+                                  ) : (
+                                    <User size={12} />
+                                  )}
+                                </button>
+                              )}
+                              {item.password && (
+                                <button
+                                  type="button"
+                                  className={`pss-quick-copy-btn ${
+                                    copiedKey === `list-p-${item.id}` ? 'is-copied' : ''
+                                  }`}
+                                  title="快速复制密码"
+                                  aria-label={`复制 ${item.title} 的密码`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void copyText(item.password, '密码', `list-p-${item.id}`);
+                                  }}
+                                >
+                                  {copiedKey === `list-p-${item.id}` ? (
+                                    <Check size={12} />
+                                  ) : (
+                                    <Copy size={12} />
+                                  )}
+                                </button>
+                              )}
+                            </span>
+                          )}
+                          <span className="pss-pwd-card-cat">
+                            {CATEGORY_SHORT_LABELS[item.category]}
+                          </span>
                         </span>
                       </div>
                     </div>
                   </div>
-                </button>
+                </div>
               );
             })}
           </div>
         )}
       </section>
 
-      {/* Column 3: Password Detail & Live TOTP Inspector */}
+      {/* Column 3: Password Detail Inspector (Password-First Hierarchy) */}
       <main className="editor-pane pss-detail-pane" aria-label="密码详情检视">
         {!selectedItem ? (
           <div className="editor-empty-state pss-vault-empty-state">
@@ -712,10 +821,10 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                 <div className="editor-empty-icon">
                   <KeyRound size={25} />
                 </div>
-                <h2>端到端 AES-256-GCM 密码与 2FA 保险库</h2>
+                <h2>端到端 AES-256-GCM 私密密码库</h2>
                 <p>
-                  所有账号密码、RFC 6238 动态口令种子与自定义隐藏字段均使用独立 HKDF
-                  子密钥加密存储，支持历史密码回溯与多端增量同步。
+                  安全托管各类网站、应用、路由器与服务器的登录账号与密码。内置
+                  CSPRNG 随机口令生成与强度审计，并支持为需要的账号按需选配两步验证 (2FA)。
                 </p>
 
                 <div className="pss-empty-features" aria-label="安全特性概览">
@@ -723,10 +832,10 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                     <ShieldCheck size={13} /> HKDF 独立子密钥
                   </span>
                   <span className="pss-feature-pill">
-                    <Clock size={13} /> RFC 6238 动态口令
+                    <Sparkles size={13} /> CSPRNG 强口令审计
                   </span>
                   <span className="pss-feature-pill">
-                    <Sparkles size={13} /> CSPRNG 熵值审计
+                    <Clock size={13} /> 两步验证按需选配
                   </span>
                 </div>
 
@@ -917,6 +1026,9 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                             {PASSWORD_CATEGORY_LABELS[selectedItem.category]}
                           </span>
                         )}
+                        {totpSnapshot && (
+                          <span className="pss-detail-2fa-pill">已选配 2FA</span>
+                        )}
                         {selectedItem.tags.map((tag) => (
                           <span key={tag} className="tag-chip-mini">
                             #{tag}
@@ -932,34 +1044,182 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                         type="button"
                         className="btn btn-secondary"
                         style={{ height: 34, padding: '0 12px', fontSize: '0.84rem' }}
-                        onClick={() => void copyText(selectedItem.username, '用户名')}
+                        onClick={() =>
+                          void copyText(selectedItem.username, '账号', 'head-username')
+                        }
                       >
-                        <Copy size={13} />
-                        <span>复制账号</span>
+                        {copiedKey === 'head-username' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'head-username' ? '已复制' : '复制账号'}</span>
                       </button>
                     )}
                     <button
                       type="button"
                       className="btn btn-primary"
                       style={{ height: 34, padding: '0 13px', fontSize: '0.84rem' }}
-                      onClick={() => void copyText(selectedItem.password, '密码')}
+                      onClick={() => void copyText(selectedItem.password, '密码', 'head-password')}
                     >
-                      <Copy size={13} />
-                      <span>复制密码</span>
+                      {copiedKey === 'head-password' ? <Check size={13} /> : <Copy size={13} />}
+                      <span>{copiedKey === 'head-password' ? '密码已复制' : '复制密码'}</span>
                     </button>
                   </div>
                 </header>
 
-                {/* Live RFC 6238 TOTP Card */}
-                {totpSnapshot && (
+                {/* 1. Primary Credentials Card (Always First for Consistent Reading & Copying) */}
+                <div className="pss-cred-card">
+                  <div className="pss-cred-row">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="pss-field-caption">用户名 / 登录账号</div>
+                      {selectedItem.username ? (
+                        <div className="pss-field-value mono" style={{ wordBreak: 'break-all' }}>
+                          {selectedItem.username}
+                        </div>
+                      ) : (
+                        <div className="pss-field-value is-empty">未填写账号（仅密码凭据）</div>
+                      )}
+                    </div>
+                    {selectedItem.username && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
+                        onClick={() =>
+                          void copyText(selectedItem.username, '账号', 'row-username')
+                        }
+                      >
+                        {copiedKey === 'row-username' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'row-username' ? '已复制' : '复制'}</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="pss-cred-row">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div className="pss-field-caption pss-caption-row">
+                        <span>登录密码</span>
+                        <span className={`pss-entropy-pill level-${selectedEntropy.score}`}>
+                          {selectedEntropy.label} · {selectedEntropy.entropyBits} bits
+                        </span>
+                        {weakSet.has(selectedItem.id) && (
+                          <span className="pss-warn-badge is-danger">
+                            <AlertTriangle size={11} /> 弱密码风险
+                          </span>
+                        )}
+                        {reusedSet.has(selectedItem.id) && (
+                          <span className="pss-warn-badge">
+                            <AlertTriangle size={11} /> 重复使用
+                          </span>
+                        )}
+                        {staleSet.has(selectedItem.id) && (
+                          <span className="pss-warn-badge">
+                            <Clock size={11} /> 久未更换
+                          </span>
+                        )}
+                      </div>
+                      <div
+                        className={`pss-field-value mono ${!revealPassword ? 'is-masked' : ''}`}
+                        style={{ wordBreak: 'break-all' }}
+                      >
+                        {revealPassword ? (
+                          <ColorizedPassword text={selectedItem.password} />
+                        ) : (
+                          '••••••••••••••••••••'
+                        )}
+                      </div>
+                      {selectedItem.password && (
+                        <div className="pss-detail-strength-bars" aria-hidden="true">
+                          {[1, 2, 3, 4].map((idx) => (
+                            <span
+                              key={idx}
+                              className={`strength-bar ${
+                                selectedEntropy.score >= idx
+                                  ? `level-${Math.max(1, selectedEntropy.score)}`
+                                  : ''
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
+                        onClick={() => setRevealPassword((v) => !v)}
+                      >
+                        {revealPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                        <span>{revealPassword ? '隐藏' : '显示'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
+                        onClick={() => void copyText(selectedItem.password, '密码', 'row-password')}
+                      >
+                        {copiedKey === 'row-password' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'row-password' ? '已复制' : '复制'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {selectedItem.url && (
+                    <div className="pss-cred-row">
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div className="pss-field-caption">关联网站 / 服务地址</div>
+                        <div
+                          className="pss-field-value mono"
+                          style={{
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {selectedItem.url}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
+                          onClick={() => void copyText(selectedItem.url, '网址', 'row-url')}
+                        >
+                          {copiedKey === 'row-url' ? <Check size={13} /> : <Copy size={13} />}
+                          <span>{copiedKey === 'row-url' ? '已复制' : '复制'}</span>
+                        </button>
+                        <a
+                          href={toSafeHref(selectedItem.url)}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="btn btn-secondary"
+                          style={{
+                            height: 31,
+                            padding: '0 10px',
+                            fontSize: '0.8rem',
+                            textDecoration: 'none',
+                          }}
+                        >
+                          <ExternalLink size={13} />
+                          <span>打开</span>
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Optional RFC 6238 TOTP Card (Rendered ONLY when user configured 2FA) */}
+                {totpSnapshot ? (
                   <div className="pss-totp-card">
                     <div>
-                      <div className="pss-totp-label">两步验证动态口令 (RFC 6238 TOTP)</div>
+                      <div className="pss-totp-label-row">
+                        <span className="pss-totp-label">两步验证动态口令 (TOTP)</span>
+                        <span className="pss-totp-opt-tag">可选配置</span>
+                      </div>
                       <button
                         type="button"
                         className="pss-totp-code mono"
-                        title="点击复制 6 位动态口令"
-                        onClick={() => void copyText(totpSnapshot.code, '动态验证码')}
+                        title="点击复制动态验证码"
+                        onClick={() => void copyText(totpSnapshot.code, '动态验证码', 'row-totp')}
                       >
                         {totpSnapshot.formattedCode}
                       </button>
@@ -969,7 +1229,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                         className="pss-totp-ring-wrap"
                         title={`剩余 ${totpSnapshot.remainingSeconds} 秒刷新`}
                       >
-                        <svg width="32" height="32" viewBox="0 0 32 32">
+                        <svg width="30" height="30" viewBox="0 0 32 32">
                           <circle
                             cx="16"
                             cy="16"
@@ -996,132 +1256,42 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                       </div>
                       <button
                         type="button"
-                        className="btn btn-primary"
-                        style={{ height: 34, padding: '0 13px', fontSize: '0.84rem' }}
-                        onClick={() => void copyText(totpSnapshot.code, '动态验证码')}
+                        className="btn btn-secondary"
+                        style={{ height: 32, padding: '0 12px', fontSize: '0.82rem' }}
+                        onClick={() => void copyText(totpSnapshot.code, '动态验证码', 'row-totp')}
                       >
-                        <Copy size={13} />
-                        <span>复制动态码</span>
+                        {copiedKey === 'row-totp' ? <Check size={13} /> : <Copy size={13} />}
+                        <span>{copiedKey === 'row-totp' ? '已复制' : '复制动态码'}</span>
                       </button>
                     </div>
                   </div>
-                )}
-
-                {/* Core Credentials Card */}
-                <div className="pss-cred-card">
-                  <div className="pss-cred-row">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="pss-field-caption">用户名 / 登录账号</div>
-                      <div className="pss-field-value mono" style={{ wordBreak: 'break-all' }}>
-                        {selectedItem.username || '—'}
+                ) : invalidTotpSet.has(selectedItem.id) ? (
+                  <div className="pss-totp-invalid-card">
+                    <div className="pss-totp-invalid-text">
+                      <AlertTriangle size={15} style={{ color: 'var(--amber)', flexShrink: 0 }} />
+                      <div>
+                        <strong>两步验证密钥格式有误</strong>
+                        <p>
+                          当前填写的 2FA 密钥不是合法的 Base32 或 otpauth://
+                          格式；若此账号无需两步验证，可在编辑中直接关闭。
+                        </p>
                       </div>
                     </div>
-                    {selectedItem.username && (
+                    {!selectedItem.isTrashed && (
                       <button
                         type="button"
                         className="btn btn-secondary"
-                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
-                        onClick={() => void copyText(selectedItem.username, '用户名')}
+                        style={{ height: 31, padding: '0 11px', fontSize: '0.8rem', flexShrink: 0 }}
+                        onClick={() => setFormState({ open: true, editing: selectedItem })}
                       >
-                        <Copy size={13} />
-                        <span>复制</span>
+                        <Edit3 size={13} />
+                        <span>编辑修正或关闭</span>
                       </button>
                     )}
                   </div>
+                ) : null}
 
-                  <div className="pss-cred-row">
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="pss-field-caption pss-caption-row">
-                        <span>加密登录密码</span>
-                        <span className={`pss-entropy-pill level-${selectedEntropy.score}`}>
-                          {selectedEntropy.label} · {selectedEntropy.entropyBits} bits
-                        </span>
-                        {weakSet.has(selectedItem.id) && (
-                          <span className="pss-warn-badge is-danger">
-                            <AlertTriangle size={11} /> 弱密码风险
-                          </span>
-                        )}
-                        {reusedSet.has(selectedItem.id) && (
-                          <span className="pss-warn-badge">
-                            <AlertTriangle size={11} /> 重复使用
-                          </span>
-                        )}
-                      </div>
-                      <div
-                        className={`pss-field-value mono ${!revealPassword ? 'is-masked' : ''}`}
-                        style={{ wordBreak: 'break-all' }}
-                      >
-                        {revealPassword ? (
-                          <ColorizedPassword text={selectedItem.password} />
-                        ) : (
-                          '••••••••••••••••••••'
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
-                        onClick={() => setRevealPassword((v) => !v)}
-                      >
-                        {revealPassword ? <EyeOff size={13} /> : <Eye size={13} />}
-                        <span>{revealPassword ? '隐藏' : '显示'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
-                        onClick={() => void copyText(selectedItem.password, '密码')}
-                      >
-                        <Copy size={13} />
-                        <span>复制</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {selectedItem.url && (
-                    <div className="pss-cred-row">
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="pss-field-caption">关联网站 / 服务地址</div>
-                        <div
-                          className="pss-field-value mono"
-                          style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                        >
-                          {selectedItem.url}
-                        </div>
-                      </div>
-                      <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          style={{ height: 31, padding: '0 10px', fontSize: '0.8rem' }}
-                          onClick={() => void copyText(selectedItem.url, '网址')}
-                        >
-                          <Copy size={13} />
-                          <span>复制</span>
-                        </button>
-                        <a
-                          href={toSafeHref(selectedItem.url)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="btn btn-secondary"
-                          style={{
-                            height: 31,
-                            padding: '0 10px',
-                            fontSize: '0.8rem',
-                            textDecoration: 'none',
-                          }}
-                        >
-                          <ExternalLink size={13} />
-                          <span>打开</span>
-                        </a>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Custom Fields */}
+                {/* 3. Custom Fields */}
                 {selectedItem.customFields.length > 0 && (
                   <div className="pss-cred-card">
                     <div className="pss-card-section-head">
@@ -1129,6 +1299,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                     </div>
                     {selectedItem.customFields.map((cf) => {
                       const shown = !cf.hidden || Boolean(revealedFieldIds[cf.id]);
+                      const cfCopyKey = `cf-${cf.id}`;
                       return (
                         <div key={cf.id} className="pss-cred-row">
                           <div style={{ flex: 1, minWidth: 0 }}>
@@ -1160,9 +1331,11 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                               type="button"
                               className="btn-icon"
                               title="复制字段值"
-                              onClick={() => void copyText(cf.value, cf.label || '字段内容')}
+                              onClick={() =>
+                                void copyText(cf.value, cf.label || '字段内容', cfCopyKey)
+                              }
                             >
-                              <Copy size={14} />
+                              {copiedKey === cfCopyKey ? <Check size={14} /> : <Copy size={14} />}
                             </button>
                           </div>
                         </div>
@@ -1171,7 +1344,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                   </div>
                 )}
 
-                {/* Encrypted Notes */}
+                {/* 4. Encrypted Notes */}
                 {selectedItem.notes.trim().length > 0 && (
                   <div className="pss-section-card">
                     <div className="pss-field-caption">加密私密备注</div>
@@ -1179,13 +1352,14 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                   </div>
                 )}
 
-                {/* Metadata & Password History */}
+                {/* 5. Metadata & Password History */}
                 <div className="pss-section-card">
                   <div className="pss-meta-footer-row">
                     <span>
                       <Clock size={12} style={{ verticalAlign: '-2px', marginRight: 5 }} />
                       创建于 {formatFullDateTime(selectedItem.createdAt)} · 更新于{' '}
-                      {formatShortDate(selectedItem.updatedAt)} · 密文 {formatBytes(selectedItem.byteSize)}
+                      {formatShortDate(selectedItem.updatedAt)} · 密文{' '}
+                      {formatBytes(selectedItem.byteSize)}
                     </span>
                     {selectedItem.history.length > 0 && (
                       <button
@@ -1222,9 +1396,9 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                             type="button"
                             className="btn-icon"
                             title="复制历史旧密码"
-                            onClick={() => void copyText(h.password, '历史旧密码')}
+                            onClick={() => void copyText(h.password, '历史旧密码', `hist-${i}`)}
                           >
-                            <Copy size={13} />
+                            {copiedKey === `hist-${i}` ? <Check size={13} /> : <Copy size={13} />}
                           </button>
                         </div>
                       ))}
@@ -1273,6 +1447,7 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               if (
                 catFilter !== 'all' &&
                 catFilter !== 'starred' &&
+                !(catFilter === 'has2fa' && Boolean(created.totpSecret.trim())) &&
                 created.category !== catFilter
               ) {
                 setCatFilter('all');
@@ -1331,11 +1506,22 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
   const [category, setCategory] = useState<PasswordCategory>(
     editing?.category ?? defaultCategory,
   );
+  const [isPinned, setIsPinned] = useState(editing?.isPinned ?? false);
   const [username, setUsername] = useState(editing?.username ?? '');
   const [password, setPassword] = useState(editing?.password ?? '');
-  const [showPwd, setShowPwd] = useState(true);
+  const [showPwd, setShowPwd] = useState(() => !editing);
   const [url, setUrl] = useState(editing?.url ?? '');
+
+  // Optional 2FA: collapsed/OFF by default unless editing an item that already configured 2FA
+  const hadInitialTotp = Boolean(editing?.totpSecret?.trim());
+  const [enableTotp, setEnableTotp] = useState(hadInitialTotp);
   const [totpSecret, setTotpSecret] = useState(editing?.totpSecret ?? '');
+  const [previewMs, setPreviewMs] = useState(() => Date.now());
+
+  // Optional extras: collapsed by default on new items to keep standard password entry clean
+  const [showExtras, setShowExtras] = useState(() =>
+    Boolean(editing && (editing.tags.length > 0 || editing.customFields.length > 0)),
+  );
   const [tagsText, setTagsText] = useState(editing?.tags.join(', ') ?? '');
   const [notes, setNotes] = useState(editing?.notes ?? '');
   const [customFields, setCustomFields] = useState<PasswordCustomField[]>(
@@ -1357,22 +1543,69 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
 
   const entropy = useMemo(() => evaluatePasswordEntropy(password), [password]);
 
+  const totpValidation = useMemo(() => {
+    if (!enableTotp || !totpSecret.trim()) {
+      return { valid: false, config: null, error: null as string | null };
+    }
+    try {
+      const config = parseTotpInput(totpSecret);
+      return { valid: true, config, error: null as string | null };
+    } catch (err) {
+      return {
+        valid: false,
+        config: null,
+        error: err instanceof Error ? err.message : '2FA 密钥格式无效',
+      };
+    }
+  }, [enableTotp, totpSecret]);
+
+  useEffect(() => {
+    if (!totpValidation.valid) return;
+    setPreviewMs(Date.now());
+    const timer = window.setInterval(() => setPreviewMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [totpValidation.valid]);
+
+  const totpPreview = useMemo(
+    () => (totpValidation.valid ? tryGenerateTotp(totpSecret, previewMs) : null),
+    [totpValidation.valid, totpSecret, previewMs],
+  );
+
+  const suggestedHost = useMemo(() => extractDisplayHost(url), [url]);
+
+  const extraCount = useMemo(() => {
+    const tagCount = tagsText
+      .split(/[,，]/)
+      .map((t) => t.trim())
+      .filter(Boolean).length;
+    const cfCount = customFields.filter((cf) => cf.label.trim() || cf.value.trim()).length;
+    return tagCount + cfCount;
+  }, [tagsText, customFields]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!title.trim()) {
-      setError('请填写账号标题');
+      setError('请填写网站或应用名称');
       return;
     }
+    if (enableTotp && totpSecret.trim() && totpValidation.error) {
+      setError(`两步验证密钥格式有误（${totpValidation.error}），请修正或关闭两步验证开关`);
+      return;
+    }
+
+    const finalTotp = enableTotp ? totpSecret.trim() : '';
+
     setSubmitting(true);
     setError(null);
     try {
       await onSave({
         title: title.trim(),
         category,
+        isPinned,
         username: username.trim(),
         password,
         url: url.trim(),
-        totpSecret: totpSecret.trim(),
+        totpSecret: finalTotp,
         tags: tagsText
           .split(/[,，]/)
           .map((t) => t.trim())
@@ -1397,7 +1630,7 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
       >
         <form
           className="modal-dialog pss-editor-dialog"
-          style={{ maxWidth: 580 }}
+          style={{ maxWidth: 576 }}
           role="dialog"
           aria-modal="true"
           aria-labelledby="pwd-editor-modal-title"
@@ -1410,22 +1643,47 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
                 {editing ? '编辑加密密码条目' : '新建私密密码条目'}
               </h2>
             </div>
-            <button type="button" className="btn-icon" onClick={onClose} aria-label="关闭">
-              <X size={17} />
-            </button>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <button
+                type="button"
+                className={`btn-icon ${isPinned ? 'is-active' : ''}`}
+                title={isPinned ? '取消收藏置顶' : '设为收藏置顶'}
+                aria-label={isPinned ? '取消收藏置顶' : '设为收藏置顶'}
+                onClick={() => setIsPinned((v) => !v)}
+              >
+                <Star
+                  size={16}
+                  fill={isPinned ? 'var(--amber)' : 'none'}
+                  style={{ color: isPinned ? 'var(--amber)' : undefined }}
+                />
+              </button>
+              <button type="button" className="btn-icon" onClick={onClose} aria-label="关闭">
+                <X size={17} />
+              </button>
+            </div>
           </header>
 
           <div className="modal-body pss-editor-form-body">
+            {/* Row 1: Title + Category */}
             <div className="pss-form-grid-title">
               <div className="field-group">
-                <label className="field-label" htmlFor="pwd-field-title">
-                  标题名称 *
-                </label>
+                <div className="field-label">
+                  <label htmlFor="pwd-field-title">网站 / 应用名称 *</label>
+                  {!title.trim() && suggestedHost && (
+                    <button
+                      type="button"
+                      className="pss-link-mini"
+                      onClick={() => setTitle(suggestedHost)}
+                    >
+                      填入“{suggestedHost}”
+                    </button>
+                  )}
+                </div>
                 <input
                   id="pwd-field-title"
                   type="text"
                   className="field-input pss-modal-input"
-                  placeholder="例如：GitHub Enterprise 主账号"
+                  placeholder="例如：京东商城、哔哩哔哩、家庭软路由"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   autoFocus
@@ -1451,20 +1709,39 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
               </div>
             </div>
 
-            <div className="field-group">
-              <label className="field-label" htmlFor="pwd-field-username">
-                用户名 / 邮箱 / 登录卡号
-              </label>
-              <input
-                id="pwd-field-username"
-                type="text"
-                className="field-input pss-modal-input mono"
-                placeholder="user@example.com"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-              />
+            {/* Row 2: Username + Website URL */}
+            <div className="pss-form-grid-two">
+              <div className="field-group">
+                <label className="field-label" htmlFor="pwd-field-username">
+                  <span>用户名 / 手机号 / 邮箱</span>
+                  <span className="pss-label-opt">选填</span>
+                </label>
+                <input
+                  id="pwd-field-username"
+                  type="text"
+                  className="field-input pss-modal-input mono"
+                  placeholder="账号或留空（仅密码凭据）"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+              </div>
+              <div className="field-group">
+                <label className="field-label" htmlFor="pwd-field-url">
+                  <span>关联网址 (URL)</span>
+                  <span className="pss-label-opt">选填</span>
+                </label>
+                <input
+                  id="pwd-field-url"
+                  type="text"
+                  className="field-input pss-modal-input mono"
+                  placeholder="https://example.com 或内网 IP"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                />
+              </div>
             </div>
 
+            {/* Row 3: Password + Inline Generator */}
             <div className="field-group">
               <div className="field-label">
                 <span>
@@ -1479,7 +1756,10 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
                   <button
                     type="button"
                     className="pss-link-mini"
-                    onClick={() => setPassword(generateSecurePassword({ length: 20 }))}
+                    onClick={() => {
+                      setPassword(generateSecurePassword({ length: 20 }));
+                      setShowPwd(true);
+                    }}
                   >
                     <RefreshCw size={12} /> 一键随机
                   </button>
@@ -1499,7 +1779,7 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
                   className="field-input pss-modal-input has-trailing mono"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="输入密码或点击右上角生成高强度随机口令"
+                  placeholder="输入网站现有密码，或点击右上角生成高强度口令"
                 />
                 <button
                   type="button"
@@ -1524,137 +1804,252 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
               )}
             </div>
 
-            <div className="pss-form-grid-two">
-              <div className="field-group">
-                <label className="field-label" htmlFor="pwd-field-url">
-                  关联网址 (URL)
-                </label>
-                <input
-                  id="pwd-field-url"
-                  type="text"
-                  className="field-input pss-modal-input mono"
-                  placeholder="https://github.com"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                />
-              </div>
-              <div className="field-group">
-                <label className="field-label" htmlFor="pwd-field-totp">
-                  两步验证密钥 (Base32 / otpauth)
-                </label>
-                <input
-                  id="pwd-field-totp"
-                  type="text"
-                  className="field-input pss-modal-input mono"
-                  placeholder="JBSWY3DPEHPK3PXP"
-                  value={totpSecret}
-                  onChange={(e) => setTotpSecret(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="field-group">
-              <label className="field-label" htmlFor="pwd-field-tags">
-                加密标签（逗号分隔）
-              </label>
-              <input
-                id="pwd-field-tags"
-                type="text"
-                className="field-input pss-modal-input"
-                placeholder="核心研发, 2FA已开启, 生产环境"
-                value={tagsText}
-                onChange={(e) => setTagsText(e.target.value)}
-              />
-            </div>
-
-            <div className="field-group">
-              <div className="field-label">
-                <span>自定义附加字段（恢复备用码、PIN、私钥口令）</span>
-                <button
-                  type="button"
-                  className="pss-link-mini"
-                  onClick={() =>
-                    setCustomFields((prev) => [
-                      ...prev,
-                      { id: crypto.randomUUID(), label: '', value: '', hidden: true },
-                    ])
-                  }
-                >
-                  + 添加字段
-                </button>
-              </div>
-              {customFields.length > 0 && (
-                <div className="pss-custom-fields-stack">
-                  {customFields.map((cf, i) => (
-                    <div key={cf.id} className="pss-custom-field-row">
-                      <input
-                        type="text"
-                        className="field-input pss-modal-input is-sm"
-                        placeholder="字段名"
-                        value={cf.label}
-                        onChange={(e) =>
-                          setCustomFields((prev) =>
-                            prev.map((item, idx) =>
-                              idx === i ? { ...item, label: e.target.value } : item,
-                            ),
-                          )
-                        }
-                      />
-                      <input
-                        type="text"
-                        className="field-input pss-modal-input is-sm mono"
-                        placeholder="字段内容"
-                        value={cf.value}
-                        onChange={(e) =>
-                          setCustomFields((prev) =>
-                            prev.map((item, idx) =>
-                              idx === i ? { ...item, value: e.target.value } : item,
-                            ),
-                          )
-                        }
-                      />
-                      <label className="pss-checkbox-item is-compact">
-                        <input
-                          type="checkbox"
-                          checked={cf.hidden}
-                          onChange={(e) =>
-                            setCustomFields((prev) =>
-                              prev.map((item, idx) =>
-                                idx === i ? { ...item, hidden: e.target.checked } : item,
-                              ),
-                            )
-                          }
-                        />
-                        <span>遮罩</span>
-                      </label>
-                      <button
-                        type="button"
-                        className="btn-icon"
-                        style={{ width: 28, height: 28 }}
-                        aria-label="移除此字段"
-                        onClick={() =>
-                          setCustomFields((prev) => prev.filter((_, idx) => idx !== i))
-                        }
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
+            {/* Row 4: Notes */}
             <div className="field-group">
               <label className="field-label" htmlFor="pwd-field-notes">
-                私密备注
+                <span>私密备注</span>
+                <span className="pss-label-opt">选填</span>
               </label>
               <textarea
                 id="pwd-field-notes"
                 className="field-input pss-modal-textarea"
-                placeholder="加密保存硬件密钥恢复指引、客服安全问题或备注..."
+                rows={2}
+                placeholder="记录绑定手机号、客服安全问题、SSH 端口等备注信息..."
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
               />
+            </div>
+
+            {/* Row 5: Optional 2FA Switch Card (Collapsed by default for normal passwords) */}
+            <div className={`pss-optional-card ${enableTotp ? 'is-enabled' : ''}`}>
+              <div
+                className="pss-optional-head"
+                onClick={() => setEnableTotp((v) => !v)}
+              >
+                <div className="pss-optional-head-text">
+                  <div className="pss-optional-title-row">
+                    <span>两步验证 (2FA / TOTP 动态口令)</span>
+                    <span className="pss-opt-pill">可选项</span>
+                  </div>
+                  <p className="pss-optional-desc">
+                    大多数网站或应用仅需账号密码；目标服务支持身份验证器时再按需开启
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={enableTotp}
+                  aria-label="启用两步验证 (2FA)"
+                  className={`pss-switch ${enableTotp ? 'is-on' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEnableTotp((v) => !v);
+                  }}
+                >
+                  <span className="pss-switch-thumb" />
+                </button>
+              </div>
+
+              {enableTotp && (
+                <div className="pss-optional-body">
+                  <div className="field-group">
+                    <div className="field-label">
+                      <label htmlFor="pwd-field-totp">Base32 密钥或 otpauth:// 链接</label>
+                      {totpValidation.config &&
+                        ((!title.trim() && totpValidation.config.issuer) ||
+                          (!username.trim() && totpValidation.config.accountName)) && (
+                          <button
+                            type="button"
+                            className="pss-link-mini"
+                            onClick={() => {
+                              if (!title.trim() && totpValidation.config?.issuer) {
+                                setTitle(totpValidation.config.issuer);
+                              }
+                              if (!username.trim() && totpValidation.config?.accountName) {
+                                setUsername(totpValidation.config.accountName);
+                              }
+                            }}
+                          >
+                            填入 URI 账号信息
+                          </button>
+                        )}
+                    </div>
+                    <input
+                      id="pwd-field-totp"
+                      type="text"
+                      className="field-input pss-modal-input mono"
+                      placeholder="例如：JBSWY3DPEHPK3PXP 或 otpauth://totp/..."
+                      value={totpSecret}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setTotpSecret(val);
+                        if (val.trim().toLowerCase().startsWith('otpauth://')) {
+                          try {
+                            const parsed = parseTotpInput(val);
+                            if (!title.trim() && parsed.issuer) setTitle(parsed.issuer);
+                            if (!username.trim() && parsed.accountName) {
+                              setUsername(parsed.accountName);
+                            }
+                          } catch {
+                            // Ignore until complete URI is entered
+                          }
+                        }
+                      }}
+                    />
+                  </div>
+
+                  {totpPreview && totpValidation.config ? (
+                    <div className="pss-totp-live-preview">
+                      <div className="pss-totp-live-left">
+                        <span className="pss-totp-live-badge">实时预览</span>
+                        <strong className="mono pss-totp-live-code">
+                          {totpPreview.formattedCode}
+                        </strong>
+                      </div>
+                      <span className="pss-totp-live-meta mono">
+                        {totpPreview.remainingSeconds}s 刷新 · {totpValidation.config.algorithm} ·{' '}
+                        {totpValidation.config.digits}位
+                      </span>
+                    </div>
+                  ) : totpValidation.error ? (
+                    <div className="pss-totp-inline-error">
+                      <AlertTriangle size={13} />
+                      <span>{totpValidation.error}（请输入合法 Base32 密钥或 otpauth:// 链接）</span>
+                    </div>
+                  ) : (
+                    <div className="pss-totp-inline-hint">
+                      粘贴网站提供的身份验证器密钥即可实时生成验证码；留空或关闭开关则仅保存常规密码。
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!enableTotp && hadInitialTotp && (
+                <div className="pss-totp-removed-note">
+                  <span>已关闭两步验证，保存后将移除此条目的 2FA 密钥。</span>
+                  <button
+                    type="button"
+                    className="pss-link-mini"
+                    onClick={() => setEnableTotp(true)}
+                  >
+                    撤销
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Row 6: Collapsible Extras (Tags & Custom Hidden Fields) */}
+            <div className="pss-extras-section">
+              <button
+                type="button"
+                className="pss-extras-toggle"
+                aria-expanded={showExtras}
+                onClick={() => setShowExtras((v) => !v)}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {showExtras ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span>更多选填项（标签 / 自定义隐藏字段）</span>
+                </span>
+                {extraCount > 0 && (
+                  <span className="pss-opt-pill is-accent">已填 {extraCount} 项</span>
+                )}
+              </button>
+
+              {showExtras && (
+                <div className="pss-extras-body">
+                  <div className="field-group">
+                    <label className="field-label" htmlFor="pwd-field-tags">
+                      <span>加密标签（逗号分隔）</span>
+                      <span className="pss-label-opt">选填</span>
+                    </label>
+                    <input
+                      id="pwd-field-tags"
+                      type="text"
+                      className="field-input pss-modal-input is-sm"
+                      placeholder="例如：日常购物, 家庭网络, 生产环境"
+                      value={tagsText}
+                      onChange={(e) => setTagsText(e.target.value)}
+                    />
+                  </div>
+
+                  <div className="field-group">
+                    <div className="field-label">
+                      <span>自定义附加字段（PIN 码、恢复备用码、API 密钥）</span>
+                      <button
+                        type="button"
+                        className="pss-link-mini"
+                        onClick={() =>
+                          setCustomFields((prev) => [
+                            ...prev,
+                            { id: crypto.randomUUID(), label: '', value: '', hidden: true },
+                          ])
+                        }
+                      >
+                        + 添加字段
+                      </button>
+                    </div>
+                    {customFields.length > 0 && (
+                      <div className="pss-custom-fields-stack">
+                        {customFields.map((cf, i) => (
+                          <div key={cf.id} className="pss-custom-field-row">
+                            <input
+                              type="text"
+                              className="field-input pss-modal-input is-sm"
+                              placeholder="字段名"
+                              value={cf.label}
+                              onChange={(e) =>
+                                setCustomFields((prev) =>
+                                  prev.map((item, idx) =>
+                                    idx === i ? { ...item, label: e.target.value } : item,
+                                  ),
+                                )
+                              }
+                            />
+                            <input
+                              type="text"
+                              className="field-input pss-modal-input is-sm mono"
+                              placeholder="字段内容"
+                              value={cf.value}
+                              onChange={(e) =>
+                                setCustomFields((prev) =>
+                                  prev.map((item, idx) =>
+                                    idx === i ? { ...item, value: e.target.value } : item,
+                                  ),
+                                )
+                              }
+                            />
+                            <label className="pss-checkbox-item is-compact">
+                              <input
+                                type="checkbox"
+                                checked={cf.hidden}
+                                onChange={(e) =>
+                                  setCustomFields((prev) =>
+                                    prev.map((item, idx) =>
+                                      idx === i ? { ...item, hidden: e.target.checked } : item,
+                                    ),
+                                  )
+                                }
+                              />
+                              <span>遮罩</span>
+                            </label>
+                            <button
+                              type="button"
+                              className="btn-icon"
+                              style={{ width: 28, height: 28 }}
+                              aria-label="移除此字段"
+                              onClick={() =>
+                                setCustomFields((prev) => prev.filter((_, idx) => idx !== i))
+                              }
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {error && <div className="auth-error">{error}</div>}
@@ -1676,7 +2071,10 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
         open={genOpen}
         stacked
         onClose={() => setGenOpen(false)}
-        onUsePassword={(pwd) => setPassword(pwd)}
+        onUsePassword={(pwd) => {
+          setPassword(pwd);
+          setShowPwd(true);
+        }}
         onNotify={onNotify}
       />
     </>

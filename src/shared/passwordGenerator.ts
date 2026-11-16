@@ -1,6 +1,7 @@
 /**
  * Unbiased CSPRNG Password & Memorable Passphrase Generator + Vault Security Health Auditor.
  */
+import { isValidTotpSecret } from './totp.js';
 import type { PasswordItem } from './types.js';
 
 export interface PasswordGeneratorOptions {
@@ -31,6 +32,11 @@ export interface VaultPasswordAuditReport {
   totalCount: number;
   weakIds: string[];
   reusedIds: string[];
+  /** Entries with a valid optional 2FA (TOTP) secret configured */
+  totpIds: string[];
+  /** Entries with a non-empty but malformed 2FA secret */
+  invalidTotpIds: string[];
+  /** Entries without 2FA configured (informational only; never penalized in healthScore) */
   missingTotpIds: string[];
   staleIds: string[];
 }
@@ -220,12 +226,16 @@ export function auditPasswordVault(
       totalCount: 0,
       weakIds: [],
       reusedIds: [],
+      totpIds: [],
+      invalidTotpIds: [],
       missingTotpIds: [],
       staleIds: [],
     };
   }
 
   const weakIds: string[] = [];
+  const totpIds: string[] = [];
+  const invalidTotpIds: string[] = [];
   const missingTotpIds: string[] = [];
   const staleIds: string[] = [];
   const byPassword = new Map<string, string[]>();
@@ -242,8 +252,13 @@ export function auditPasswordVault(
       group.push(item.id);
       byPassword.set(pwd, group);
     }
-    if (!item.totpSecret?.trim()) {
+    const rawTotp = item.totpSecret?.trim() ?? '';
+    if (!rawTotp) {
       missingTotpIds.push(item.id);
+    } else if (isValidTotpSecret(rawTotp)) {
+      totpIds.push(item.id);
+    } else {
+      invalidTotpIds.push(item.id);
     }
     const updatedMs = Date.parse(item.passwordChangedAt || item.updatedAt);
     if (Number.isFinite(updatedMs) && nowMs - updatedMs > staleThresholdMs) {
@@ -259,19 +274,26 @@ export function auditPasswordVault(
   }
   const reusedIds = [...reusedSet];
 
+  // 2FA is strictly optional: many websites/apps only support standard passwords,
+  // so missing 2FA never reduces the vault security health score.
   const total = active.length;
-  const weakPenalty = (weakIds.length / total) * 45;
+  const weakPenalty = (weakIds.length / total) * 55;
   const reusedPenalty = (reusedIds.length / total) * 35;
-  const totpPenalty = (missingTotpIds.length / total) * 15;
-  const stalePenalty = (staleIds.length / total) * 5;
-  const rawScore = Math.round(100 - weakPenalty - reusedPenalty - totpPenalty - stalePenalty);
+  const stalePenalty = (staleIds.length / total) * 10;
+  const invalidTotpPenalty = (invalidTotpIds.length / total) * 10;
+  const rawScore = Math.round(
+    100 - weakPenalty - reusedPenalty - stalePenalty - invalidTotpPenalty,
+  );
 
   return {
     healthScore: Math.max(0, Math.min(100, rawScore)),
     totalCount: total,
     weakIds,
     reusedIds,
+    totpIds,
+    invalidTotpIds,
     missingTotpIds,
     staleIds,
   };
 }
+

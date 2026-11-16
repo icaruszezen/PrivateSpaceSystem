@@ -342,3 +342,26 @@ export function generateTotp(
     progress,
   };
 }
+
+export function isValidTotpSecret(rawInput?: string | null): boolean {
+  if (!rawInput || !rawInput.trim()) return false;
+  try {
+    parseTotpInput(rawInput);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function tryGenerateTotp(
+  rawInput?: string | null,
+  timestampMs: number = Date.now(),
+): TotpTokenSnapshot | null {
+  if (!rawInput || !rawInput.trim()) return null;
+  try {
+    return generateTotp(rawInput, timestampMs);
+  } catch {
+    return null;
+  }
+}
+
