@@ -7,6 +7,7 @@ import './styles/auth.css';
 import './styles/disguise.css';
 import './styles/workspace.css';
 import './styles/vault-media.css';
+import './styles/transfer.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

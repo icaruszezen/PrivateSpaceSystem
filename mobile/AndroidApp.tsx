@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
+  ArrowLeftRight,
   CheckCircle2,
   Download,
   EyeOff,
@@ -29,6 +30,7 @@ import type {
   AppUpdateCheckResponse,
   CreateNoteRequest,
   CreatePasswordRequest,
+  CreateTransferTextRequest,
   ImportPasswordEntryInput,
   MediaAlbum,
   MediaItem,
@@ -37,9 +39,11 @@ import type {
   NoteItem,
   PasswordImportOptions,
   PasswordItem,
+  TransferItem,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
+  UpdateTransferRequest,
 } from '@shared/types';
 import { PASSWORD_IMPORT_BATCH_SIZE } from '@shared/passwordCsv';
 import { MobileAuthScreen } from './src/components/MobileAuthScreen';
@@ -49,6 +53,7 @@ import { MobilePasswordsTab } from './src/components/MobilePasswordsTab';
 import { MobilePhotosTab } from './src/components/MobilePhotosTab';
 import { MobilePinLockScreen } from './src/components/MobilePinLockScreen';
 import { MobileSecurityTab } from './src/components/MobileSecurityTab';
+import { MobileTransferTab } from './src/components/MobileTransferTab';
 import { MobileUpdateModal } from './src/components/MobileUpdateModal';
 import { MobileVideosTab } from './src/components/MobileVideosTab';
 import {
@@ -69,7 +74,7 @@ import {
 } from './src/syncClient';
 
 type AppStage = 'booting' | 'auth' | 'pin_locked' | 'unlocked';
-type MobileTabId = 'passwords' | 'images' | 'videos' | 'notes' | 'security';
+type MobileTabId = 'passwords' | 'transfers' | 'images' | 'videos' | 'notes' | 'security';
 
 const LS_SERVER_URL = 'pss_android_server_url';
 const LS_VAULT_NAME = 'pss_android_vault_name';
@@ -230,9 +235,10 @@ export default function PrivateSpaceMobileApp() {
         setIsOfflineMode(false);
         await refreshPendingCount();
         if (!silent) {
+          const totalUpdated = delta.items.length + (delta.transfers?.length ?? 0);
           notify(
-            delta.items.length > 0 || delta.deleted.length > 0
-              ? `同步完成：更新 ${delta.items.length} 项 · 游标 #${next.lastSyncSeq}`
+            totalUpdated > 0 || delta.deleted.length > 0
+              ? `同步完成：更新 ${totalUpdated} 项 · 游标 #${next.lastSyncSeq}`
               : `已是最新状态 · 游标 #${next.lastSyncSeq}`,
           );
         }
@@ -269,7 +275,8 @@ export default function PrivateSpaceMobileApp() {
         cachedSnap &&
           (Object.keys(cachedSnap.passwords).length > 0 ||
             Object.keys(cachedSnap.notes).length > 0 ||
-            Object.keys(cachedSnap.media).length > 0),
+            Object.keys(cachedSnap.media).length > 0 ||
+            Object.keys(cachedSnap.transfers ?? {}).length > 0),
       );
       if (!cancelled) setHasOfflineCache(cachedHasItems);
 
@@ -388,7 +395,7 @@ export default function PrivateSpaceMobileApp() {
       }
 
       if (stage === 'unlocked') {
-        setActiveTab('notes');
+        setActiveTab('transfers');
         setSharedInboundText({
           title: payload.subject,
           content: rawText,
@@ -611,6 +618,85 @@ export default function PrivateSpaceMobileApp() {
     notify(`已彻底清空回收站 (${count} 篇)`);
   }, [client, refreshSnapshotFromCache, notify]);
 
+  // Cross-Device Transfers & Chat
+  const handleSendTransferText = useCallback(
+    async (input: CreateTransferTextRequest): Promise<void> => {
+      const { queuedOffline } = await client.sendTransferTextWithOffline(input, {
+        allowOfflineQueue: true,
+      });
+      await refreshSnapshotFromCache();
+      if (queuedOffline) {
+        setIsOfflineMode(true);
+        notify('当前离线，消息已写入本机加密队列，联网后自动互传');
+      }
+    },
+    [client, refreshSnapshotFromCache, notify],
+  );
+
+  const handleSendTransferFiles = useCallback(
+    async (
+      fileList: FileList | File[],
+      opts?: { text?: string; replyToId?: string | null; replyPreview?: string | null },
+    ): Promise<void> => {
+      const files = Array.from(fileList);
+      for (let i = 0; i < files.length; i += 1) {
+        const file = files[i];
+        const taskId = crypto.randomUUID();
+        setUploadingTasks((prev) => [...prev, { id: taskId, name: file.name, progress: 0.05 }]);
+        try {
+          const { autoSavedMedia } = await client.sendTransferFile({
+            file,
+            filename: file.name,
+            mimeType: file.type,
+            text: i === 0 ? opts?.text : undefined,
+            replyToId: i === 0 ? opts?.replyToId : null,
+            replyPreview: i === 0 ? opts?.replyPreview : null,
+            chunkBytes: 512 * 1024,
+            onProgress: (loaded, total) => {
+              setUploadingTasks((prev) =>
+                prev.map((t) =>
+                  t.id === taskId
+                    ? { ...t, progress: Math.min(0.98, loaded / Math.max(1, total)) }
+                    : t,
+                ),
+              );
+            },
+          });
+          await refreshSnapshotFromCache();
+          if (autoSavedMedia) {
+            notify(
+              `已互传并自动存入${autoSavedMedia.itemType === 'video' ? '加密影院' : '加密相册'}：${file.name}`,
+            );
+          } else {
+            notify(`已加密互传：${file.name}`);
+          }
+        } catch (err) {
+          notify(err instanceof Error ? err.message : `互传失败：${file.name}`);
+        } finally {
+          setUploadingTasks((prev) => prev.filter((t) => t.id !== taskId));
+        }
+      }
+    },
+    [client, refreshSnapshotFromCache, notify],
+  );
+
+  const handleUpdateTransfer = useCallback(
+    async (id: string, patch: UpdateTransferRequest): Promise<void> => {
+      await client.updateTransfer(id, patch);
+      await refreshSnapshotFromCache();
+    },
+    [client, refreshSnapshotFromCache],
+  );
+
+  const handleDeleteTransferPermanent = useCallback(
+    async (id: string): Promise<void> => {
+      await client.deleteTransferPermanently(id);
+      await refreshSnapshotFromCache();
+      notify('互传记录已永久销毁');
+    },
+    [client, refreshSnapshotFromCache, notify],
+  );
+
   const handleLockApp = useCallback(async () => {
     const qCfg = await quickLockManager.getConfig();
     if (qCfg && client.getToken()) {
@@ -657,15 +743,20 @@ export default function PrivateSpaceMobileApp() {
     () => Object.values(snapshot.notes),
     [snapshot.notes],
   );
+  const transferList = useMemo<TransferItem[]>(
+    () => Object.values(snapshot.transfers ?? {}),
+    [snapshot.transfers],
+  );
 
   const activeCounts = useMemo(
     () => ({
       passwords: passwordList.filter((p) => !p.isTrashed).length,
+      transfers: transferList.length,
       images: photoList.filter((p) => !p.isTrashed).length,
       videos: videoList.filter((v) => !v.isTrashed).length,
       notes: noteList.filter((n) => !n.isTrashed && !n.isArchived).length,
     }),
-    [passwordList, photoList, videoList, noteList],
+    [passwordList, transferList, photoList, videoList, noteList],
   );
 
   const handleUpdatePrefsChange = useCallback((next: MobileUpdatePreferences) => {
@@ -958,7 +1049,7 @@ export default function PrivateSpaceMobileApp() {
       )}
 
       {/* Active Tab Content */}
-      <main className="m-viewport">
+      <main className={`m-viewport ${activeTab === 'transfers' ? 'is-transfer-view' : ''}`}>
         {activeTab === 'passwords' && (
           <MobilePasswordsTab
             passwords={passwordList}
@@ -970,6 +1061,24 @@ export default function PrivateSpaceMobileApp() {
             onCopySensitive={handleCopySensitive}
             onInspectCipher={handleInspectCipher}
             onNotify={notify}
+          />
+        )}
+
+        {activeTab === 'transfers' && (
+          <MobileTransferTab
+            client={client}
+            transfers={transferList}
+            uploadingTasks={uploadingTasks}
+            onSendText={handleSendTransferText}
+            onSendFiles={handleSendTransferFiles}
+            onUpdateTransfer={handleUpdateTransfer}
+            onDeletePermanent={handleDeleteTransferPermanent}
+            onJumpToMedia={(kind) => setActiveTab(kind === 'video' ? 'videos' : 'images')}
+            onInspectCipher={handleInspectCipher}
+            onCopyText={handleCopySensitive}
+            onNotify={notify}
+            initialSharedText={sharedInboundText}
+            onClearSharedText={() => setSharedInboundText(null)}
           />
         )}
 
@@ -1037,6 +1146,7 @@ export default function PrivateSpaceMobileApp() {
             notes={noteList}
             passwords={passwordList}
             media={mediaList}
+            transfers={transferList}
             disguisePrefs={disguisePrefs}
             onDisguisePrefsChange={handleDisguisePrefsChange}
             onActivateCoverNow={() => setIsCoverActive(true)}
@@ -1074,7 +1184,7 @@ export default function PrivateSpaceMobileApp() {
         )}
       </main>
 
-      {/* Bottom 5-Tab Android Navigation Bar */}
+      {/* Bottom 6-Tab Android Navigation Bar */}
       <nav className="m-tabbar" aria-label="主导航栏">
         <button
           id="m-nav-passwords"
@@ -1089,6 +1199,21 @@ export default function PrivateSpaceMobileApp() {
             )}
           </span>
           <span className="m-tab-label">密码</span>
+        </button>
+
+        <button
+          id="m-nav-transfers"
+          type="button"
+          className={`m-tab-btn ${activeTab === 'transfers' ? 'is-active' : ''}`}
+          onClick={() => setActiveTab('transfers')}
+        >
+          <span className="m-tab-pill">
+            <ArrowLeftRight size={18} />
+            {activeCounts.transfers > 0 && (
+              <span className="m-tab-badge">{activeCounts.transfers}</span>
+            )}
+          </span>
+          <span className="m-tab-label">互传</span>
         </button>
 
         <button

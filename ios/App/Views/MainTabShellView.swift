@@ -2,6 +2,7 @@ import PrivateSpaceKit
 import SwiftUI
 
 enum PrimaryVaultTab: String, Hashable {
+    case transfers
     case passwords
     case photos
     case videos
@@ -11,11 +12,23 @@ enum PrimaryVaultTab: String, Hashable {
 
 struct MainTabShellView: View {
     @Bindable var store: VaultStore
-    @State private var selectedTab: PrimaryVaultTab = .passwords
+    @State private var selectedTab: PrimaryVaultTab = .transfers
     @State private var inspectedCipherItemId: String?
 
     var body: some View {
         TabView(selection: $selectedTab) {
+            TransfersTabView(
+                store: store,
+                onInspectCipher: { id in inspectedCipherItemId = id },
+                onJumpToMediaTab: { isVideo in
+                    selectedTab = isVideo ? .videos : .photos
+                }
+            )
+            .tabItem {
+                Label("互传", systemImage: "arrow.left.arrow.right")
+            }
+            .tag(PrimaryVaultTab.transfers)
+
             PasswordsTabView(
                 store: store,
                 onInspectCipher: { id in inspectedCipherItemId = id }

@@ -9,6 +9,7 @@ import {
   zeroBytes,
 } from '@shared/cryptoPrimitives';
 import {
+  classifyTransferFile,
   computeEncryptedRangeForPlainRange,
   computePsencEncryptedSize,
   createZeroKnowledgeMasterBundle,
@@ -24,6 +25,7 @@ import {
   hydrateDecryptedMedia,
   hydrateDecryptedNote,
   hydrateDecryptedPassword,
+  hydrateDecryptedTransfer,
   hydrateDecryptedVaultRecord,
   unlockZeroKnowledgeMasterBundle,
   unwrapMasterDek,
@@ -68,13 +70,19 @@ import type {
   CipherEnvelopeInspection,
   CreateAlbumRequest,
   CreateEncryptedItemRequest,
+  CreateEncryptedTransferRequest,
   CreateNoteRequest,
   CreatePasswordRequest,
+  CreateTransferTextRequest,
   EncryptedAlbumRecordDto,
   EncryptedResumableUploadCompleteRequest,
   EncryptedResumableUploadInitResponse,
   EncryptedResumableUploadStatusResponse,
   EncryptedSyncPullResponse,
+  EncryptedTransferRecordDto,
+  EncryptedTransferResumableCompleteRequest,
+  EncryptedTransferResumableStatusResponse,
+  EncryptedTransferUploadMetadata,
   EncryptedVaultRecordDto,
   ImportPasswordEntryInput,
   MediaAlbum,
@@ -97,11 +105,14 @@ import type {
   SessionInfo,
   SetupRequest,
   SyncPullResponse,
+  TransferDecryptedPayload,
+  TransferItem,
   UpdateChannel,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
   UpdateSourceMode,
+  UpdateTransferRequest,
   VaultSecuritySummary,
   ZeroKnowledgeChangePasswordRequest,
 } from '@shared/types';
@@ -110,7 +121,12 @@ export type MobilePlatform = 'android' | 'ios';
 
 export interface MobileOutboxOperation {
   id: string;
-  kind: 'createNote' | 'updateNote' | 'createPassword' | 'updatePassword';
+  kind:
+    | 'createNote'
+    | 'updateNote'
+    | 'createPassword'
+    | 'updatePassword'
+    | 'createTransferText';
   targetId?: string;
   payload: unknown;
   queuedAt: string;
@@ -125,6 +141,7 @@ export interface MobileVaultSnapshot {
   passwords: Record<string, PasswordItem>;
   media: Record<string, MediaItem>;
   albums: Record<string, MediaAlbum>;
+  transfers: Record<string, TransferItem>;
   outbox?: MobileOutboxOperation[];
 }
 
@@ -156,6 +173,13 @@ export type PendingVaultMutation =
       kind: 'update_password';
       itemId: string;
       payload: UpdatePasswordRequest;
+    }
+  | {
+      id: string;
+      createdAt: string;
+      kind: 'create_transfer_text';
+      itemId: string;
+      payload: CreateTransferTextRequest;
     };
 
 export interface VaultPersistenceAdapter {
@@ -178,8 +202,19 @@ export function createEmptySnapshot(): MobileVaultSnapshot {
     passwords: {},
     media: {},
     albums: {},
+    transfers: {},
     outbox: [],
   };
+}
+
+function normalizeLoadedSnapshot(snap: MobileVaultSnapshot | null): MobileVaultSnapshot | null {
+  if (!snap) return null;
+  snap.notes = snap.notes ?? {};
+  snap.passwords = snap.passwords ?? {};
+  snap.media = snap.media ?? {};
+  snap.albums = snap.albums ?? {};
+  snap.transfers = snap.transfers ?? {};
+  return snap;
 }
 
 export class InMemoryVaultPersistence implements VaultPersistenceAdapter {
@@ -732,8 +767,10 @@ export class PrivateSpaceMobileClient {
   private readonly fetchFn: typeof fetch;
   private readonly onUnauthorized?: () => void;
   private token: string | null = null;
+  private sessionId: string | null = null;
   private dek: Uint8Array | null = null;
   private readonly mediaMetaCache = new Map<string, MediaItem>();
+  private readonly transferMetaCache = new Map<string, TransferItem>();
   private readonly objectUrlCache = new Map<string, string>();
   private readonly inFlightUrlLoads = new Map<string, Promise<string>>();
 
@@ -765,6 +802,14 @@ export class PrivateSpaceMobileClient {
     return this.deviceName;
   }
 
+  getSessionId(): string | null {
+    return this.sessionId;
+  }
+
+  getPlatform(): MobilePlatform {
+    return this.platform;
+  }
+
   private buildUrl(path: string): string {
     if (!this.baseUrl) return path;
     return `${this.baseUrl}${path}`;
@@ -792,6 +837,7 @@ export class PrivateSpaceMobileClient {
       this.dek = null;
     }
     this.mediaMetaCache.clear();
+    this.transferMetaCache.clear();
     if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
       for (const url of this.objectUrlCache.values()) {
         if (url.startsWith('blob:')) {
@@ -883,11 +929,11 @@ export class PrivateSpaceMobileClient {
   }
 
   async loadCachedSnapshot(): Promise<MobileVaultSnapshot | null> {
-    return this.persistence.loadSnapshot();
+    return normalizeLoadedSnapshot(await this.persistence.loadSnapshot());
   }
 
   async getCachedSnapshot(): Promise<MobileVaultSnapshot | null> {
-    return this.persistence.loadSnapshot();
+    return normalizeLoadedSnapshot(await this.persistence.loadSnapshot());
   }
 
   async getPendingMutations(): Promise<PendingVaultMutation[]> {
@@ -998,7 +1044,11 @@ export class PrivateSpaceMobileClient {
   // ==================== 1. Zero-Knowledge Probe, Setup & Auth ====================
 
   async getAuthStatus(): Promise<AuthStatusResponse> {
-    return this.requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
+    const status = await this.requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
+    if (status.session?.id) {
+      this.sessionId = status.session.id;
+    }
+    return status;
   }
 
   async getAuthParams(): Promise<AuthParamsResponse> {
@@ -1027,6 +1077,7 @@ export class PrivateSpaceMobileClient {
         },
         true,
       );
+      this.sessionId = auth.session?.id ?? null;
       await this.setSessionAndDek(auth.token, bytesToBase64(bundle.dek));
       return auth;
     } finally {
@@ -1054,6 +1105,7 @@ export class PrivateSpaceMobileClient {
         },
         true,
       );
+      this.sessionId = auth.session?.id ?? null;
 
       let dek: Uint8Array;
       try {
@@ -1084,6 +1136,7 @@ export class PrivateSpaceMobileClient {
       await this.requestJson('/api/v1/auth/logout', { method: 'POST' }, true);
     } finally {
       this.token = null;
+      this.sessionId = null;
       this.clearUnlockedKey();
       if (wipeLocalCache && this.persistence.clearAll) {
         await this.persistence.clearAll();
@@ -1231,7 +1284,7 @@ export class PrivateSpaceMobileClient {
   }
 
   async flushOutbox(): Promise<number> {
-    const snap = await this.persistence.loadSnapshot();
+    const snap = normalizeLoadedSnapshot(await this.persistence.loadSnapshot());
     if (!snap?.outbox?.length) return 0;
 
     const remaining: MobileOutboxOperation[] = [];
@@ -1254,6 +1307,10 @@ export class PrivateSpaceMobileClient {
         } else if (op.kind === 'updatePassword' && op.targetId) {
           const saved = await this.updatePassword(op.targetId, op.payload as UpdatePasswordRequest);
           snap.passwords[saved.id] = saved;
+          flushed += 1;
+        } else if (op.kind === 'createTransferText') {
+          const saved = await this.sendTransferText(op.payload as CreateTransferTextRequest);
+          snap.transfers[saved.id] = saved;
           flushed += 1;
         }
       } catch {
@@ -1298,6 +1355,8 @@ export class PrivateSpaceMobileClient {
           await this.createPassword(m.payload);
         } else if (m.kind === 'update_password') {
           await this.updatePassword(m.itemId, m.payload);
+        } else if (m.kind === 'create_transfer_text') {
+          await this.sendTransferText(m.payload);
         }
         flushed += 1;
       } catch (err) {
@@ -1324,7 +1383,8 @@ export class PrivateSpaceMobileClient {
     await this.flushOutbox();
     await this.flushPendingMutations();
 
-    const existing = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+    const existing =
+      normalizeLoadedSnapshot(await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
 
     const raw = await this.requestJson<EncryptedSyncPullResponse>(
       `/api/v1/sync?since_seq=${existing.lastSyncSeq}`,
@@ -1357,7 +1417,9 @@ export class PrivateSpaceMobileClient {
       delete existing.passwords[tomb.id];
       delete existing.media[tomb.id];
       delete existing.albums[tomb.id];
+      delete existing.transfers[tomb.id];
       this.mediaMetaCache.delete(tomb.id);
+      this.transferMetaCache.delete(tomb.id);
     }
 
     const albumCounts = new Map<string, number>();
@@ -1374,6 +1436,14 @@ export class PrivateSpaceMobileClient {
       existing.albums[alb.id] = alb;
     }
 
+    const transfers = await Promise.all(
+      (raw.transfers ?? []).map((rec) => hydrateDecryptedTransfer(dek, rec)),
+    );
+    for (const tr of transfers) {
+      existing.transfers[tr.id] = tr;
+      this.transferMetaCache.set(tr.id, tr);
+    }
+
     existing.lastSyncSeq = raw.latestSyncSeq;
     existing.syncedAt = raw.serverTime;
     await this.persistence.saveSnapshot(existing);
@@ -1387,6 +1457,7 @@ export class PrivateSpaceMobileClient {
       passwords,
       media,
       albums,
+      transfers,
       deleted: raw.deleted,
     };
 
@@ -1447,7 +1518,8 @@ export class PrivateSpaceMobileClient {
   private async upsertSnapshotItem(
     updater: (snap: MobileVaultSnapshot) => void,
   ): Promise<MobileVaultSnapshot> {
-    const snap = (await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
+    const snap =
+      normalizeLoadedSnapshot(await this.persistence.loadSnapshot()) ?? createEmptySnapshot();
     updater(snap);
     await this.persistence.saveSnapshot(snap);
     return snap;
@@ -2539,6 +2611,702 @@ export class PrivateSpaceMobileClient {
     return this.buildUrl(
       `/api/v1/media/${encodeURIComponent(mediaId)}/thumbnail-blob?${params.toString()}`,
     );
+  }
+
+  // ==================== 5b. Cross-Device Zero-Knowledge Transfers & Chat ====================
+
+  async listTransfers(pinnedOnly = false): Promise<TransferItem[]> {
+    const dek = this.requireUnlockedDek();
+    const qs = pinnedOnly ? '?pinnedOnly=true' : '';
+    const raw = await this.requestJson<{
+      items: EncryptedTransferRecordDto[];
+      latestSyncSeq: number;
+    }>(`/api/v1/transfers${qs}`);
+
+    const items = await Promise.all(
+      raw.items.map((rec) => hydrateDecryptedTransfer(dek, rec)),
+    );
+    await this.upsertSnapshotItem((snap) => {
+      for (const item of items) {
+        snap.transfers[item.id] = item;
+        this.transferMetaCache.set(item.id, item);
+        snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+      }
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, raw.latestSyncSeq);
+    });
+    return items;
+  }
+
+  async sendTransferText(input: CreateTransferTextRequest): Promise<TransferItem> {
+    const dek = this.requireUnlockedDek();
+    const id = input.id ?? generateClientUuid();
+    const revision = 1;
+    const senderSessionId = input.senderSessionId ?? this.sessionId ?? null;
+    const senderDeviceName = input.senderDeviceName || this.deviceName;
+    const senderPlatform = input.senderPlatform || this.platform;
+
+    const payload: TransferDecryptedPayload = {
+      messageKind: 'text',
+      text: (input.text || '').slice(0, 50_000),
+      senderSessionId,
+      senderDeviceName,
+      senderPlatform,
+      originalFilename: '',
+      mimeType: '',
+      fileCategory: null,
+      plainSize: 0,
+      sha256: '',
+      width: 0,
+      height: 0,
+      durationMs: null,
+      thumbnailMimeType: null,
+      linkedMediaId: null,
+      replyToId: input.replyToId ?? null,
+      replyPreview: input.replyPreview ? input.replyPreview.slice(0, 240) : null,
+      tags: normalizeTags(input.tags ?? []),
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'transfer', revision, payload);
+    const reqBody: CreateEncryptedTransferRequest = {
+      id,
+      isPinned: input.isPinned ?? false,
+      revision,
+      envelope,
+    };
+
+    const res = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+      '/api/v1/transfers',
+      {
+        method: 'POST',
+        body: JSON.stringify(reqBody),
+      },
+    );
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    this.transferMetaCache.set(item.id, item);
+    await this.upsertSnapshotItem((snap) => {
+      snap.transfers[item.id] = item;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+    });
+    return item;
+  }
+
+  async sendTransferTextWithOffline(
+    input: CreateTransferTextRequest,
+    opts?: { allowOfflineQueue?: boolean },
+  ): Promise<{ item: TransferItem; queuedOffline: boolean }> {
+    const clientId = input.id ?? generateClientUuid();
+    const reqPayload: CreateTransferTextRequest = { ...input, id: clientId };
+    const allowOfflineQueue = opts?.allowOfflineQueue ?? true;
+
+    try {
+      const item = await this.sendTransferText(reqPayload);
+      return { item, queuedOffline: false };
+    } catch (err) {
+      if (allowOfflineQueue && err instanceof MobileApiError && err.isNetworkError) {
+        const now = new Date().toISOString();
+        const cleanText = (reqPayload.text || '').slice(0, 50_000);
+        const encodedLen = new TextEncoder().encode(cleanText).byteLength;
+        const optimistic: TransferItem = {
+          id: clientId,
+          itemType: 'transfer',
+          messageKind: 'text',
+          text: cleanText,
+          senderSessionId: reqPayload.senderSessionId ?? this.sessionId ?? null,
+          senderDeviceName: reqPayload.senderDeviceName || this.deviceName,
+          senderPlatform: reqPayload.senderPlatform || this.platform,
+          originalFilename: '',
+          mimeType: '',
+          fileCategory: null,
+          plainSize: 0,
+          byteSize: encodedLen,
+          encryptedSize: encodedLen,
+          sha256: '',
+          width: 0,
+          height: 0,
+          durationMs: null,
+          thumbnailMimeType: null,
+          hasBlob: false,
+          hasThumbnail: false,
+          linkedMediaId: null,
+          replyToId: reqPayload.replyToId ?? null,
+          replyPreview: reqPayload.replyPreview ? reqPayload.replyPreview.slice(0, 240) : null,
+          tags: normalizeTags(reqPayload.tags ?? []),
+          isPinned: Boolean(reqPayload.isPinned),
+          revision: 0,
+          syncSeq: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const hasMutationStore = Boolean(
+          this.persistence.loadPendingMutations && this.persistence.savePendingMutations,
+        );
+        await this.upsertSnapshotItem((snap) => {
+          snap.transfers[optimistic.id] = optimistic;
+          if (!hasMutationStore) {
+            if (!snap.outbox) snap.outbox = [];
+            snap.outbox.push({
+              id: generateClientUuid(),
+              kind: 'createTransferText',
+              payload: reqPayload,
+              queuedAt: now,
+            });
+          }
+        });
+        if (hasMutationStore) {
+          await this.enqueueMutation({
+            id: generateClientUuid(),
+            createdAt: now,
+            kind: 'create_transfer_text',
+            itemId: clientId,
+            payload: reqPayload,
+          });
+        }
+        return { item: optimistic, queuedOffline: true };
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Sends any file in Cross-Device Transfer from Android / iOS:
+   * - Images & videos automatically archive into the Encrypted Photo Gallery / Video Cinema
+   *   and reuse the same `.psenc` blob (`reuseMediaId`) with zero duplicate ciphertext bytes!
+   * - Arbitrary files (PDF, ZIP, APK, IPA, DOCX, audio, code, 0-byte files, multi-chunk files)
+   *   are encrypted into PSENC001 chunks on-device and stored permanently in Transfer Hub.
+   */
+  async sendTransferFile(params: {
+    bytes?: Uint8Array;
+    file?: Blob;
+    filename: string;
+    mimeType?: string;
+    text?: string;
+    caption?: string;
+    replyToId?: string | null;
+    replyPreview?: string | null;
+    tags?: string[];
+    isPinned?: boolean;
+    chunkBytes?: number;
+    forceResumable?: boolean;
+    onProgress?: (uploadedBytes: number, totalBytes: number) => void;
+  }): Promise<{ item: TransferItem; autoSavedMedia: MediaItem | null }> {
+    const dek = this.requireUnlockedDek();
+    const senderSessionId = this.sessionId ?? null;
+    const senderDeviceName = this.deviceName;
+    const senderPlatform = this.platform;
+    const captionText = params.text ?? params.caption ?? '';
+
+    const plainBytes: Uint8Array = params.bytes
+      ? params.bytes
+      : params.file
+        ? new Uint8Array(await params.file.arrayBuffer())
+        : new Uint8Array(0);
+    const totalPlainBytes = plainBytes.byteLength;
+
+    const classification = classifyTransferFile(
+      params.filename,
+      params.mimeType || params.file?.type || '',
+    );
+    const mergedTags = normalizeTags([...(params.tags ?? []), '多端互传']);
+
+    // 1. Auto-archive Images & Videos into Encrypted Photo Gallery / Video Cinema
+    if (
+      totalPlainBytes > 0 &&
+      (classification.messageKind === 'image' || classification.messageKind === 'video')
+    ) {
+      const mediaKind: MediaKind = classification.messageKind;
+      const media = await this.uploadMediaResumable({
+        bytes: plainBytes,
+        filename: params.filename,
+        mimeType: classification.normalizedMimeType,
+        kind: mediaKind,
+        tags: mergedTags,
+        description: captionText
+          ? `${captionText}（来自 ${senderDeviceName} 多端互传）`
+          : `来自 ${senderDeviceName} 多端互传自动归档`,
+        chunkBytes: params.chunkBytes,
+        onProgress: params.onProgress,
+      });
+
+      const transferId = generateClientUuid();
+      const payload: TransferDecryptedPayload = {
+        messageKind: mediaKind,
+        text: captionText.slice(0, 50_000),
+        senderSessionId,
+        senderDeviceName,
+        senderPlatform,
+        originalFilename: params.filename,
+        mimeType: media.mimeType,
+        fileCategory: mediaKind,
+        plainSize: media.byteSize,
+        sha256: media.sha256,
+        width: media.width,
+        height: media.height,
+        durationMs: media.durationMs,
+        thumbnailMimeType: media.thumbnailMimeType,
+        linkedMediaId: media.id,
+        replyToId: params.replyToId ?? null,
+        replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
+        tags: normalizeTags(params.tags ?? []),
+      };
+
+      const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+      const reqBody: CreateEncryptedTransferRequest = {
+        id: transferId,
+        isPinned: params.isPinned ?? false,
+        revision: 1,
+        envelope,
+        reuseMediaId: media.id,
+      };
+
+      const res = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+        '/api/v1/transfers',
+        {
+          method: 'POST',
+          body: JSON.stringify(reqBody),
+        },
+      );
+      const item = await hydrateDecryptedTransfer(dek, res.item);
+      this.transferMetaCache.set(item.id, item);
+      await this.upsertSnapshotItem((snap) => {
+        snap.transfers[item.id] = item;
+        snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+      });
+      return { item, autoSavedMedia: media };
+    }
+
+    // 2. Arbitrary File Transfer (Documents, Archives, Packages, Audio, Code, 0B..multi-GB)
+    const transferId = generateClientUuid();
+    const useResumable =
+      totalPlainBytes > 0 &&
+      (Boolean(params.forceResumable) ||
+        params.chunkBytes !== undefined ||
+        totalPlainBytes >= 4 * 1024 * 1024);
+
+    if (useResumable) {
+      const requestedChunk = params.chunkBytes ?? 512 * 1024;
+      const partPlainBytes = Math.max(
+        DEFAULT_MEDIA_CHUNK_SIZE,
+        Math.ceil(requestedChunk / DEFAULT_MEDIA_CHUNK_SIZE) * DEFAULT_MEDIA_CHUNK_SIZE,
+      );
+      const sha256Hex = bytesToHex(await sha256(plainBytes));
+      const { chunkCount: psencChunkCount, encryptedSize: totalEncryptedBytes } =
+        computePsencEncryptedSize(totalPlainBytes, DEFAULT_MEDIA_CHUNK_SIZE);
+      const totalParts = Math.max(1, Math.ceil(totalPlainBytes / partPlainBytes));
+
+      const uploadId = generateClientUuid();
+      const mainBlobId = generateBlobId();
+      const fek = randomBytes(32);
+      const baseNonce = randomBytes(12);
+      const wrappedFek = await wrapBlobFek(dek, fek, mainBlobId);
+
+      try {
+        const metaEnvelope = await encryptItemPayload(dek, uploadId, 'upload', 1, {
+          itemId: transferId,
+          mainBlobId,
+          filename: params.filename,
+        });
+
+        const init = await this.requestJson<EncryptedResumableUploadInitResponse>(
+          '/api/v1/transfers/uploads/init',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              uploadId,
+              totalPlainBytes,
+              totalEncryptedBytes,
+              partPlainBytes,
+              totalParts,
+              metaEnvelope,
+            }),
+          },
+        );
+
+        const status = await this.requestJson<EncryptedTransferResumableStatusResponse>(
+          `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}`,
+        );
+        const doneSet = new Set(status.receivedChunks);
+
+        for (let idx = 0; idx < init.totalParts; idx += 1) {
+          if (doneSet.has(idx)) continue;
+          const start = idx * init.partPlainBytes;
+          const end = Math.min(totalPlainBytes, start + init.partPlainBytes);
+          const slice = plainBytes.subarray(start, end);
+
+          const encryptedPart = await encryptResumableMediaPart({
+            fek,
+            blobId: mainBlobId,
+            baseNonce,
+            partPlainBytes: slice,
+            partIndex: idx,
+            partStridePlainBytes: init.partPlainBytes,
+            totalPlainSize: totalPlainBytes,
+            chunkPlainSize: DEFAULT_MEDIA_CHUNK_SIZE,
+          });
+
+          const headers: Record<string, string> = {
+            'Content-Type': 'application/octet-stream',
+            'User-Agent': `PrivateSpace-${this.platform.toUpperCase()}/2.0 (${this.deviceName})`,
+          };
+          if (this.token) headers.Authorization = `Bearer ${this.token}`;
+
+          let attempt = 0;
+          while (true) {
+            try {
+              const chunkRes = await this.fetchFn(
+                this.buildUrl(
+                  `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}/chunks/${idx}`,
+                ),
+                {
+                  method: 'PUT',
+                  headers,
+                  body: toOwnedArrayBuffer(encryptedPart),
+                },
+              );
+              if (!chunkRes.ok) {
+                throw new Error(`Transfer chunk ${idx} upload failed with HTTP ${chunkRes.status}`);
+              }
+              break;
+            } catch (err) {
+              attempt += 1;
+              if (attempt >= 3) throw err;
+              await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+            }
+          }
+
+          params.onProgress?.(end, totalPlainBytes);
+        }
+
+        const payload: TransferDecryptedPayload = {
+          messageKind: 'file',
+          text: captionText.slice(0, 50_000),
+          senderSessionId,
+          senderDeviceName,
+          senderPlatform,
+          originalFilename: params.filename,
+          mimeType: classification.normalizedMimeType,
+          fileCategory: classification.fileCategory,
+          plainSize: totalPlainBytes,
+          sha256: sha256Hex,
+          width: 0,
+          height: 0,
+          durationMs: null,
+          thumbnailMimeType: null,
+          linkedMediaId: null,
+          replyToId: params.replyToId ?? null,
+          replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
+          tags: normalizeTags(params.tags ?? []),
+        };
+
+        const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+        const completeBody: EncryptedTransferResumableCompleteRequest = {
+          id: transferId,
+          isPinned: params.isPinned ?? false,
+          revision: 1,
+          envelope,
+          mainBlob: {
+            blobId: mainBlobId,
+            ...wrappedFek,
+            baseNonce: bytesToBase64(baseNonce),
+            chunkSize: DEFAULT_MEDIA_CHUNK_SIZE,
+            chunkCount: psencChunkCount,
+            plainSize: totalPlainBytes,
+            encryptedSize: totalEncryptedBytes,
+            sha256: sha256Hex,
+          },
+          thumbBlob: null,
+          encryptedThumbnailBase64: null,
+        };
+
+        const completed = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+          `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}/complete`,
+          {
+            method: 'POST',
+            body: JSON.stringify(completeBody),
+          },
+        );
+        const item = await hydrateDecryptedTransfer(dek, completed.item);
+        this.transferMetaCache.set(item.id, item);
+        await this.upsertSnapshotItem((snap) => {
+          snap.transfers[item.id] = item;
+          snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+        });
+        return { item, autoSavedMedia: null };
+      } finally {
+        zeroBytes(fek);
+      }
+    }
+
+    const mainEnc = await encryptMediaBytesToPsenc(dek, plainBytes);
+    const payload: TransferDecryptedPayload = {
+      messageKind: 'file',
+      text: captionText.slice(0, 50_000),
+      senderSessionId,
+      senderDeviceName,
+      senderPlatform,
+      originalFilename: params.filename,
+      mimeType: classification.normalizedMimeType,
+      fileCategory: classification.fileCategory,
+      plainSize: totalPlainBytes,
+      sha256: mainEnc.meta.sha256,
+      width: 0,
+      height: 0,
+      durationMs: null,
+      thumbnailMimeType: null,
+      linkedMediaId: null,
+      replyToId: params.replyToId ?? null,
+      replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
+      tags: normalizeTags(params.tags ?? []),
+    };
+
+    const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+    const metadata: EncryptedTransferUploadMetadata = {
+      id: transferId,
+      isPinned: params.isPinned ?? false,
+      revision: 1,
+      envelope,
+      mainBlob: mainEnc.meta,
+      thumbBlob: null,
+    };
+
+    const form = new FormData();
+    form.append(
+      'encryptedFile',
+      new Blob([toOwnedArrayBuffer(mainEnc.encryptedBytes)], {
+        type: 'application/octet-stream',
+      }),
+      `${mainEnc.meta.blobId}.psenc`,
+    );
+    form.append('metadata', JSON.stringify(metadata));
+
+    const res = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+      '/api/v1/transfers/upload',
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
+    params.onProgress?.(totalPlainBytes, totalPlainBytes);
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    this.transferMetaCache.set(item.id, item);
+    await this.upsertSnapshotItem((snap) => {
+      snap.transfers[item.id] = item;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+    });
+    return { item, autoSavedMedia: null };
+  }
+
+  async updateTransfer(id: string, input: UpdateTransferRequest): Promise<TransferItem> {
+    const dek = this.requireUnlockedDek();
+    const current = await this.ensureTransferItem(id);
+    const nextRevision = current.revision + 1;
+
+    const payload: TransferDecryptedPayload = {
+      messageKind: current.messageKind,
+      text: input.text !== undefined ? input.text.slice(0, 50_000) : current.text,
+      senderSessionId: current.senderSessionId,
+      senderDeviceName: current.senderDeviceName,
+      senderPlatform: current.senderPlatform,
+      originalFilename: current.originalFilename,
+      mimeType: current.mimeType,
+      fileCategory: current.fileCategory,
+      plainSize: current.plainSize,
+      sha256: current.sha256,
+      width: current.width,
+      height: current.height,
+      durationMs: current.durationMs,
+      thumbnailMimeType: current.thumbnailMimeType,
+      linkedMediaId: current.linkedMediaId,
+      replyToId: current.replyToId,
+      replyPreview: current.replyPreview,
+      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'transfer', nextRevision, payload);
+    const res = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          isPinned: input.isPinned,
+          expectedRevision: input.expectedRevision ?? current.revision,
+          revision: nextRevision,
+          envelope,
+        }),
+      },
+    );
+
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    this.transferMetaCache.set(item.id, item);
+    await this.upsertSnapshotItem((snap) => {
+      snap.transfers[item.id] = item;
+      snap.lastSyncSeq = Math.max(snap.lastSyncSeq, item.syncSeq);
+    });
+    return item;
+  }
+
+  async deleteTransferPermanently(id: string): Promise<void> {
+    this.transferMetaCache.delete(id);
+    await this.requestJson(`/api/v1/transfers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+    await this.upsertSnapshotItem((snap) => {
+      delete snap.transfers[id];
+    });
+  }
+
+  async ensureTransferItem(idOrItem: string | TransferItem): Promise<TransferItem> {
+    if (
+      typeof idOrItem !== 'string' &&
+      (idOrItem.messageKind === 'text' || idOrItem.blobKeyBundle)
+    ) {
+      this.transferMetaCache.set(idOrItem.id, idOrItem);
+      return idOrItem;
+    }
+    const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+    const cached = this.transferMetaCache.get(id);
+    if (cached && (cached.messageKind === 'text' || cached.blobKeyBundle)) return cached;
+
+    const snap = normalizeLoadedSnapshot(await this.persistence.loadSnapshot());
+    const fromSnap = snap?.transfers[id];
+    if (fromSnap && (fromSnap.messageKind === 'text' || fromSnap.blobKeyBundle)) {
+      this.transferMetaCache.set(id, fromSnap);
+      return fromSnap;
+    }
+
+    const dek = this.requireUnlockedDek();
+    const res = await this.requestJson<{ item: EncryptedTransferRecordDto }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}`,
+    );
+    const hydrated = await hydrateDecryptedTransfer(dek, res.item);
+    this.transferMetaCache.set(hydrated.id, hydrated);
+    return hydrated;
+  }
+
+  async decryptTransferBytes(idOrItem: string | TransferItem): Promise<Uint8Array> {
+    const dek = this.requireUnlockedDek();
+    const resolved = await this.ensureTransferItem(idOrItem);
+    const mainMeta = resolved.blobKeyBundle?.main;
+    if (!mainMeta) {
+      throw new MobileApiError('缺少互传文件加密密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+    }
+    const encryptedBytes = await this.fetchBinaryBytes(
+      `/api/v1/transfers/${encodeURIComponent(resolved.id)}/blob?rev=${resolved.revision}`,
+    );
+    return decryptPsencFullBuffer(dek, encryptedBytes, mainMeta);
+  }
+
+  async decryptTransferByteRange(
+    idOrItem: string | TransferItem,
+    startPlainByte: number,
+    endPlainByte?: number,
+  ): Promise<Uint8Array> {
+    const dek = this.requireUnlockedDek();
+    const resolved = await this.ensureTransferItem(idOrItem);
+    const mainMeta = resolved.blobKeyBundle?.main;
+    if (!mainMeta) {
+      throw new MobileApiError('缺少互传文件加密密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+    }
+
+    const range = computeEncryptedRangeForPlainRange(mainMeta, startPlainByte, endPlainByte);
+    const encryptedSlice = await this.fetchBinaryBytes(
+      `/api/v1/transfers/${encodeURIComponent(resolved.id)}/blob`,
+      {
+        Range: `bytes=${range.diskStart}-${range.diskEnd}`,
+      },
+    );
+
+    return decryptPsencRangeSlice({
+      dek,
+      encryptedSlice,
+      meta: mainMeta,
+      clampedStart: range.clampedStart,
+      clampedEnd: range.clampedEnd,
+      firstChunkIdx: range.firstChunkIdx,
+      lastChunkIdx: range.lastChunkIdx,
+    });
+  }
+
+  async loadTransferThumbnailObjectUrl(item: TransferItem): Promise<string> {
+    const cacheKey = `transfer:${item.id}:thumb:${item.revision}`;
+    const existing = this.objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = this.inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const dek = this.requireUnlockedDek();
+      const resolved = await this.ensureTransferItem(item);
+      const bundle = resolved.blobKeyBundle;
+      if (!bundle) {
+        throw new MobileApiError('缺少互传文件加密密钥元数据', 500, 'MISSING_BLOB_BUNDLE', false);
+      }
+      const targetMeta =
+        bundle.thumbnail ?? (resolved.messageKind === 'image' ? bundle.main : null);
+      if (!targetMeta) {
+        throw new MobileApiError('暂无互传加密缩略图', 404, 'NO_THUMBNAIL', false);
+      }
+
+      const encryptedBytes = await this.fetchBinaryBytes(
+        `/api/v1/transfers/${encodeURIComponent(resolved.id)}/thumbnail-blob?rev=${resolved.revision}`,
+      );
+      const plainBytes = await decryptPsencFullBuffer(dek, encryptedBytes, targetMeta);
+      const mime = bundle.thumbnail
+        ? resolved.thumbnailMimeType || 'image/jpeg'
+        : resolved.mimeType || 'image/jpeg';
+      const url = bytesToRenderableUrl(plainBytes, mime);
+      zeroBytes(plainBytes);
+      this.objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      this.inFlightUrlLoads.delete(cacheKey);
+    });
+
+    this.inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
+  }
+
+  async loadTransferObjectUrl(item: TransferItem): Promise<string> {
+    const cacheKey = `transfer:${item.id}:full:${item.revision}`;
+    const existing = this.objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = this.inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const plainBytes = await this.decryptTransferBytes(item);
+      const url = bytesToRenderableUrl(
+        plainBytes,
+        item.mimeType || 'application/octet-stream',
+      );
+      zeroBytes(plainBytes);
+      this.objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      this.inFlightUrlLoads.delete(cacheKey);
+    });
+
+    this.inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
+  }
+
+  async downloadDecryptedTransfer(item: TransferItem): Promise<void> {
+    if (typeof document === 'undefined') return;
+    const url = await this.loadTransferObjectUrl(item);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = item.originalFilename || 'decrypted-transfer';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  async inspectTransferCipher(id: string): Promise<CipherEnvelopeInspection> {
+    const res = await this.requestJson<{ envelope: CipherEnvelopeInspection }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}/cipher`,
+    );
+    return res.envelope;
   }
 
   // ==================== 6. Android & iOS Auto-Update Check (Server + Direct GitHub) ====================

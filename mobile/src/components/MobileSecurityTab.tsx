@@ -31,6 +31,7 @@ import type {
   NoteItem,
   PasswordItem,
   SessionInfo,
+  TransferItem,
   VaultSecuritySummary,
 } from '@shared/types';
 import {
@@ -57,6 +58,7 @@ interface MobileSecurityTabProps {
   notes: NoteItem[];
   passwords: PasswordItem[];
   media: MediaItem[];
+  transfers?: TransferItem[];
   disguisePrefs: DisguisePreferences;
   onDisguisePrefsChange: (next: DisguisePreferences) => void;
   onActivateCoverNow: () => void;
@@ -92,6 +94,7 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   notes,
   passwords,
   media,
+  transfers = [],
   disguisePrefs,
   onDisguisePrefsChange,
   onActivateCoverNow,
@@ -141,6 +144,12 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
   const [revokeOthers, setRevokeOthers] = useState(true);
 
   const allInspectableItems = [
+    ...transfers
+      .filter((t) => t.syncSeq > 0)
+      .map((t) => ({
+        id: t.id,
+        label: `[互传] ${t.originalFilename || t.text.slice(0, 26) || '加密消息'}`,
+      })),
     ...passwords.filter((p) => !p.isTrashed).map((p) => ({ id: p.id, label: `[密码] ${p.title}` })),
     ...media
       .filter((m) => !m.isTrashed)
@@ -775,6 +784,29 @@ export const MobileSecurityTab: React.FC<MobileSecurityTabProps> = ({
             </div>
             <div className="mono" style={{ fontSize: '0.68rem', color: 'var(--m-text-secondary)' }}>
               {formatBytes(summary?.notesEncryptedBytes ?? 0)}
+            </div>
+          </div>
+          <div className="m-probe-box" style={{ marginBottom: 0, gridColumn: '1 / -1' }}>
+            <div style={{ color: 'var(--m-text-tertiary)', fontSize: '0.7rem' }}>
+              多端加密互传（聊天与任意文件永久记录）
+            </div>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'baseline',
+                justifyContent: 'space-between',
+                marginTop: 2,
+              }}
+            >
+              <span style={{ fontWeight: 800, fontSize: '0.95rem' }}>
+                {summary?.activeTransfers ?? transfers.length} 条
+              </span>
+              <span
+                className="mono"
+                style={{ fontSize: '0.68rem', color: 'var(--m-text-secondary)' }}
+              >
+                独立密文块 {formatBytes(summary?.transfersEncryptedBytes ?? 0)}
+              </span>
             </div>
           </div>
         </div>

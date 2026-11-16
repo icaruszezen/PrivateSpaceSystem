@@ -23,6 +23,7 @@ export function createHealthRoutes(repo: VaultRepository): Hono {
         'http206-encrypted-range',
         'resumable-upload',
         'sse-sync',
+        'cross-device-transfer',
         'ios-autofill',
         'mobile-auto-update',
       ],

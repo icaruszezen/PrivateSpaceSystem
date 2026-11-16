@@ -37,6 +37,16 @@ public enum PasswordAuditFilter: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
+public enum TransferListFilter: String, CaseIterable, Identifiable, Sendable {
+    case all = "全部"
+    case text = "聊天文本"
+    case files = "文件传输"
+    case media = "图片与视频"
+    case pinned = "星标收藏"
+
+    public var id: String { rawValue }
+}
+
 public enum AppThemePreference: String, Codable, CaseIterable, Identifiable, Sendable {
     case system = "跟随系统"
     case light = "暖纸浅色"
@@ -602,12 +612,14 @@ public final class VaultStore {
             for p in delta.passwords { next.passwords[p.id] = p }
             for m in delta.media { next.media[m.id] = m }
             for a in delta.albums { next.albums[a.id] = a }
+            for tr in delta.transfers { next.transfers[tr.id] = tr }
 
             for tomb in delta.deleted {
                 next.notes.removeValue(forKey: tomb.id)
                 next.passwords.removeValue(forKey: tomb.id)
                 next.media.removeValue(forKey: tomb.id)
                 next.albums.removeValue(forKey: tomb.id)
+                next.transfers.removeValue(forKey: tomb.id)
             }
 
             next.lastSyncSeq = delta.latestSyncSeq
@@ -655,6 +667,10 @@ public final class VaultStore {
                     let req = try decoder.decode(UpdatePasswordRequest.self, from: op.payloadJson)
                     let saved = try await apiClient.updatePassword(id: id, patch: req)
                     snapshot.passwords[saved.id] = saved
+                case .createTransferText:
+                    let req = try decoder.decode(CreateTransferTextRequest.self, from: op.payloadJson)
+                    let saved = try await apiClient.sendTransferText(req)
+                    snapshot.transfers[saved.id] = saved
                 }
             } catch PrivateSpaceClientError.networkUnavailable {
                 remaining.append(op)
@@ -1064,6 +1080,172 @@ public final class VaultStore {
             snapshot.media.removeValue(forKey: id)
             try? localStore.saveSnapshot(snapshot)
             showToast(".psenc 密文块已安全覆写并销毁")
+        } catch {
+            errorBanner = error.localizedDescription
+        }
+    }
+
+    // MARK: - Cross-Device Zero-Knowledge Transfers & Chat
+
+    public func filteredTransfers(
+        query: String = "",
+        filter: TransferListFilter = .all,
+        platform: DevicePlatform? = nil
+    ) -> [TransferItem] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return snapshot.transfers.values
+            .filter { item in
+                switch filter {
+                case .all: break
+                case .text: if item.messageKind != .text { return false }
+                case .files: if item.messageKind != .file { return false }
+                case .media: if item.messageKind != .image && item.messageKind != .video { return false }
+                case .pinned: if !item.isPinned { return false }
+                }
+                if let platform, item.senderPlatform != platform {
+                    return false
+                }
+                if !q.isEmpty {
+                    let hay = [
+                        item.text,
+                        item.originalFilename,
+                        item.senderDeviceName,
+                        item.mimeType,
+                        item.sha256,
+                        item.tags.joined(separator: " "),
+                    ].joined(separator: " ").lowercased()
+                    if !hay.contains(q) {
+                        return false
+                    }
+                }
+                return true
+            }
+            .sorted { a, b in
+                if a.createdAt != b.createdAt {
+                    return a.createdAt < b.createdAt
+                }
+                return a.syncSeq < b.syncSeq
+            }
+    }
+
+    @discardableResult
+    public func sendTransferText(
+        _ text: String,
+        replyToId: String? = nil,
+        replyPreview: String? = nil,
+        tags: [String] = []
+    ) async -> TransferItem? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let clientId = UUID().uuidString.lowercased()
+        let req = CreateTransferTextRequest(
+            id: clientId,
+            text: trimmed,
+            replyToId: replyToId,
+            replyPreview: replyPreview,
+            tags: tags,
+            senderPlatform: .ios
+        )
+        do {
+            let sent = try await apiClient.sendTransferText(req)
+            snapshot.transfers[sent.id] = sent
+            snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, sent.syncSeq)
+            try? localStore.saveSnapshot(snapshot)
+            return sent
+        } catch PrivateSpaceClientError.networkUnavailable {
+            let now = ISO8601DateFormatter().string(from: Date())
+            let localItem = TransferItem(
+                id: clientId,
+                messageKind: .text,
+                text: trimmed,
+                senderDeviceName: "iPhone · 离线待同步",
+                senderPlatform: .ios,
+                plainSize: trimmed.utf8.count,
+                replyToId: replyToId,
+                replyPreview: replyPreview,
+                tags: tags,
+                revision: 0,
+                syncSeq: 0,
+                createdAt: now,
+                updatedAt: now
+            )
+            snapshot.transfers[clientId] = localItem
+            if let encoded = try? JSONEncoder().encode(req) {
+                snapshot.pendingOutbox.append(
+                    OutboxOperation(kind: .createTransferText, targetItemId: clientId, payloadJson: encoded)
+                )
+            }
+            try? localStore.saveSnapshot(snapshot)
+            showToast("互传消息已加密暂存，联网后自动同步")
+            return localItem
+        } catch {
+            errorBanner = error.localizedDescription
+            return nil
+        }
+    }
+
+    public func sendTransferFileData(
+        data: Data,
+        filename: String,
+        mimeType: String = "",
+        caption: String = "",
+        replyToId: String? = nil,
+        replyPreview: String? = nil
+    ) async {
+        let taskId = UUID().uuidString
+        activeUploads.append(UploadTaskStatus(id: taskId, filename: filename, progress: 0.04))
+        defer {
+            activeUploads.removeAll { $0.id == taskId }
+        }
+
+        do {
+            let result = try await apiClient.sendTransferFile(
+                data: data,
+                filename: filename,
+                mimeType: mimeType,
+                caption: caption,
+                replyToId: replyToId,
+                replyPreview: replyPreview
+            ) { [weak self] uploaded, total in
+                Task { @MainActor in
+                    guard let self,
+                          let idx = self.activeUploads.firstIndex(where: { $0.id == taskId }) else { return }
+                    self.activeUploads[idx].progress = min(0.98, Double(uploaded) / Double(max(1, total)))
+                }
+            }
+            snapshot.transfers[result.transfer.id] = result.transfer
+            snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, result.transfer.syncSeq)
+            if let media = result.archivedMedia {
+                snapshot.media[media.id] = media
+                snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, media.syncSeq)
+                showToast("已发送并自动归档至\(media.isVideo ? "私密视频库" : "加密相册")")
+            } else {
+                showToast("已端到端加密发送文件：\(filename)")
+            }
+            try? localStore.saveSnapshot(snapshot)
+        } catch {
+            errorBanner = error.localizedDescription
+        }
+    }
+
+    public func updateTransfer(id: String, patch: UpdateTransferRequest) async {
+        guard let current = snapshot.transfers[id] else { return }
+        do {
+            let updated = try await apiClient.updateTransfer(id: id, current: current, patch: patch)
+            snapshot.transfers[updated.id] = updated
+            snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, updated.syncSeq)
+            try? localStore.saveSnapshot(snapshot)
+        } catch {
+            errorBanner = error.localizedDescription
+        }
+    }
+
+    public func deleteTransferPermanently(id: String) async {
+        do {
+            try await apiClient.deleteTransferPermanently(id: id)
+            snapshot.transfers.removeValue(forKey: id)
+            try? localStore.saveSnapshot(snapshot)
+            showToast("互传记录已销毁（图影库归档不受影响）")
         } catch {
             errorBanner = error.localizedDescription
         }

@@ -1115,6 +1115,382 @@ public actor PrivateSpaceAPIClient {
         return (url, headers)
     }
 
+    // MARK: - 4b. Cross-Device Zero-Knowledge Transfers & Chat
+
+    public func fetchEncryptedTransferRecord(id: String) async throws -> EncryptedTransferRecordDto {
+        struct Resp: Decodable { let item: EncryptedTransferRecordDto }
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let res: Resp = try await performJSON(path: "/api/v1/transfers/\(encoded)")
+        return res.item
+    }
+
+    public func sendTransferText(_ input: CreateTransferTextRequest) async throws -> TransferItem {
+        let dek = try requireUnlockedDek()
+        let id = (input.id?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? input.id!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : UUID().uuidString.lowercased()
+        let payload = TransferDecryptedPayload(
+            messageKind: .text,
+            text: input.text,
+            senderSessionId: input.senderSessionId,
+            senderDeviceName: input.senderDeviceName ?? deviceName,
+            senderPlatform: input.senderPlatform ?? .ios,
+            originalFilename: "",
+            mimeType: "text/plain",
+            fileCategory: nil,
+            plainSize: input.text.utf8.count,
+            sha256: "",
+            width: 0,
+            height: 0,
+            durationMs: nil,
+            thumbnailMimeType: nil,
+            linkedMediaId: nil,
+            replyToId: input.replyToId,
+            replyPreview: input.replyPreview,
+            tags: VaultE2EECrypto.normalizeTags(input.tags ?? [])
+        )
+        let envelope = try VaultE2EECrypto.encryptItemPayload(
+            dek: dek,
+            itemId: id,
+            itemType: .transfer,
+            revision: 1,
+            payload: payload
+        )
+        let reqBody = CreateEncryptedTransferRequest(
+            id: id,
+            isPinned: input.isPinned ?? false,
+            revision: 1,
+            envelope: envelope,
+            reuseMediaId: nil
+        )
+        struct Resp: Decodable { let item: EncryptedTransferRecordDto }
+        let res: Resp = try await performJSON(
+            path: "/api/v1/transfers",
+            method: "POST",
+            bodyData: try JSONEncoder().encode(reqBody)
+        )
+        return try VaultE2EECrypto.hydrateDecryptedTransfer(dek: dek, record: res.item)
+    }
+
+    /// Sends any file across devices; images & videos are automatically archived into Image/Video Libraries
+    /// (`uploadMediaResumable` + `reuseMediaId`) with zero duplicate `.psenc` chunks on disk.
+    public func sendTransferFile(
+        data: Data,
+        filename: String,
+        mimeType: String = "",
+        caption: String = "",
+        tags: [String] = [],
+        replyToId: String? = nil,
+        replyPreview: String? = nil,
+        chunkBytes: Int = 512 * 1024,
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async throws -> (transfer: TransferItem, archivedMedia: MediaItem?) {
+        let dek = try requireUnlockedDek()
+        let classified = VaultE2EECrypto.classifyTransferFile(filename: filename, mimeType: mimeType)
+        let normalizedTags = VaultE2EECrypto.normalizeTags(["多端互传"] + tags)
+
+        // 1. Auto-ingest images & videos into Image / Video Library with zero duplicate ciphertext storage
+        if classified.messageKind == .image || classified.messageKind == .video {
+            let mediaKind: MediaKind = classified.messageKind == .video ? .video : .image
+            let archivedMedia = try await uploadMediaResumable(
+                data: data,
+                filename: filename,
+                mimeType: classified.normalizedMimeType,
+                kind: mediaKind,
+                title: filename,
+                tags: normalizedTags,
+                description: caption,
+                chunkBytes: chunkBytes,
+                onProgress: onProgress
+            )
+
+            let transferId = UUID().uuidString.lowercased()
+            let payload = TransferDecryptedPayload(
+                messageKind: classified.messageKind,
+                text: caption,
+                senderSessionId: nil,
+                senderDeviceName: deviceName,
+                senderPlatform: .ios,
+                originalFilename: filename,
+                mimeType: classified.normalizedMimeType,
+                fileCategory: classified.fileCategory,
+                plainSize: archivedMedia.byteSize,
+                sha256: archivedMedia.sha256,
+                width: archivedMedia.width,
+                height: archivedMedia.height,
+                durationMs: archivedMedia.durationMs,
+                thumbnailMimeType: archivedMedia.thumbnailMimeType,
+                linkedMediaId: archivedMedia.id,
+                replyToId: replyToId,
+                replyPreview: replyPreview,
+                tags: normalizedTags
+            )
+            let envelope = try VaultE2EECrypto.encryptItemPayload(
+                dek: dek,
+                itemId: transferId,
+                itemType: .transfer,
+                revision: 1,
+                payload: payload
+            )
+            let createReq = CreateEncryptedTransferRequest(
+                id: transferId,
+                isPinned: false,
+                revision: 1,
+                envelope: envelope,
+                reuseMediaId: archivedMedia.id
+            )
+            struct Resp: Decodable { let item: EncryptedTransferRecordDto }
+            let res: Resp = try await performJSON(
+                path: "/api/v1/transfers",
+                method: "POST",
+                bodyData: try JSONEncoder().encode(createReq)
+            )
+            let transferItem = try VaultE2EECrypto.hydrateDecryptedTransfer(dek: dek, record: res.item)
+            return (transferItem, archivedMedia)
+        }
+
+        // 2. Arbitrary file transfer (PDF, ZIP, IPA, APK, DOCX, audio, code, 0-byte, etc.) via PSENC001 resumable chunks
+        let psencChunkSize = VaultE2EECrypto.defaultMediaChunkSize
+        let alignedPartBytes = max(
+            psencChunkSize,
+            ((max(psencChunkSize, chunkBytes) + psencChunkSize - 1) / psencChunkSize) * psencChunkSize
+        )
+        let totalPlainBytes = data.count
+        let (psencChunkCount, totalEncryptedBytes) = VaultE2EECrypto.computePsencEncryptedSize(
+            plainSize: totalPlainBytes,
+            chunkPlainSize: psencChunkSize
+        )
+        let sha256Hex = VaultE2EECrypto.sha256Hex(data)
+        let nowIso = ISO8601DateFormatter().string(from: Date())
+
+        let mainBlobId = VaultE2EECrypto.generateBlobId()
+        let fek = VaultE2EECrypto.randomBytes(32)
+        let baseNonce = VaultE2EECrypto.randomBytes(12)
+        let wrappedFek = try VaultE2EECrypto.wrapBlobFek(dek: dek, fek: fek, blobId: mainBlobId)
+
+        let clientSessionId = UUID().uuidString.lowercased()
+        let sessionMeta = UploadSessionDecryptedMeta(
+            filename: filename,
+            mimeType: classified.normalizedMimeType,
+            title: filename,
+            albumId: nil,
+            tags: normalizedTags,
+            description: caption,
+            sha256: sha256Hex,
+            takenAt: nowIso
+        )
+        let metaEnvelope = try VaultE2EECrypto.encryptItemPayload(
+            dek: dek,
+            itemId: clientSessionId,
+            itemType: .upload,
+            revision: 1,
+            payload: sessionMeta
+        )
+        let totalParts = max(1, (totalPlainBytes + alignedPartBytes - 1) / alignedPartBytes)
+        let initReq = EncryptedTransferResumableInitRequest(
+            uploadId: clientSessionId,
+            totalPlainBytes: totalPlainBytes,
+            totalEncryptedBytes: totalEncryptedBytes,
+            partPlainBytes: alignedPartBytes,
+            totalParts: totalParts,
+            metaEnvelope: metaEnvelope
+        )
+        let initResp: EncryptedResumableUploadInitResponse = try await performJSON(
+            path: "/api/v1/transfers/uploads/init",
+            method: "POST",
+            bodyData: try JSONEncoder().encode(initReq)
+        )
+        let encodedUploadId = initResp.uploadId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? initResp.uploadId
+
+        for index in 0..<initResp.totalParts {
+            let start = index * initResp.partPlainBytes
+            let end = min(totalPlainBytes, start + initResp.partPlainBytes)
+            let plainPart = totalPlainBytes > 0 ? data.subdata(in: start..<end) : Data()
+            let encryptedPart = try VaultE2EECrypto.encryptResumableMediaPart(
+                fek: fek,
+                blobId: mainBlobId,
+                baseNonce: baseNonce,
+                partPlainData: plainPart,
+                partIndex: index,
+                partStridePlainBytes: initResp.partPlainBytes,
+                totalPlainSize: totalPlainBytes,
+                chunkPlainSize: psencChunkSize
+            )
+
+            let req = try buildRequest(
+                path: "/api/v1/transfers/uploads/\(encodedUploadId)/chunks/\(index)",
+                method: "PUT",
+                bodyData: encryptedPart,
+                contentType: "application/octet-stream"
+            )
+            let (respData, resp) = try await session.data(for: req)
+            guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 500
+                throw decodeAPIError(status: code, data: respData)
+            }
+            onProgress?(end, totalPlainBytes)
+        }
+
+        let transferId = UUID().uuidString.lowercased()
+        let transferPayload = TransferDecryptedPayload(
+            messageKind: .file,
+            text: caption,
+            senderSessionId: nil,
+            senderDeviceName: deviceName,
+            senderPlatform: .ios,
+            originalFilename: filename,
+            mimeType: classified.normalizedMimeType,
+            fileCategory: classified.fileCategory,
+            plainSize: totalPlainBytes,
+            sha256: sha256Hex,
+            width: 0,
+            height: 0,
+            durationMs: nil,
+            thumbnailMimeType: nil,
+            linkedMediaId: nil,
+            replyToId: replyToId,
+            replyPreview: replyPreview,
+            tags: normalizedTags
+        )
+        let transferEnvelope = try VaultE2EECrypto.encryptItemPayload(
+            dek: dek,
+            itemId: transferId,
+            itemType: .transfer,
+            revision: 1,
+            payload: transferPayload
+        )
+        let mainBlobMeta = EncryptedBlobKeyMetaDto(
+            blobId: mainBlobId,
+            fekSalt: wrappedFek.fekSalt,
+            fekNonce: wrappedFek.fekNonce,
+            fekTag: wrappedFek.fekTag,
+            wrappedFek: wrappedFek.wrappedFek,
+            baseNonce: baseNonce.base64EncodedString(),
+            chunkSize: psencChunkSize,
+            chunkCount: psencChunkCount,
+            plainSize: totalPlainBytes,
+            encryptedSize: totalEncryptedBytes,
+            sha256: sha256Hex
+        )
+        let completeReq = EncryptedTransferResumableCompleteRequest(
+            id: transferId,
+            isPinned: false,
+            revision: 1,
+            envelope: transferEnvelope,
+            mainBlob: mainBlobMeta
+        )
+        struct CompleteResp: Decodable { let item: EncryptedTransferRecordDto }
+        let done: CompleteResp = try await performJSON(
+            path: "/api/v1/transfers/uploads/\(encodedUploadId)/complete",
+            method: "POST",
+            bodyData: try JSONEncoder().encode(completeReq)
+        )
+        let transferItem = try VaultE2EECrypto.hydrateDecryptedTransfer(dek: dek, record: done.item)
+        return (transferItem, nil)
+    }
+
+    public func updateTransfer(
+        id: String,
+        current: TransferItem,
+        patch: UpdateTransferRequest
+    ) async throws -> TransferItem {
+        let dek = try requireUnlockedDek()
+        let nextRevision = current.revision + 1
+        let payload = TransferDecryptedPayload(
+            messageKind: current.messageKind,
+            text: patch.text ?? current.text,
+            senderSessionId: current.senderSessionId,
+            senderDeviceName: current.senderDeviceName,
+            senderPlatform: current.senderPlatform,
+            originalFilename: current.originalFilename,
+            mimeType: current.mimeType,
+            fileCategory: current.fileCategory,
+            plainSize: current.plainSize,
+            sha256: current.sha256,
+            width: current.width,
+            height: current.height,
+            durationMs: current.durationMs,
+            thumbnailMimeType: current.thumbnailMimeType,
+            linkedMediaId: current.linkedMediaId,
+            replyToId: current.replyToId,
+            replyPreview: current.replyPreview,
+            tags: patch.tags.map { VaultE2EECrypto.normalizeTags($0) } ?? current.tags
+        )
+        let envelope = try VaultE2EECrypto.encryptItemPayload(
+            dek: dek,
+            itemId: id,
+            itemType: .transfer,
+            revision: nextRevision,
+            payload: payload
+        )
+        let reqBody = UpdateEncryptedTransferRequest(
+            isPinned: patch.isPinned,
+            expectedRevision: patch.expectedRevision ?? current.revision,
+            revision: nextRevision,
+            envelope: envelope
+        )
+        struct Resp: Decodable { let item: EncryptedTransferRecordDto }
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let res: Resp = try await performJSON(
+            path: "/api/v1/transfers/\(encoded)",
+            method: "PATCH",
+            bodyData: try JSONEncoder().encode(reqBody)
+        )
+        return try VaultE2EECrypto.hydrateDecryptedTransfer(dek: dek, record: res.item)
+    }
+
+    public func deleteTransferPermanently(id: String) async throws {
+        struct Resp: Decodable { let ok: Bool }
+        let encoded = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
+        let _: Resp = try await performJSON(
+            path: "/api/v1/transfers/\(encoded)",
+            method: "DELETE"
+        )
+    }
+
+    public func fetchTransferData(
+        transfer: TransferItem,
+        preferThumbnail: Bool = false
+    ) async throws -> Data {
+        let cacheKey = "\(preferThumbnail ? "tr-thumb" : "tr-full"):\(transfer.id):\(transfer.revision)"
+        if let cached = VolatileMediaMemoryCache.shared.data(forKey: cacheKey) {
+            return cached
+        }
+        let dek = try requireUnlockedDek()
+        let resolvedBundle: MediaBlobKeyBundleDto
+        if let bundle = transfer.blobKeyBundle {
+            resolvedBundle = bundle
+        } else {
+            let record = try await fetchEncryptedTransferRecord(id: transfer.id)
+            guard let bundle = record.transferBlobs else {
+                throw PrivateSpaceClientError.e2eeDecryptionFailed("互传条目缺少加密分块密钥元数据")
+            }
+            resolvedBundle = bundle
+        }
+
+        let targetMeta = (preferThumbnail ? resolvedBundle.thumbnail : nil) ?? resolvedBundle.main
+        let encoded = transfer.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? transfer.id
+        let path = (preferThumbnail && resolvedBundle.thumbnail != nil)
+            ? "/api/v1/transfers/\(encoded)/thumbnail-blob?rev=\(transfer.revision)"
+            : "/api/v1/transfers/\(encoded)/blob?rev=\(transfer.revision)"
+        let req = try buildRequest(path: path, accept: "application/octet-stream")
+        let (encryptedData, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 500
+            throw decodeAPIError(status: status, data: encryptedData)
+        }
+
+        let plainData = try VaultE2EECrypto.decryptPsencFullBuffer(
+            dek: dek,
+            encryptedData: encryptedData,
+            meta: targetMeta
+        )
+        if plainData.count <= 16 * 1024 * 1024 {
+            VolatileMediaMemoryCache.shared.insert(plainData, forKey: cacheKey)
+        }
+        return plainData
+    }
+
     // MARK: - 5. Incremental Sync (`since_seq`), Cipher Inspector & SSE Real-Time Stream
 
     public func pullSync(sinceSeq: Int) async throws -> SyncPullResponse {
@@ -1151,6 +1527,10 @@ public actor PrivateSpaceAPIClient {
             )
         }
 
+        let transfers = try raw.transfers.map { transferRecord in
+            try VaultE2EECrypto.hydrateDecryptedTransfer(dek: dek, record: transferRecord)
+        }
+
         return SyncPullResponse(
             serverTime: raw.serverTime,
             latestSyncSeq: raw.latestSyncSeq,
@@ -1159,6 +1539,7 @@ public actor PrivateSpaceAPIClient {
             passwords: passwords,
             media: media,
             albums: albums,
+            transfers: transfers,
             deleted: raw.deleted
         )
     }

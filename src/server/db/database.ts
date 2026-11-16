@@ -145,6 +145,58 @@ function runMigrations(db: DatabaseSync): void {
       expires_at TEXT NOT NULL
     );
 
+    -- Zero-Knowledge Cross-Device Transfer & Chat records ('text' | 'file' | 'image' | 'video').
+    -- Permanently persisted; all message text, filenames, MIME types, and sender metadata exist
+    -- exclusively inside client-generated AES-256-GCM ciphertext.
+    CREATE TABLE IF NOT EXISTS transfer_items (
+      id TEXT PRIMARY KEY,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      revision INTEGER NOT NULL DEFAULT 1,
+      sync_seq INTEGER NOT NULL,
+      cipher_version INTEGER NOT NULL DEFAULT 2,
+      item_salt BLOB NOT NULL,
+      nonce BLOB NOT NULL,
+      auth_tag BLOB NOT NULL,
+      ciphertext BLOB NOT NULL,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_transfer_items_created
+      ON transfer_items(created_at ASC, sync_seq ASC);
+    CREATE INDEX IF NOT EXISTS idx_transfer_items_sync_seq
+      ON transfer_items(sync_seq);
+
+    -- Client-wrapped PSENC001 blob key envelopes attached to cross-device transfers.
+    CREATE TABLE IF NOT EXISTS transfer_blobs (
+      transfer_id TEXT PRIMARY KEY REFERENCES transfer_items(id) ON DELETE CASCADE,
+      blob_id TEXT NOT NULL,
+      fek_salt BLOB NOT NULL,
+      fek_nonce BLOB NOT NULL,
+      fek_tag BLOB NOT NULL,
+      wrapped_fek BLOB NOT NULL,
+      base_nonce BLOB NOT NULL,
+      chunk_size INTEGER NOT NULL,
+      chunk_count INTEGER NOT NULL,
+      plain_size INTEGER NOT NULL,
+      encrypted_size INTEGER NOT NULL,
+      sha256_hex TEXT NOT NULL,
+      thumb_blob_id TEXT,
+      thumb_fek_salt BLOB,
+      thumb_fek_nonce BLOB,
+      thumb_fek_tag BLOB,
+      thumb_wrapped_fek BLOB,
+      thumb_base_nonce BLOB,
+      thumb_chunk_size INTEGER,
+      thumb_chunk_count INTEGER,
+      thumb_plain_size INTEGER,
+      thumb_encrypted_size INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_transfer_blobs_blob_id
+      ON transfer_blobs(blob_id);
+
     -- Tombstone log so clients performing delta sync learn which items were permanently shredded
     CREATE TABLE IF NOT EXISTS sync_tombstones (
       id TEXT PRIMARY KEY,

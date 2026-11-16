@@ -5,16 +5,21 @@ import type {
   CipherEnvelopeInspection,
   CreateEncryptedAlbumRequest,
   CreateEncryptedItemRequest,
+  CreateEncryptedTransferRequest,
   E2EEKdfParams,
   EncryptedAlbumRecordDto,
   EncryptedBlobKeyMetaDto,
   EncryptedResumableUploadInitRequest,
   EncryptedSyncPullResponse,
+  EncryptedTransferRecordDto,
+  EncryptedTransferResumableInitRequest,
   EncryptedVaultRecordDto,
   MediaBlobKeyBundleDto,
   MediaKind,
   SessionInfo,
   UpdateEncryptedItemRequest,
+  UpdateEncryptedTransferRequest,
+  UploadSessionKind,
   VaultItemType,
   VaultSecuritySummary,
   WrappedDekDto,
@@ -102,6 +107,25 @@ interface RawMediaBlobRow {
   thumb_encrypted_size: number | null;
 }
 
+interface RawTransferItemRow {
+  id: string;
+  is_pinned: number;
+  revision: number;
+  sync_seq: number;
+  cipher_version: number;
+  item_salt: Uint8Array;
+  nonce: Uint8Array;
+  auth_tag: Uint8Array;
+  ciphertext: Uint8Array;
+  byte_size: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface RawTransferBlobRow extends Omit<RawMediaBlobRow, 'item_id'> {
+  transfer_id: string;
+}
+
 export interface StoredMediaBlobs {
   main: StoredEncryptedBlobMeta;
   thumbnail: StoredEncryptedBlobMeta | null;
@@ -109,7 +133,7 @@ export interface StoredMediaBlobs {
 
 export interface StoredEncryptedUploadSession {
   id: string;
-  kind: MediaKind;
+  kind: UploadSessionKind;
   partPlainBytes: number;
   totalPlainBytes: number;
   totalEncryptedBytes: number;
@@ -160,7 +184,7 @@ function serializeBlobMetaToDto(meta: StoredEncryptedBlobMeta): EncryptedBlobKey
   };
 }
 
-function parseRawMediaBlobRow(row: RawMediaBlobRow): StoredMediaBlobs {
+function parseRawMediaBlobRow(row: Omit<RawMediaBlobRow, 'item_id'>): StoredMediaBlobs {
   const main: StoredEncryptedBlobMeta = {
     blobId: row.blob_id,
     fekSalt: Buffer.from(row.fek_salt),
@@ -1119,10 +1143,26 @@ export class VaultRepository {
     }
 
     if (blobs) {
-      chunkStore.shredBlobSync(blobs.main.blobId);
-      chunkStore.shredBlobSync(blobs.thumbnail?.blobId);
+      if (!this.isBlobReferenced(blobs.main.blobId)) {
+        chunkStore.shredBlobSync(blobs.main.blobId);
+      }
+      if (blobs.thumbnail?.blobId && !this.isBlobReferenced(blobs.thumbnail.blobId)) {
+        chunkStore.shredBlobSync(blobs.thumbnail.blobId);
+      }
     }
     this.emitSync(syncSeq, itemType);
+  }
+
+  isBlobReferenced(blobId: string | undefined | null): boolean {
+    if (!blobId) return false;
+    const inMedia = this.db
+      .prepare(`SELECT 1 FROM media_blobs WHERE blob_id = ? OR thumb_blob_id = ? LIMIT 1`)
+      .get(blobId, blobId);
+    if (inMedia) return true;
+    const inTransfers = this.db
+      .prepare(`SELECT 1 FROM transfer_blobs WHERE blob_id = ? OR thumb_blob_id = ? LIMIT 1`)
+      .get(blobId, blobId);
+    return Boolean(inTransfers);
   }
 
   emptyMediaTrash(kind: MediaKind | undefined, chunkStore: EncryptedChunkStore): number {
@@ -1138,6 +1178,394 @@ export class VaultRepository {
       this.permanentlyDeleteMedia(row.id, chunkStore);
     }
     return rows.length;
+  }
+
+  // ==================== Cross-Device Zero-Knowledge Transfers & Chat ====================
+
+  private serializeTransferRow(
+    row: RawTransferItemRow,
+    blobRow?: RawTransferBlobRow,
+  ): EncryptedTransferRecordDto {
+    const dto: EncryptedTransferRecordDto = {
+      id: row.id,
+      isPinned: Boolean(row.is_pinned),
+      revision: Number(row.revision),
+      syncSeq: Number(row.sync_seq),
+      byteSize: Number(row.byte_size),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      envelope: serializeCipherEnvelope({
+        cipherVersion: Number(row.cipher_version),
+        itemSalt: row.item_salt,
+        nonce: row.nonce,
+        authTag: row.auth_tag,
+        ciphertext: row.ciphertext,
+      }),
+    };
+    if (blobRow) {
+      dto.transferBlobs = serializeMediaBlobBundle(parseRawMediaBlobRow(blobRow));
+    }
+    return dto;
+  }
+
+  getTransferBlobs(transferId: string): StoredMediaBlobs | null {
+    const row = this.db
+      .prepare(`SELECT * FROM transfer_blobs WHERE transfer_id = ?`)
+      .get(transferId) as unknown as RawTransferBlobRow | undefined;
+    if (!row) return null;
+    return parseRawMediaBlobRow(row);
+  }
+
+  listEncryptedTransfers(options?: { pinnedOnly?: boolean }): EncryptedTransferRecordDto[] {
+    const whereClause = options?.pinnedOnly ? `WHERE is_pinned = 1` : '';
+    const rows = this.db
+      .prepare(
+        `SELECT id, is_pinned, revision, sync_seq, cipher_version,
+                item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+         FROM transfer_items
+         ${whereClause}
+         ORDER BY created_at ASC, sync_seq ASC`,
+      )
+      .all() as unknown as RawTransferItemRow[];
+
+    if (rows.length === 0) return [];
+
+    const blobRows = this.db
+      .prepare(`SELECT * FROM transfer_blobs`)
+      .all() as unknown as RawTransferBlobRow[];
+    const blobMap = new Map(blobRows.map((b) => [b.transfer_id, b]));
+
+    return rows.map((row) => this.serializeTransferRow(row, blobMap.get(row.id)));
+  }
+
+  getEncryptedTransferById(id: string): EncryptedTransferRecordDto | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, is_pinned, revision, sync_seq, cipher_version,
+                item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+         FROM transfer_items WHERE id = ?`,
+      )
+      .get(id) as unknown as RawTransferItemRow | undefined;
+    if (!row) return null;
+
+    const blobRow = this.db
+      .prepare(`SELECT * FROM transfer_blobs WHERE transfer_id = ?`)
+      .get(id) as unknown as RawTransferBlobRow | undefined;
+    return this.serializeTransferRow(row, blobRow);
+  }
+
+  createEncryptedTransfer(input: CreateEncryptedTransferRequest): EncryptedTransferRecordDto {
+    const id = assertValidUuid(input.id, 'transfer.id');
+    const revision = Number(input.revision ?? 1);
+    if (revision !== 1) {
+      throw new CryptoValidationError('新建互传记录 revision 必须为 1');
+    }
+    const reuseMediaId = input.reuseMediaId
+      ? assertValidUuid(input.reuseMediaId, 'reuseMediaId')
+      : null;
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
+    const now = new Date().toISOString();
+    let syncSeq = 0;
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db.prepare(`SELECT id FROM transfer_items WHERE id = ?`).get(id);
+      if (existing) {
+        throw new ConflictError('互传记录 ID 已存在');
+      }
+
+      let sharedMediaBlob: RawMediaBlobRow | undefined;
+      if (reuseMediaId) {
+        sharedMediaBlob = this.db
+          .prepare(`SELECT * FROM media_blobs WHERE item_id = ?`)
+          .get(reuseMediaId) as unknown as RawMediaBlobRow | undefined;
+        if (!sharedMediaBlob) {
+          throw new NotFoundError('关联的加密图库/视频库媒体条目不存在');
+        }
+      }
+
+      syncSeq = this.nextSyncSeq();
+      this.db
+        .prepare(
+          `INSERT INTO transfer_items (
+            id, is_pinned, revision, sync_seq, cipher_version,
+            item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.isPinned ? 1 : 0,
+          revision,
+          syncSeq,
+          encrypted.cipherVersion,
+          encrypted.itemSalt,
+          encrypted.nonce,
+          encrypted.authTag,
+          encrypted.ciphertext,
+          encrypted.byteSize,
+          now,
+          now,
+        );
+
+      if (sharedMediaBlob) {
+        this.db
+          .prepare(
+            `INSERT INTO transfer_blobs (
+              transfer_id, blob_id, fek_salt, fek_nonce, fek_tag, wrapped_fek, base_nonce,
+              chunk_size, chunk_count, plain_size, encrypted_size, sha256_hex,
+              thumb_blob_id, thumb_fek_salt, thumb_fek_nonce, thumb_fek_tag, thumb_wrapped_fek,
+              thumb_base_nonce, thumb_chunk_size, thumb_chunk_count, thumb_plain_size, thumb_encrypted_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            id,
+            sharedMediaBlob.blob_id,
+            sharedMediaBlob.fek_salt,
+            sharedMediaBlob.fek_nonce,
+            sharedMediaBlob.fek_tag,
+            sharedMediaBlob.wrapped_fek,
+            sharedMediaBlob.base_nonce,
+            sharedMediaBlob.chunk_size,
+            sharedMediaBlob.chunk_count,
+            sharedMediaBlob.plain_size,
+            sharedMediaBlob.encrypted_size,
+            sharedMediaBlob.sha256_hex,
+            sharedMediaBlob.thumb_blob_id,
+            sharedMediaBlob.thumb_fek_salt,
+            sharedMediaBlob.thumb_fek_nonce,
+            sharedMediaBlob.thumb_fek_tag,
+            sharedMediaBlob.thumb_wrapped_fek,
+            sharedMediaBlob.thumb_base_nonce,
+            sharedMediaBlob.thumb_chunk_size,
+            sharedMediaBlob.thumb_chunk_count,
+            sharedMediaBlob.thumb_plain_size,
+            sharedMediaBlob.thumb_encrypted_size,
+          );
+      }
+
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    this.emitSync(syncSeq, 'transfer');
+    return this.getEncryptedTransferById(id)!;
+  }
+
+  createEncryptedTransferFileItem(params: {
+    id: string;
+    isPinned?: boolean;
+    revision?: number;
+    envelope: CipherEnvelopeDto;
+    mainBlob: ValidatedBlobKeyMeta;
+    thumbBlob: ValidatedBlobKeyMeta | null;
+  }): EncryptedTransferRecordDto {
+    const id = assertValidUuid(params.id, 'transfer.id');
+    const revision = Number(params.revision ?? 1);
+    if (revision !== 1) {
+      throw new CryptoValidationError('新建互传文件记录 revision 必须为 1');
+    }
+    const encrypted = parseAndValidateCipherEnvelope(params.envelope);
+    const totalEncryptedBytes =
+      encrypted.byteSize +
+      params.mainBlob.encryptedSize +
+      (params.thumbBlob?.encryptedSize ?? 0);
+    const now = new Date().toISOString();
+    let syncSeq = 0;
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db.prepare(`SELECT id FROM transfer_items WHERE id = ?`).get(id);
+      if (existing) {
+        throw new ConflictError('互传记录 ID 已存在');
+      }
+      syncSeq = this.nextSyncSeq();
+      this.db
+        .prepare(
+          `INSERT INTO transfer_items (
+            id, is_pinned, revision, sync_seq, cipher_version,
+            item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          params.isPinned ? 1 : 0,
+          revision,
+          syncSeq,
+          encrypted.cipherVersion,
+          encrypted.itemSalt,
+          encrypted.nonce,
+          encrypted.authTag,
+          encrypted.ciphertext,
+          totalEncryptedBytes,
+          now,
+          now,
+        );
+
+      this.db
+        .prepare(
+          `INSERT INTO transfer_blobs (
+            transfer_id, blob_id, fek_salt, fek_nonce, fek_tag, wrapped_fek, base_nonce,
+            chunk_size, chunk_count, plain_size, encrypted_size, sha256_hex,
+            thumb_blob_id, thumb_fek_salt, thumb_fek_nonce, thumb_fek_tag, thumb_wrapped_fek,
+            thumb_base_nonce, thumb_chunk_size, thumb_chunk_count, thumb_plain_size, thumb_encrypted_size
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          params.mainBlob.blobId,
+          params.mainBlob.fekSalt,
+          params.mainBlob.fekNonce,
+          params.mainBlob.fekTag,
+          params.mainBlob.wrappedFek,
+          params.mainBlob.baseNonce,
+          params.mainBlob.chunkSize,
+          params.mainBlob.chunkCount,
+          params.mainBlob.plainSize,
+          params.mainBlob.encryptedSize,
+          params.mainBlob.sha256,
+          params.thumbBlob?.blobId ?? null,
+          params.thumbBlob?.fekSalt ?? null,
+          params.thumbBlob?.fekNonce ?? null,
+          params.thumbBlob?.fekTag ?? null,
+          params.thumbBlob?.wrappedFek ?? null,
+          params.thumbBlob?.baseNonce ?? null,
+          params.thumbBlob?.chunkSize ?? null,
+          params.thumbBlob?.chunkCount ?? null,
+          params.thumbBlob?.plainSize ?? null,
+          params.thumbBlob?.encryptedSize ?? null,
+        );
+
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    this.emitSync(syncSeq, 'transfer');
+    return this.getEncryptedTransferById(id)!;
+  }
+
+  updateEncryptedTransfer(
+    id: string,
+    input: UpdateEncryptedTransferRequest,
+  ): EncryptedTransferRecordDto {
+    const current = this.getEncryptedTransferById(id);
+    if (!current) {
+      throw new NotFoundError('未找到该互传记录');
+    }
+
+    if (
+      typeof input.expectedRevision === 'number' &&
+      input.expectedRevision !== current.revision
+    ) {
+      throw new ConflictError(
+        `互传记录版本冲突（当前版本 v${current.revision}，提交版本 v${input.expectedRevision}）`,
+      );
+    }
+
+    const nextRevision = current.revision + 1;
+    if (Number(input.revision) !== nextRevision) {
+      throw new ConflictError(
+        `客户端互传记录 AAD 绑定版本号不匹配（期望 revision=${nextRevision}，提交 ${String(input.revision)}）`,
+      );
+    }
+
+    const encrypted = parseAndValidateCipherEnvelope(input.envelope);
+    const blobs = this.getTransferBlobs(id);
+    let ownedBlobBytes = 0;
+    if (blobs) {
+      const sharedInMedia = this.db
+        .prepare(`SELECT 1 FROM media_blobs WHERE blob_id = ? LIMIT 1`)
+        .get(blobs.main.blobId);
+      if (!sharedInMedia) {
+        ownedBlobBytes = blobs.main.encryptedSize + (blobs.thumbnail?.encryptedSize ?? 0);
+      }
+    }
+    const nextByteSize = encrypted.byteSize + ownedBlobBytes;
+    const nextPinned = input.isPinned !== undefined ? input.isPinned : current.isPinned;
+    const now = new Date().toISOString();
+    let syncSeq = 0;
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      syncSeq = this.nextSyncSeq();
+      this.db
+        .prepare(
+          `UPDATE transfer_items
+           SET is_pinned = ?,
+               revision = ?,
+               sync_seq = ?,
+               cipher_version = ?,
+               item_salt = ?,
+               nonce = ?,
+               auth_tag = ?,
+               ciphertext = ?,
+               byte_size = ?,
+               updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          nextPinned ? 1 : 0,
+          nextRevision,
+          syncSeq,
+          encrypted.cipherVersion,
+          encrypted.itemSalt,
+          encrypted.nonce,
+          encrypted.authTag,
+          encrypted.ciphertext,
+          nextByteSize,
+          now,
+          id,
+        );
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    this.emitSync(syncSeq, 'transfer');
+    return this.getEncryptedTransferById(id)!;
+  }
+
+  permanentlyDeleteTransfer(id: string, chunkStore: EncryptedChunkStore): void {
+    const blobs = this.getTransferBlobs(id);
+    let syncSeq = 0;
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db
+        .prepare(`SELECT id FROM transfer_items WHERE id = ?`)
+        .get(id) as { id: string } | undefined;
+      if (!existing) {
+        throw new NotFoundError('未找到该互传记录');
+      }
+      syncSeq = this.nextSyncSeq();
+      const now = new Date().toISOString();
+
+      this.db.prepare(`DELETE FROM transfer_items WHERE id = ?`).run(id);
+      this.db
+        .prepare(
+          `INSERT OR REPLACE INTO sync_tombstones (id, item_type, sync_seq, deleted_at)
+           VALUES (?, 'transfer', ?, ?)`,
+        )
+        .run(id, syncSeq, now);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    if (blobs) {
+      if (!this.isBlobReferenced(blobs.main.blobId)) {
+        chunkStore.shredBlobSync(blobs.main.blobId);
+      }
+      if (blobs.thumbnail?.blobId && !this.isBlobReferenced(blobs.thumbnail.blobId)) {
+        chunkStore.shredBlobSync(blobs.thumbnail.blobId);
+      }
+    }
+    this.emitSync(syncSeq, 'transfer');
   }
 
   // ==================== Opaque Encrypted Albums ====================
@@ -1259,10 +1687,13 @@ export class VaultRepository {
   // ==================== Blind Resumable Upload Sessions ====================
 
   createEncryptedUploadSession(
-    input: EncryptedResumableUploadInitRequest,
+    input:
+      | EncryptedResumableUploadInitRequest
+      | (EncryptedTransferResumableInitRequest & { kind: 'file' }),
   ): StoredEncryptedUploadSession {
     const id = input.uploadId ? assertValidUuid(input.uploadId, 'uploadId') : crypto.randomUUID();
-    const kind: MediaKind = input.kind === 'video' ? 'video' : 'image';
+    const kind: UploadSessionKind =
+      input.kind === 'file' ? 'file' : input.kind === 'video' ? 'video' : 'image';
     const totalPlainBytes = Math.max(0, Math.floor(Number(input.totalPlainBytes)));
     const totalEncryptedBytes = Math.max(36, Math.floor(Number(input.totalEncryptedBytes)));
     const partPlainBytes = Math.min(
@@ -1336,7 +1767,7 @@ export class VaultRepository {
     const receivedChunks = JSON.parse(String(row.received_chunks_json || '[]')) as number[];
     return {
       id: String(row.id),
-      kind: row.kind === 'video' ? 'video' : 'image',
+      kind: row.kind === 'file' ? 'file' : row.kind === 'video' ? 'video' : 'image',
       partPlainBytes: Number(row.part_plain_bytes),
       totalPlainBytes: Number(row.total_plain_bytes),
       totalEncryptedBytes: Number(row.total_encrypted_bytes),
@@ -1381,13 +1812,21 @@ export class VaultRepository {
     return this.inspectItemCipherEnvelope(id, 'note');
   }
 
+  inspectTransferCipherEnvelope(id: string): CipherEnvelopeInspection | null {
+    return this.inspectItemCipherEnvelope(id, 'transfer');
+  }
+
   inspectItemCipherEnvelope(
     id: string,
-    expectedType?: VaultItemType,
+    expectedType?: VaultItemType | 'transfer',
   ): CipherEnvelopeInspection | null {
     const admin = this.getAdminConfig();
     if (!admin) {
       return null;
+    }
+
+    if (expectedType === 'transfer') {
+      return this.inspectTransferRowById(id, admin.envelope.keyFingerprint);
     }
 
     const row = (expectedType
@@ -1407,6 +1846,9 @@ export class VaultRepository {
           .get(id)) as unknown as RawVaultItemRow | undefined;
 
     if (!row) {
+      if (!expectedType) {
+        return this.inspectTransferRowById(id, admin.envelope.keyFingerprint);
+      }
       return null;
     }
 
@@ -1512,6 +1954,84 @@ export class VaultRepository {
     };
   }
 
+  private inspectTransferRowById(
+    id: string,
+    keyFingerprint: string,
+  ): CipherEnvelopeInspection | null {
+    const tRow = this.db
+      .prepare(
+        `SELECT id, is_pinned, revision, sync_seq, cipher_version,
+                item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+         FROM transfer_items WHERE id = ?`,
+      )
+      .get(id) as unknown as RawTransferItemRow | undefined;
+    if (!tRow) return null;
+
+    const cipherBuf = Buffer.from(tRow.ciphertext);
+    const previewBytes = cipherBuf.subarray(0, 96);
+    const formattedHex =
+      previewBytes
+        .toString('hex')
+        .match(/.{1,2}/g)
+        ?.join(' ') ?? '';
+    const blobMeta = this.getTransferBlobs(tRow.id);
+    const cipherVer = Number(tRow.cipher_version);
+
+    return {
+      itemId: tRow.id,
+      itemType: 'transfer',
+      revision: Number(tRow.revision),
+      syncSeq: Number(tRow.sync_seq),
+      cipherVersion: cipherVer,
+      algorithm: blobMeta
+        ? 'Client-Side AES-256-GCM + PSENC001 64KiB Chunked Stream'
+        : 'Client-Side AES-256-GCM (96-bit Nonce, 128-bit Auth Tag)',
+      kdfSpec: `${ENCRYPTION_SPEC.passwordKdf} (Client) → DEK → ${ENCRYPTION_SPEC.itemKdf}`,
+      hkdfContext: buildItemHkdfInfo(tRow.id, 'transfer', cipherVer),
+      aadJson: buildItemAad(tRow.id, 'transfer', Number(tRow.revision), cipherVer),
+      saltHex: Buffer.from(tRow.item_salt).toString('hex'),
+      nonceHex: Buffer.from(tRow.nonce).toString('hex'),
+      authTagHex: Buffer.from(tRow.auth_tag).toString('hex'),
+      ciphertextPreviewHex: cipherBuf.length > 96 ? `${formattedHex} …` : formattedHex,
+      ciphertextTotalBytes: cipherBuf.length,
+      keyFingerprint,
+      sqliteColumnsCleartext: [
+        'id',
+        'is_pinned',
+        'revision',
+        'sync_seq',
+        'created_at',
+        'updated_at',
+      ],
+      sqliteColumnsEncrypted: [
+        'messageKind',
+        'text',
+        'senderDeviceName',
+        'senderPlatform',
+        'originalFilename',
+        'mimeType',
+        'sha256',
+        'linkedMediaId',
+        'tags',
+      ],
+      chunkStore: blobMeta
+        ? {
+            formatMagic: 'PSENC001',
+            blobId: blobMeta.main.blobId,
+            chunkPlainBytes: blobMeta.main.chunkSize,
+            chunkCount: blobMeta.main.chunkCount,
+            plainBytes: blobMeta.main.plainSize,
+            encryptedDiskBytes: blobMeta.main.encryptedSize,
+            fekWrapInfo: buildBlobKekInfo(blobMeta.main.blobId),
+            baseNonceHex: blobMeta.main.baseNonce.toString('hex'),
+            hasEncryptedThumbnail: Boolean(blobMeta.thumbnail),
+            sha256Hex: blobMeta.main.sha256,
+          }
+        : undefined,
+      updatedAt: tRow.updated_at,
+    };
+  }
+
   getSecuritySummary(): VaultSecuritySummary | null {
     const admin = this.getAdminConfig();
     if (!admin) {
@@ -1541,6 +2061,18 @@ export class VaultRepository {
       )
       .get() as Record<string, number>;
 
+    const transferStats = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS total_transfers,
+           COALESCE(SUM(byte_size), 0) AS transfers_bytes
+         FROM transfer_items`,
+      )
+      .get() as Record<string, number>;
+
+    const totalTransfers = Number(transferStats.total_transfers || 0);
+    const transfersBytes = Number(transferStats.transfers_bytes || 0);
+
     return {
       vaultName: admin.vaultName,
       encryption: ENCRYPTION_SPEC,
@@ -1556,11 +2088,14 @@ export class VaultRepository {
       activeImages: Number(stats.active_images || 0),
       totalVideos: Number(stats.total_videos || 0),
       activeVideos: Number(stats.active_videos || 0),
-      totalEncryptedBytes: Number(stats.total_bytes || 0),
+      totalTransfers,
+      activeTransfers: totalTransfers,
+      totalEncryptedBytes: Number(stats.total_bytes || 0) + transfersBytes,
       notesEncryptedBytes: Number(stats.notes_bytes || 0),
       passwordsEncryptedBytes: Number(stats.passwords_bytes || 0),
       imagesEncryptedBytes: Number(stats.images_bytes || 0),
       videosEncryptedBytes: Number(stats.videos_bytes || 0),
+      transfersEncryptedBytes: transfersBytes,
       latestSyncSeq: admin.syncSeq,
       createdAt: admin.createdAt,
       passwordUpdatedAt: admin.passwordUpdatedAt,
@@ -1598,6 +2133,27 @@ export class VaultRepository {
 
     const albums = this.listEncryptedAlbums().filter((a) => a.syncSeq > sinceSeq);
 
+    const changedTransferRows = this.db
+      .prepare(
+        `SELECT id, is_pinned, revision, sync_seq, cipher_version,
+                item_salt, nonce, auth_tag, ciphertext, byte_size, created_at, updated_at
+         FROM transfer_items
+         WHERE sync_seq > ?
+         ORDER BY sync_seq ASC`,
+      )
+      .all(sinceSeq) as unknown as RawTransferItemRow[];
+
+    let transfers: EncryptedTransferRecordDto[] = [];
+    if (changedTransferRows.length > 0) {
+      const tBlobRows = this.db
+        .prepare(`SELECT * FROM transfer_blobs`)
+        .all() as unknown as RawTransferBlobRow[];
+      const tBlobMap = new Map(tBlobRows.map((b) => [b.transfer_id, b]));
+      transfers = changedTransferRows.map((row) =>
+        this.serializeTransferRow(row, tBlobMap.get(row.id)),
+      );
+    }
+
     const tombstoneRows = this.db
       .prepare(
         `SELECT id, item_type, sync_seq, deleted_at
@@ -1607,7 +2163,7 @@ export class VaultRepository {
       )
       .all(sinceSeq) as Array<{
       id: string;
-      item_type: VaultItemType | 'album';
+      item_type: VaultItemType | 'album' | 'transfer';
       sync_seq: number;
       deleted_at: string;
     }>;
@@ -1618,6 +2174,7 @@ export class VaultRepository {
       sinceSeq,
       items,
       albums,
+      transfers,
       deleted: tombstoneRows.map((t) => ({
         id: t.id,
         itemType: t.item_type,

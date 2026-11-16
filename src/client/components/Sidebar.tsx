@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Archive,
+  ArrowLeftRight,
   FileText,
   Film,
   Hash,
@@ -19,7 +20,7 @@ import {
 } from 'lucide-react';
 import { formatBytes } from '../utils/format';
 
-export type WorkspaceSection = 'notes' | 'passwords' | 'images' | 'videos';
+export type WorkspaceSection = 'notes' | 'passwords' | 'images' | 'videos' | 'transfers';
 export type NavFilter = 'all' | 'pinned' | 'archived' | 'trash';
 
 interface SidebarProps {
@@ -36,6 +37,7 @@ interface SidebarProps {
     passwords: number;
     images: number;
     videos: number;
+    transfers: number;
     totalEncryptedBytes: number;
   };
   tagCounts: Array<{ tag: string; count: number }>;
@@ -108,6 +110,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   }
 
   const primaryActionLabel: Record<WorkspaceSection, string> = {
+    transfers: '发送互传文件',
     passwords: '新建加密密码',
     images: '上传私密图片',
     videos: '分片上传视频',
@@ -168,11 +171,24 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         <div className="sidebar-scroll">
-          {/* 4 Core Encrypted Storage Spaces */}
+          {/* Core Encrypted Storage & Transfer Spaces */}
           <nav className="sidebar-section" aria-label="核心加密空间">
             <div className="sidebar-section-label">
               <span>核心私密空间</span>
             </div>
+
+            <button
+              id="nav-section-transfers"
+              type="button"
+              className={`nav-item ${activeSection === 'transfers' ? 'is-active' : ''}`}
+              onClick={() => handleSection('transfers')}
+            >
+              <span className="nav-item-left">
+                <ArrowLeftRight size={15} />
+                <span className="nav-item-label">多端加密互传</span>
+              </span>
+              <span className="nav-count">{counts.transfers}</span>
+            </button>
 
             <button
               id="nav-section-passwords"
@@ -356,7 +372,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="mono">{formatBytes(counts.totalEncryptedBytes)}</span>
             </div>
             <div className="pss-storage-mini-sub">
-              密 {counts.passwords} · 图 {counts.images} · 影 {counts.videos} · 文 {counts.all}
+              互 {counts.transfers} · 密 {counts.passwords} · 图 {counts.images} · 影 {counts.videos} · 文 {counts.all}
             </div>
           </div>
 

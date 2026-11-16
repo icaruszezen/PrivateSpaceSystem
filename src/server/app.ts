@@ -16,6 +16,7 @@ import { createMediaRoutes } from './routes/media.js';
 import { createNotesRoutes } from './routes/notes.js';
 import { createPasswordsRoutes } from './routes/passwords.js';
 import { createSyncRoutes } from './routes/sync.js';
+import { createTransfersRoutes } from './routes/transfers.js';
 import { createUpdateRoutes } from './routes/updates.js';
 import { SyncSseHub } from './sync/sseHub.js';
 
@@ -173,6 +174,7 @@ export function createApp(config: ServerConfig, options: CreateAppOptions = {}):
   app.route('/api/v1/notes', createNotesRoutes(repo, sessionCrypto));
   app.route('/api/v1/passwords', createPasswordsRoutes(repo, sessionCrypto));
   app.route('/api/v1/media', createMediaRoutes(repo, sessionCrypto, chunkStore));
+  app.route('/api/v1/transfers', createTransfersRoutes(repo, sessionCrypto, chunkStore));
   app.route('/api/v1/sync', createSyncRoutes(repo, sessionCrypto, sseHub));
   app.route('/api/v1/updates', createUpdateRoutes(config, options.updateFetchImpl));
 

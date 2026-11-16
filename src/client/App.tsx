@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { CheckCircle2 } from 'lucide-react';
 import type {
   CreatePasswordRequest,
+  CreateTransferTextRequest,
   ImportPasswordEntryInput,
   MediaAlbum,
   MediaItem,
@@ -9,9 +10,11 @@ import type {
   NoteItem,
   PasswordImportOptions,
   PasswordItem,
+  TransferItem,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
+  UpdateTransferRequest,
 } from '@shared/types';
 import { api, setOnUnauthorized } from './api/client';
 import { CommandPalette } from './components/CommandPalette';
@@ -22,6 +25,7 @@ import { NoteList, type SortMode } from './components/NoteList';
 import { PasswordVaultView } from './components/PasswordVaultView';
 import { SecurityModal, type SecurityTab } from './components/SecurityModal';
 import { Sidebar, type NavFilter, type WorkspaceSection } from './components/Sidebar';
+import { TransferHubView } from './components/TransferHubView';
 import {
   formatDisguisedDocumentTitle,
   isDisguiseShortcutEvent,
@@ -47,12 +51,13 @@ export const App: React.FC = () => {
     return 'light';
   });
 
-  // 4-Pillar Workspace State
+  // Core Encrypted Workspace State
   const [activeSection, setActiveSection] = useState<WorkspaceSection>('passwords');
   const [notes, setNotes] = useState<NoteItem[]>([]);
   const [passwords, setPasswords] = useState<PasswordItem[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [albums, setAlbums] = useState<MediaAlbum[]>([]);
+  const [transfers, setTransfers] = useState<TransferItem[]>([]);
 
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [selectedPasswordId, setSelectedPasswordId] = useState<string | null>(null);
@@ -65,6 +70,9 @@ export const App: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [uploadingQueue, setUploadingQueue] = useState<
+    Array<{ id: string; name: string; progress: number }>
+  >([]);
+  const [transferUploadingTasks, setTransferUploadingTasks] = useState<
     Array<{ id: string; name: string; progress: number }>
   >([]);
 
@@ -113,20 +121,27 @@ export const App: React.FC = () => {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   }, []);
 
-  // Load all 4 pillars on unlock
+  // Load all encrypted spaces on unlock
   const loadInitialWorkspace = useCallback(async () => {
-    const [notesData, pwdData, mediaData] = await Promise.all([
+    const [notesData, pwdData, mediaData, transferData] = await Promise.all([
       api.listNotes(true),
       api.listPasswords(true),
       api.listMedia(undefined, true),
+      api.listTransfers(),
     ]);
 
     setNotes(notesData.notes);
     setPasswords(pwdData.passwords);
     setMediaItems(mediaData.media);
     setAlbums(mediaData.albums);
+    setTransfers(transferData.items);
     setLatestSyncSeq(
-      Math.max(notesData.latestSyncSeq, pwdData.latestSyncSeq, mediaData.latestSyncSeq),
+      Math.max(
+        notesData.latestSyncSeq,
+        pwdData.latestSyncSeq,
+        mediaData.latestSyncSeq,
+        transferData.latestSyncSeq,
+      ),
     );
 
     const firstNote =
@@ -144,6 +159,7 @@ export const App: React.FC = () => {
       setPasswords([]);
       setMediaItems([]);
       setAlbums([]);
+      setTransfers([]);
       setSelectedNoteId(null);
       setSelectedPasswordId(null);
       setPhase('disguised');
@@ -178,7 +194,7 @@ export const App: React.FC = () => {
     return () => setOnUnauthorized(null);
   }, [loadInitialWorkspace]);
 
-  // Incremental multi-device sync via /api/v1/sync?since_seq=... across all 4 item types
+  // Incremental multi-device sync via /api/v1/sync?since_seq=... across all encrypted spaces & transfers
   const triggerDeltaSync = useCallback(async () => {
     if (phase !== 'unlocked') return;
     setSyncing(true);
@@ -224,6 +240,17 @@ export const App: React.FC = () => {
           for (const a of delta.albums) map.set(a.id, a);
           for (const del of delta.deleted) {
             if (del.itemType === 'album') map.delete(del.id);
+          }
+          return Array.from(map.values());
+        });
+      }
+
+      if (delta.transfers.length > 0 || delta.deleted.length > 0) {
+        setTransfers((prev) => {
+          const map = new Map(prev.map((t) => [t.id, t]));
+          for (const t of delta.transfers) map.set(t.id, t);
+          for (const del of delta.deleted) {
+            if (del.itemType === 'transfer') map.delete(del.id);
           }
           return Array.from(map.values());
         });
@@ -456,8 +483,103 @@ export const App: React.FC = () => {
     [notify],
   );
 
+  // ==================== 4. Cross-Device Transfers & Chat Handlers ====================
+  const handleSendTransferText = useCallback(async (input: CreateTransferTextRequest) => {
+    const res = await api.sendTransferText(input);
+    setTransfers((prev) => {
+      const map = new Map(prev.map((t) => [t.id, t]));
+      map.set(res.item.id, res.item);
+      return Array.from(map.values());
+    });
+    setLatestSyncSeq((seq) => Math.max(seq, res.item.syncSeq));
+    return res.item;
+  }, []);
+
+  const handleSendTransferFiles = useCallback(
+    async (
+      fileList: FileList | File[],
+      opts?: { text?: string; replyToId?: string | null; replyPreview?: string | null },
+    ) => {
+      const files = Array.from(fileList);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const taskId = crypto.randomUUID();
+        setTransferUploadingTasks((prev) => [
+          ...prev,
+          { id: taskId, name: file.name, progress: 0.06 },
+        ]);
+
+        try {
+          const res = await api.sendTransferFile(file, {
+            text: i === 0 ? opts?.text : undefined,
+            replyToId: i === 0 ? opts?.replyToId : null,
+            replyPreview: i === 0 ? opts?.replyPreview : null,
+            onProgress: (loaded, total) => {
+              setTransferUploadingTasks((prev) =>
+                prev.map((t) =>
+                  t.id === taskId
+                    ? { ...t, progress: Math.min(0.98, loaded / Math.max(1, total)) }
+                    : t,
+                ),
+              );
+            },
+          });
+
+          if (res.autoSavedMedia) {
+            const media = res.autoSavedMedia;
+            setMediaItems((prev) => {
+              const map = new Map(prev.map((m) => [m.id, m]));
+              map.set(media.id, media);
+              return Array.from(map.values());
+            });
+          }
+
+          setTransfers((prev) => {
+            const map = new Map(prev.map((t) => [t.id, t]));
+            map.set(res.item.id, res.item);
+            return Array.from(map.values());
+          });
+          setLatestSyncSeq((seq) => Math.max(seq, res.item.syncSeq));
+
+          if (res.autoSavedMedia) {
+            notify(
+              `已加密发送并自动归档至${
+                res.autoSavedMedia.itemType === 'video' ? '视频影院' : '私密图库'
+              }：${file.name}`,
+            );
+          } else {
+            notify(`已分块加密互传：${file.name}`);
+          }
+        } catch (err) {
+          notify(err instanceof Error ? err.message : `互传发送失败: ${file.name}`);
+        } finally {
+          setTransferUploadingTasks((prev) => prev.filter((t) => t.id !== taskId));
+        }
+      }
+    },
+    [notify],
+  );
+
+  const handleUpdateTransfer = useCallback(async (id: string, patch: UpdateTransferRequest) => {
+    const res = await api.updateTransfer(id, patch);
+    setTransfers((prev) => prev.map((t) => (t.id === id ? res.item : t)));
+    setLatestSyncSeq((seq) => Math.max(seq, res.item.syncSeq));
+    return res.item;
+  }, []);
+
+  const handleDeleteTransferPermanent = useCallback(
+    async (id: string) => {
+      await api.deleteTransferPermanently(id);
+      setTransfers((prev) => prev.filter((t) => t.id !== id));
+      notify('互传密文记录已销毁');
+    },
+    [notify],
+  );
+
   const handlePrimarySidebarAction = useCallback(() => {
-    if (activeSection === 'passwords') {
+    if (activeSection === 'transfers') {
+      document.getElementById('transfer-upload-btn')?.click();
+    } else if (activeSection === 'passwords') {
       document.getElementById('new-password-btn')?.click();
     } else if (activeSection === 'images') {
       document.getElementById('upload-image-btn')?.click();
@@ -473,6 +595,7 @@ export const App: React.FC = () => {
     setPasswords([]);
     setMediaItems([]);
     setAlbums([]);
+    setTransfers([]);
     setSelectedNoteId(null);
     setSelectedPasswordId(null);
     setSecurityModal((s) => ({ ...s, open: false }));
@@ -529,11 +652,19 @@ export const App: React.FC = () => {
 
     let imgActive = 0;
     let vidActive = 0;
+    const mediaIdSet = new Set<string>();
     for (const m of mediaItems) {
+      mediaIdSet.add(m.id);
       totalEncryptedBytes += m.encryptedSize;
       if (!m.isTrashed) {
         if (m.itemType === 'image') imgActive += 1;
         else vidActive += 1;
+      }
+    }
+
+    for (const tr of transfers) {
+      if (!tr.linkedMediaId || !mediaIdSet.has(tr.linkedMediaId)) {
+        totalEncryptedBytes += tr.encryptedSize;
       }
     }
 
@@ -545,9 +676,10 @@ export const App: React.FC = () => {
       passwords: pwdActive,
       images: imgActive,
       videos: vidActive,
+      transfers: transfers.length,
       totalEncryptedBytes,
     };
-  }, [notes, passwords, mediaItems]);
+  }, [notes, passwords, mediaItems, transfers]);
 
   const tagCounts = useMemo(() => {
     const map = new Map<string, number>();
@@ -652,7 +784,8 @@ export const App: React.FC = () => {
     );
   }
 
-  const isGalleryMode = activeSection === 'images' || activeSection === 'videos';
+  const isGalleryMode =
+    activeSection === 'images' || activeSection === 'videos' || activeSection === 'transfers';
 
   return (
     <div
@@ -696,20 +829,47 @@ export const App: React.FC = () => {
             open: true,
             tab,
             itemId:
-              activeSection === 'passwords'
-                ? selectedPasswordId
-                : activeSection === 'notes'
-                  ? selectedNote?.id ?? null
-                  : mediaItems.find(
-                      (m) =>
-                        !m.isTrashed &&
-                        m.itemType === (activeSection === 'videos' ? 'video' : 'image'),
-                    )?.id ?? null,
+              activeSection === 'transfers'
+                ? transfers[transfers.length - 1]?.id ?? null
+                : activeSection === 'passwords'
+                  ? selectedPasswordId
+                  : activeSection === 'notes'
+                    ? selectedNote?.id ?? null
+                    : mediaItems.find(
+                        (m) =>
+                          !m.isTrashed &&
+                          m.itemType === (activeSection === 'videos' ? 'video' : 'image'),
+                      )?.id ?? null,
           })
         }
         onToggleTheme={toggleTheme}
         onLockVault={() => void handleLockVault()}
       />
+
+      {activeSection === 'transfers' && (
+        <TransferHubView
+          transfers={transfers}
+          sseConnected={sseConnected}
+          latestSyncSeq={latestSyncSeq}
+          uploadingTasks={transferUploadingTasks}
+          onSendText={handleSendTransferText}
+          onSendFiles={handleSendTransferFiles}
+          onUpdateTransfer={handleUpdateTransfer}
+          onDeleteTransfer={handleDeleteTransferPermanent}
+          onJumpToMedia={(kind) => {
+            setActiveSection(kind === 'video' ? 'videos' : 'images');
+          }}
+          onInspectCipher={(id) =>
+            setSecurityModal({
+              open: true,
+              tab: 'cipher',
+              itemId: id,
+            })
+          }
+          onOpenMobileMenu={() => setMobileMenuOpen(true)}
+          onNotify={notify}
+        />
+      )}
 
       {activeSection === 'passwords' && (
         <PasswordVaultView
@@ -816,6 +976,7 @@ export const App: React.FC = () => {
         notes={notes}
         passwords={passwords}
         mediaItems={mediaItems}
+        transfers={transfers}
         theme={theme}
         onClose={() => setPaletteOpen(false)}
         onSelectSection={setActiveSection}
