@@ -49,9 +49,11 @@ import {
   InMemoryVaultPersistence,
   loadMobileUpdatePreferences,
   parseMobilePasswordCsv,
+  PASSWORD_IMPORT_BATCH_SIZE,
   PrivateSpaceMobileClient,
   saveMobileUpdatePreferences,
   type MobileVaultSnapshot,
+  type PasswordImportProgress,
 } from './src/syncClient';
 import {
   formatMobileBytes,
@@ -870,12 +872,20 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     showToast('密文记录已彻底擦除');
   };
 
-  const handleCsvImport = async (csvText: string) => {
+  const handleCsvImport = async (
+    csvText: string,
+    onProgress?: (progress: PasswordImportProgress) => void,
+  ) => {
     const entries = parseMobilePasswordCsv(csvText);
     if (!entries.length) return;
-    const imported = await client.importPasswords(entries);
+    const imported = await client.importPasswords(entries, { onProgress });
     await performSync(true);
-    showToast(`已批量加密导入 ${imported.length} 条凭据`);
+    const batchCount = Math.ceil(imported.length / PASSWORD_IMPORT_BATCH_SIZE);
+    if (batchCount > 1) {
+      showToast(`已自动分 ${batchCount} 批加密导入 ${imported.length} 条凭据`);
+    } else {
+      showToast(`已批量加密导入 ${imported.length} 条凭据`);
+    }
   };
 
   const handlePickAndUploadMedia = async (kind: 'image' | 'video') => {

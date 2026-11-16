@@ -95,15 +95,15 @@ final class PrivateSpaceKitTests: XCTestCase {
         XCTAssertTrue(audit.missingTotpIds.contains("weak-1"))
         XCTAssertLessThan(audit.healthScore, 85)
 
-        let csv = """
-        name,url,username,password,totp
-        "GitHub Enterprise",https://github.com,dev@privatespace.io,"Ultra#Strong$Pass99",JBSWY3DPEHPK3PXP
-        Cloudflare,https://dash.cloudflare.com,dns@privatespace.io,Cf#Vault$Pass88,
-        """
+        let csv = "\u{FEFF}name,url,username,password,totp,note\r\n" +
+            "\"GitHub Enterprise\",https://github.com,dev@privatespace.io,\"Ultra#Strong$Pass99\",JBSWY3DPEHPK3PXP,\"Line 1\nLine 2 \"\"ok\"\"\"\r\n" +
+            ",https://www.cloudflare.com/login,dns@privatespace.io,Cf#Vault$Pass88,,Edge DNS"
         let imported = PasswordSecurityEngine.parsePasswordCsv(csv)
         XCTAssertEqual(imported.count, 2)
         XCTAssertEqual(imported[0].title, "GitHub Enterprise")
         XCTAssertEqual(imported[0].totpSecret, "JBSWY3DPEHPK3PXP")
+        XCTAssertEqual(imported[0].notes, "Line 1\nLine 2 \"ok\"")
+        XCTAssertEqual(imported[1].title, "cloudflare.com")
     }
 
     // MARK: - 3. On-Device CryptoKit AES-256-GCM Zero-Plaintext Cache & AutoFill Domain Matching
