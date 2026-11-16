@@ -323,6 +323,11 @@ export const SecurityModal: React.FC<SecurityModalProps> = ({
                     <strong>{summary.activeNotes} 篇</strong>
                     <small className="mono">{formatBytes(summary.notesEncryptedBytes)}</small>
                   </div>
+                  <div className="pss-breakdown-card">
+                    <span>多端互传</span>
+                    <strong>{summary.activeTransfers} 条</strong>
+                    <small className="mono">{formatBytes(summary.transfersEncryptedBytes)}</small>
+                  </div>
                 </div>
               )}
 

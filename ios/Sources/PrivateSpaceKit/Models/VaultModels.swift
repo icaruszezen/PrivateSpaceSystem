@@ -16,6 +16,31 @@ public enum VaultCipherDomain: String, Codable, Sendable, CaseIterable {
     case video
     case album
     case upload
+    case transfer
+}
+
+public enum UploadSessionKind: String, Codable, Sendable, CaseIterable {
+    case image
+    case video
+    case file
+}
+
+public enum TransferMessageKind: String, Codable, Sendable, CaseIterable {
+    case text
+    case file
+    case image
+    case video
+}
+
+public enum TransferFileCategory: String, Codable, Sendable, CaseIterable {
+    case document
+    case archive
+    case audio
+    case code
+    case package
+    case image
+    case video
+    case other
 }
 
 public enum NoteFormat: String, Codable, Sendable, CaseIterable {
@@ -542,13 +567,146 @@ public struct EncryptedResumableUploadCompleteRequest: Codable, Sendable {
     }
 }
 
+public struct EncryptedTransferRecordDto: Codable, Sendable, Equatable {
+    public let id: String
+    public let isPinned: Bool
+    public let revision: Int
+    public let syncSeq: Int
+    public let byteSize: Int
+    public let createdAt: String
+    public let updatedAt: String
+    public let envelope: CipherEnvelopeDto
+    public let transferBlobs: MediaBlobKeyBundleDto?
+}
+
+public struct CreateEncryptedTransferRequest: Codable, Sendable {
+    public let id: String
+    public let isPinned: Bool?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+    public let reuseMediaId: String?
+
+    public init(
+        id: String,
+        isPinned: Bool? = nil,
+        revision: Int = 1,
+        envelope: CipherEnvelopeDto,
+        reuseMediaId: String? = nil
+    ) {
+        self.id = id
+        self.isPinned = isPinned
+        self.revision = revision
+        self.envelope = envelope
+        self.reuseMediaId = reuseMediaId
+    }
+}
+
+public struct UpdateEncryptedTransferRequest: Codable, Sendable {
+    public let isPinned: Bool?
+    public let expectedRevision: Int?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+
+    public init(
+        isPinned: Bool? = nil,
+        expectedRevision: Int? = nil,
+        revision: Int,
+        envelope: CipherEnvelopeDto
+    ) {
+        self.isPinned = isPinned
+        self.expectedRevision = expectedRevision
+        self.revision = revision
+        self.envelope = envelope
+    }
+}
+
+public struct EncryptedTransferResumableInitRequest: Codable, Sendable {
+    public let uploadId: String?
+    public let totalPlainBytes: Int
+    public let totalEncryptedBytes: Int
+    public let partPlainBytes: Int
+    public let totalParts: Int
+    public let metaEnvelope: CipherEnvelopeDto
+
+    public init(
+        uploadId: String? = nil,
+        totalPlainBytes: Int,
+        totalEncryptedBytes: Int,
+        partPlainBytes: Int,
+        totalParts: Int,
+        metaEnvelope: CipherEnvelopeDto
+    ) {
+        self.uploadId = uploadId
+        self.totalPlainBytes = totalPlainBytes
+        self.totalEncryptedBytes = totalEncryptedBytes
+        self.partPlainBytes = partPlainBytes
+        self.totalParts = totalParts
+        self.metaEnvelope = metaEnvelope
+    }
+}
+
+public struct EncryptedTransferResumableStatusResponse: Codable, Sendable {
+    public let uploadId: String
+    public let kind: UploadSessionKind
+    public let receivedChunks: [Int]
+    public let totalChunks: Int
+    public let totalBytes: Int
+    public let totalEncryptedBytes: Int
+    public let chunkBytes: Int
+    public let metaEnvelope: CipherEnvelopeDto
+}
+
+public struct EncryptedTransferResumableCompleteRequest: Codable, Sendable {
+    public let id: String
+    public let isPinned: Bool?
+    public let revision: Int
+    public let envelope: CipherEnvelopeDto
+    public let mainBlob: EncryptedBlobKeyMetaDto
+    public let thumbBlob: EncryptedBlobKeyMetaDto?
+    public let encryptedThumbnailBase64: String?
+
+    public init(
+        id: String,
+        isPinned: Bool? = nil,
+        revision: Int = 1,
+        envelope: CipherEnvelopeDto,
+        mainBlob: EncryptedBlobKeyMetaDto,
+        thumbBlob: EncryptedBlobKeyMetaDto? = nil,
+        encryptedThumbnailBase64: String? = nil
+    ) {
+        self.id = id
+        self.isPinned = isPinned
+        self.revision = revision
+        self.envelope = envelope
+        self.mainBlob = mainBlob
+        self.thumbBlob = thumbBlob
+        self.encryptedThumbnailBase64 = encryptedThumbnailBase64
+    }
+}
+
 public struct EncryptedSyncPullResponse: Codable, Sendable {
     public let serverTime: String
     public let latestSyncSeq: Int
     public let sinceSeq: Int
     public let items: [EncryptedVaultRecordDto]
     public let albums: [EncryptedAlbumRecordDto]
+    public let transfers: [EncryptedTransferRecordDto]
     public let deleted: [SyncTombstone]
+
+    private enum CodingKeys: String, CodingKey {
+        case serverTime, latestSyncSeq, sinceSeq, items, albums, transfers, deleted
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.serverTime = try c.decode(String.self, forKey: .serverTime)
+        self.latestSyncSeq = try c.decode(Int.self, forKey: .latestSyncSeq)
+        self.sinceSeq = try c.decode(Int.self, forKey: .sinceSeq)
+        self.items = try c.decodeIfPresent([EncryptedVaultRecordDto].self, forKey: .items) ?? []
+        self.albums = try c.decodeIfPresent([EncryptedAlbumRecordDto].self, forKey: .albums) ?? []
+        self.transfers = try c.decodeIfPresent([EncryptedTransferRecordDto].self, forKey: .transfers) ?? []
+        self.deleted = try c.decodeIfPresent([SyncTombstone].self, forKey: .deleted) ?? []
+    }
 }
 
 // MARK: - Decrypted Client Payloads
@@ -1231,6 +1389,219 @@ public struct UpdateMediaRequest: Encodable, Sendable {
     }
 }
 
+// MARK: - 3b. Cross-Device Zero-Knowledge Transfer & Chat
+
+public struct TransferDecryptedPayload: Codable, Sendable, Equatable {
+    public var messageKind: TransferMessageKind
+    public var text: String
+    public var senderSessionId: String?
+    public var senderDeviceName: String
+    public var senderPlatform: DevicePlatform
+    public var originalFilename: String
+    public var mimeType: String
+    public var fileCategory: TransferFileCategory?
+    public var plainSize: Int
+    public var sha256: String
+    public var width: Int
+    public var height: Int
+    public var durationMs: Double?
+    public var thumbnailMimeType: String?
+    public var linkedMediaId: String?
+    public var replyToId: String?
+    public var replyPreview: String?
+    public var tags: [String]
+
+    public init(
+        messageKind: TransferMessageKind,
+        text: String,
+        senderSessionId: String? = nil,
+        senderDeviceName: String,
+        senderPlatform: DevicePlatform = .ios,
+        originalFilename: String = "",
+        mimeType: String = "",
+        fileCategory: TransferFileCategory? = nil,
+        plainSize: Int = 0,
+        sha256: String = "",
+        width: Int = 0,
+        height: Int = 0,
+        durationMs: Double? = nil,
+        thumbnailMimeType: String? = nil,
+        linkedMediaId: String? = nil,
+        replyToId: String? = nil,
+        replyPreview: String? = nil,
+        tags: [String] = []
+    ) {
+        self.messageKind = messageKind
+        self.text = text
+        self.senderSessionId = senderSessionId
+        self.senderDeviceName = senderDeviceName
+        self.senderPlatform = senderPlatform
+        self.originalFilename = originalFilename
+        self.mimeType = mimeType
+        self.fileCategory = fileCategory
+        self.plainSize = plainSize
+        self.sha256 = sha256
+        self.width = width
+        self.height = height
+        self.durationMs = durationMs
+        self.thumbnailMimeType = thumbnailMimeType
+        self.linkedMediaId = linkedMediaId
+        self.replyToId = replyToId
+        self.replyPreview = replyPreview
+        self.tags = tags
+    }
+}
+
+public struct TransferItem: Codable, Sendable, Identifiable, Equatable, Hashable {
+    public let id: String
+    public let itemType: VaultCipherDomain
+    public var messageKind: TransferMessageKind
+    public var text: String
+    public var senderSessionId: String?
+    public var senderDeviceName: String
+    public var senderPlatform: DevicePlatform
+    public var originalFilename: String
+    public var mimeType: String
+    public var fileCategory: TransferFileCategory?
+    public var plainSize: Int
+    public var sha256: String
+    public var width: Int
+    public var height: Int
+    public var durationMs: Double?
+    public var thumbnailMimeType: String?
+    public var linkedMediaId: String?
+    public var replyToId: String?
+    public var replyPreview: String?
+    public var tags: [String]
+    public var isPinned: Bool
+    public var revision: Int
+    public var syncSeq: Int
+    public var byteSize: Int
+    public var encryptedSize: Int
+    public var hasBlob: Bool
+    public var hasThumbnail: Bool
+    public var blobKeyBundle: MediaBlobKeyBundleDto?
+    public var createdAt: String
+    public var updatedAt: String
+
+    public init(
+        id: String,
+        itemType: VaultCipherDomain = .transfer,
+        messageKind: TransferMessageKind,
+        text: String = "",
+        senderSessionId: String? = nil,
+        senderDeviceName: String,
+        senderPlatform: DevicePlatform = .ios,
+        originalFilename: String = "",
+        mimeType: String = "",
+        fileCategory: TransferFileCategory? = nil,
+        plainSize: Int = 0,
+        sha256: String = "",
+        width: Int = 0,
+        height: Int = 0,
+        durationMs: Double? = nil,
+        thumbnailMimeType: String? = nil,
+        linkedMediaId: String? = nil,
+        replyToId: String? = nil,
+        replyPreview: String? = nil,
+        tags: [String] = [],
+        isPinned: Bool = false,
+        revision: Int = 1,
+        syncSeq: Int = 0,
+        byteSize: Int = 0,
+        encryptedSize: Int = 0,
+        hasBlob: Bool = false,
+        hasThumbnail: Bool = false,
+        blobKeyBundle: MediaBlobKeyBundleDto? = nil,
+        createdAt: String,
+        updatedAt: String
+    ) {
+        self.id = id
+        self.itemType = itemType
+        self.messageKind = messageKind
+        self.text = text
+        self.senderSessionId = senderSessionId
+        self.senderDeviceName = senderDeviceName
+        self.senderPlatform = senderPlatform
+        self.originalFilename = originalFilename
+        self.mimeType = mimeType
+        self.fileCategory = fileCategory
+        self.plainSize = plainSize
+        self.sha256 = sha256
+        self.width = width
+        self.height = height
+        self.durationMs = durationMs
+        self.thumbnailMimeType = thumbnailMimeType
+        self.linkedMediaId = linkedMediaId
+        self.replyToId = replyToId
+        self.replyPreview = replyPreview
+        self.tags = tags
+        self.isPinned = isPinned
+        self.revision = revision
+        self.syncSeq = syncSeq
+        self.byteSize = byteSize
+        self.encryptedSize = encryptedSize
+        self.hasBlob = hasBlob
+        self.hasThumbnail = hasThumbnail
+        self.blobKeyBundle = blobKeyBundle
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct CreateTransferTextRequest: Codable, Sendable {
+    public var id: String?
+    public var text: String
+    public var replyToId: String?
+    public var replyPreview: String?
+    public var tags: [String]?
+    public var isPinned: Bool?
+    public var senderSessionId: String?
+    public var senderDeviceName: String?
+    public var senderPlatform: DevicePlatform?
+
+    public init(
+        id: String? = nil,
+        text: String,
+        replyToId: String? = nil,
+        replyPreview: String? = nil,
+        tags: [String]? = nil,
+        isPinned: Bool? = nil,
+        senderSessionId: String? = nil,
+        senderDeviceName: String? = nil,
+        senderPlatform: DevicePlatform? = .ios
+    ) {
+        self.id = id
+        self.text = text
+        self.replyToId = replyToId
+        self.replyPreview = replyPreview
+        self.tags = tags
+        self.isPinned = isPinned
+        self.senderSessionId = senderSessionId
+        self.senderDeviceName = senderDeviceName
+        self.senderPlatform = senderPlatform
+    }
+}
+
+public struct UpdateTransferRequest: Codable, Sendable {
+    public var text: String?
+    public var tags: [String]?
+    public var isPinned: Bool?
+    public var expectedRevision: Int?
+
+    public init(
+        text: String? = nil,
+        tags: [String]? = nil,
+        isPinned: Bool? = nil,
+        expectedRevision: Int? = nil
+    ) {
+        self.text = text
+        self.tags = tags
+        self.isPinned = isPinned
+        self.expectedRevision = expectedRevision
+    }
+}
+
 // MARK: - 4. Cipher Envelope Inspection & Security Summary
 
 public struct ChunkStoreInspection: Codable, Sendable, Equatable {
@@ -1248,7 +1619,7 @@ public struct ChunkStoreInspection: Codable, Sendable, Equatable {
 
 public struct CipherEnvelopeInspection: Codable, Sendable, Equatable {
     public let itemId: String
-    public let itemType: VaultItemType
+    public let itemType: VaultCipherDomain
     public let revision: Int
     public let syncSeq: Int
     public let cipherVersion: Int
@@ -1283,11 +1654,14 @@ public struct VaultSecuritySummary: Codable, Sendable, Equatable {
     public let activeImages: Int
     public let totalVideos: Int
     public let activeVideos: Int
+    public let totalTransfers: Int?
+    public let activeTransfers: Int?
     public let totalEncryptedBytes: Int
     public let notesEncryptedBytes: Int
     public let passwordsEncryptedBytes: Int
     public let imagesEncryptedBytes: Int
     public let videosEncryptedBytes: Int
+    public let transfersEncryptedBytes: Int?
     public let latestSyncSeq: Int
     public let createdAt: String
     public let passwordUpdatedAt: String
@@ -1310,7 +1684,30 @@ public struct SyncPullResponse: Codable, Sendable {
     public let passwords: [PasswordItem]
     public let media: [MediaItem]
     public let albums: [MediaAlbum]
+    public let transfers: [TransferItem]
     public let deleted: [SyncTombstone]
+
+    public init(
+        serverTime: String,
+        latestSyncSeq: Int,
+        sinceSeq: Int,
+        notes: [NoteItem],
+        passwords: [PasswordItem],
+        media: [MediaItem],
+        albums: [MediaAlbum],
+        transfers: [TransferItem] = [],
+        deleted: [SyncTombstone]
+    ) {
+        self.serverTime = serverTime
+        self.latestSyncSeq = latestSyncSeq
+        self.sinceSeq = sinceSeq
+        self.notes = notes
+        self.passwords = passwords
+        self.media = media
+        self.albums = albums
+        self.transfers = transfers
+        self.deleted = deleted
+    }
 }
 
 public struct SyncCursorEvent: Codable, Sendable, Equatable {
@@ -1325,6 +1722,7 @@ public enum OutboxActionKind: String, Codable, Sendable {
     case updateNote
     case createPassword
     case updatePassword
+    case createTransferText
 }
 
 public struct OutboxOperation: Codable, Sendable, Identifiable, Equatable {
@@ -1358,7 +1756,12 @@ public struct MobileVaultSnapshot: Codable, Sendable, Equatable {
     public var passwords: [String: PasswordItem]
     public var media: [String: MediaItem]
     public var albums: [String: MediaAlbum]
+    public var transfers: [String: TransferItem]
     public var pendingOutbox: [OutboxOperation]
+
+    private enum CodingKeys: String, CodingKey {
+        case vaultName, keyFingerprint, lastSyncSeq, syncedAt, notes, passwords, media, albums, transfers, pendingOutbox
+    }
 
     public init(
         vaultName: String = "PrivateSpace",
@@ -1369,6 +1772,7 @@ public struct MobileVaultSnapshot: Codable, Sendable, Equatable {
         passwords: [String: PasswordItem] = [:],
         media: [String: MediaItem] = [:],
         albums: [String: MediaAlbum] = [:],
+        transfers: [String: TransferItem] = [:],
         pendingOutbox: [OutboxOperation] = []
     ) {
         self.vaultName = vaultName
@@ -1379,7 +1783,22 @@ public struct MobileVaultSnapshot: Codable, Sendable, Equatable {
         self.passwords = passwords
         self.media = media
         self.albums = albums
+        self.transfers = transfers
         self.pendingOutbox = pendingOutbox
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.vaultName = try c.decodeIfPresent(String.self, forKey: .vaultName) ?? "PrivateSpace"
+        self.keyFingerprint = try c.decodeIfPresent(String.self, forKey: .keyFingerprint)
+        self.lastSyncSeq = try c.decodeIfPresent(Int.self, forKey: .lastSyncSeq) ?? 0
+        self.syncedAt = try c.decodeIfPresent(String.self, forKey: .syncedAt)
+        self.notes = try c.decodeIfPresent([String: NoteItem].self, forKey: .notes) ?? [:]
+        self.passwords = try c.decodeIfPresent([String: PasswordItem].self, forKey: .passwords) ?? [:]
+        self.media = try c.decodeIfPresent([String: MediaItem].self, forKey: .media) ?? [:]
+        self.albums = try c.decodeIfPresent([String: MediaAlbum].self, forKey: .albums) ?? [:]
+        self.transfers = try c.decodeIfPresent([String: TransferItem].self, forKey: .transfers) ?? [:]
+        self.pendingOutbox = try c.decodeIfPresent([OutboxOperation].self, forKey: .pendingOutbox) ?? []
     }
 }
 

@@ -573,7 +573,7 @@ export function createMediaRoutes(
 
       const item = repo.createEncryptedMediaRecord({
         id: body.id || '',
-        kind: body.kind === 'video' ? 'video' : session.kind,
+        kind: body.kind === 'video' || session.kind === 'video' ? 'video' : 'image',
         isPinned: body.isPinned,
         revision: body.revision ?? 1,
         envelope: body.envelope!,

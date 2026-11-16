@@ -14,6 +14,7 @@ import {
 import type {
   AppUpdateCheckResponse,
   CreatePasswordRequest,
+  CreateTransferTextRequest,
   MediaAlbum,
   MediaItem,
   MobileUpdatePreferences,
@@ -21,11 +22,13 @@ import type {
   PasswordItem,
   ServerUpdateConfigResponse,
   SessionInfo,
+  TransferItem,
   UpdateChannel,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
   UpdateSourceMode,
+  UpdateTransferRequest,
   VaultSecuritySummary,
 } from '@shared/types';
 import {
@@ -80,8 +83,9 @@ import {
   IosVideoCinemaModal,
   PASSWORD_CATEGORIES,
 } from './src/components/IosModals';
+import { IosTransfersTabView } from './src/components/IosTransfersTabView';
 
-export type MobileTab = 'passwords' | 'images' | 'videos' | 'notes' | 'sync';
+export type MobileTab = 'passwords' | 'transfers' | 'images' | 'videos' | 'notes' | 'sync';
 
 export interface PrivateSpaceMobileAppProps {
   initialServerUrl?: string;
@@ -117,6 +121,7 @@ function resolveDefaultServerUrl(explicit?: string): string {
 function IosGlyph(props: {
   name:
     | 'key'
+    | 'transfer'
     | 'photo'
     | 'film'
     | 'note'
@@ -151,6 +156,13 @@ function IosGlyph(props: {
             <circle cx="7.5" cy="15.5" r="5.5" />
             <path d="m21 2-9.6 9.6" />
             <path d="m15.5 7.5 3 3L22 7l-3-3" />
+          </svg>
+        );
+      case 'transfer':
+        return (
+          <svg {...common}>
+            <path d="M7 10h14l-4-4" />
+            <path d="M17 14H3l4 4" />
           </svg>
         );
       case 'photo':
@@ -245,6 +257,7 @@ function IosGlyph(props: {
 
   const fallbackMap: Record<typeof props.name, string> = {
     key: '⌗',
+    transfer: '⇄',
     photo: '▣',
     film: '▶',
     note: '✎',
@@ -838,7 +851,78 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     });
   }, [allNotes, noteQuery, noteFilter, noteTag]);
 
+  const allTransfers = useMemo<TransferItem[]>(
+    () => Object.values(snapshot?.transfers ?? {}),
+    [snapshot],
+  );
+
   // ==================== Mutation Handlers ====================
+
+  const handleSendTransferText = async (input: CreateTransferTextRequest) => {
+    const { queuedOffline } = await client.sendTransferTextWithOffline(input, {
+      allowOfflineQueue: true,
+    });
+    if (queuedOffline) {
+      const cached = await client.loadCachedSnapshot();
+      if (cached) setSnapshot({ ...cached });
+      showToast('已写入本机离线加密队列，联网后自动互传');
+      return;
+    }
+    await performSync(true);
+    showToast('加密消息已同步至全端');
+  };
+
+  const handleSendTransferPickedFiles = async (
+    files: Array<{ name: string; type: string; bytes: Uint8Array }>,
+    opts?: { text?: string; replyToId?: string | null; replyPreview?: string | null },
+  ) => {
+    try {
+      for (let i = 0; i < files.length; i += 1) {
+        const f = files[i];
+        setUploadProgress({
+          label: `正在加密互传 (${i + 1}/${files.length}) ${f.name}`,
+          percent: 6,
+        });
+        const { autoSavedMedia } = await client.sendTransferFile({
+          bytes: f.bytes,
+          filename: f.name,
+          mimeType: f.type,
+          text: i === 0 ? opts?.text : undefined,
+          replyToId: i === 0 ? opts?.replyToId : null,
+          replyPreview: i === 0 ? opts?.replyPreview : null,
+          onProgress: (uploaded, total) => {
+            setUploadProgress({
+              label: `互传分片 ${f.name} (${formatMobileBytes(uploaded)} / ${formatMobileBytes(total)})`,
+              percent: Math.round((uploaded / Math.max(1, total)) * 100),
+            });
+          },
+        });
+        if (autoSavedMedia) {
+          showToast(
+            `已互传并自动存入${autoSavedMedia.itemType === 'video' ? '影院' : '相册'}：${f.name}`,
+          );
+        } else {
+          showToast(`已加密互传：${f.name}`);
+        }
+      }
+      await performSync(true);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '加密互传失败');
+    } finally {
+      setUploadProgress(null);
+    }
+  };
+
+  const handleUpdateTransfer = async (id: string, patch: UpdateTransferRequest) => {
+    await client.updateTransfer(id, patch);
+    await performSync(true);
+  };
+
+  const handleDeleteTransferPermanent = async (id: string) => {
+    await client.deleteTransferPermanently(id);
+    await performSync(true);
+    showToast('互传记录已永久销毁');
+  };
 
   const handleSavePassword = async (
     input: CreatePasswordRequest,
@@ -1830,6 +1914,34 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         style={{ flex: 1 }}
         contentContainerStyle={{ padding: 14, paddingBottom: 26, gap: 12 }}
       >
+        {/* -------------------- TAB 1B: CROSS-DEVICE ENCRYPTED TRANSFERS & CHAT -------------------- */}
+        {activeTab === 'transfers' && (
+          <IosTransfersTabView
+            client={client}
+            transfers={allTransfers}
+            theme={theme}
+            onSendText={handleSendTransferText}
+            onSendPickedFiles={handleSendTransferPickedFiles}
+            onUpdateTransfer={handleUpdateTransfer}
+            onDeletePermanent={handleDeleteTransferPermanent}
+            onJumpToMediaTab={(kind, linkedMediaId) => {
+              if (kind === 'video') {
+                setActiveTab('videos');
+                if (linkedMediaId && snapshot.media[linkedMediaId]) {
+                  setCinemaVideoId(linkedMediaId);
+                }
+              } else {
+                setActiveTab('images');
+                if (linkedMediaId && snapshot.media[linkedMediaId]) {
+                  setLightboxMediaId(linkedMediaId);
+                }
+              }
+            }}
+            onInspectCipher={(id) => setInspectItemId(id)}
+            onToast={showToast}
+          />
+        )}
+
         {/* -------------------- TAB 1: PASSWORDS & LIVE 2FA TOTP -------------------- */}
         {activeTab === 'passwords' && (
           <>
@@ -3719,6 +3831,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
         {(
           [
             ['passwords', '密码库', 'key'],
+            ['transfers', '互传', 'transfer'],
             ['images', '相册', 'photo'],
             ['videos', '影院', 'film'],
             ['notes', '笔记', 'note'],

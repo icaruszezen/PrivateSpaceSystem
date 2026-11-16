@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowLeftRight,
   FilePlus2,
   FileText,
   Film,
@@ -11,7 +12,7 @@ import {
   ShieldCheck,
   Sun,
 } from 'lucide-react';
-import type { MediaItem, NoteItem, PasswordItem } from '@shared/types';
+import type { MediaItem, NoteItem, PasswordItem, TransferItem } from '@shared/types';
 import { formatBytes, formatShortDate } from '../utils/format';
 import type { SecurityTab } from './SecurityModal';
 import type { WorkspaceSection } from './Sidebar';
@@ -21,6 +22,7 @@ interface CommandPaletteProps {
   notes: NoteItem[];
   passwords: PasswordItem[];
   mediaItems: MediaItem[];
+  transfers: TransferItem[];
   theme: 'light' | 'dark';
   onClose: () => void;
   onSelectSection: (sec: WorkspaceSection) => void;
@@ -45,6 +47,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   notes,
   passwords,
   mediaItems,
+  transfers,
   theme,
   onClose,
   onSelectSection,
@@ -69,6 +72,16 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     const q = query.trim().toLowerCase();
 
     const quickCommands: PaletteEntry[] = [
+      {
+        id: 'cmd-sec-transfers',
+        label: '前往多端加密互传 (电脑/手机文件与聊天同步)',
+        sub: '空间切换',
+        icon: <ArrowLeftRight size={15} />,
+        run: () => {
+          onSelectSection('transfers');
+          onClose();
+        },
+      },
       {
         id: 'cmd-sec-passwords',
         label: '前往私密密码库 (TOTP / 强密码审计)',
@@ -225,12 +238,43 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         },
       }));
 
-    return [...matchedPasswords, ...matchedMedia, ...matchedNotes, ...filteredCommands];
+    const matchedTransfers = transfers
+      .filter((tr) =>
+        q
+          ? tr.text.toLowerCase().includes(q) ||
+            tr.originalFilename.toLowerCase().includes(q) ||
+            tr.senderDeviceName.toLowerCase().includes(q) ||
+            tr.tags.some((t) => t.toLowerCase().includes(q))
+          : false,
+      )
+      .slice(0, 6)
+      .map<PaletteEntry>((tr) => ({
+        id: `transfer-${tr.id}`,
+        label:
+          tr.messageKind === 'text'
+            ? tr.text.replace(/\s+/g, ' ').slice(0, 64)
+            : tr.originalFilename,
+        sub: `互传 · ${tr.senderDeviceName || tr.senderPlatform.toUpperCase()}`,
+        icon: <ArrowLeftRight size={15} />,
+        run: () => {
+          onSelectSection('transfers');
+          onClose();
+        },
+      }));
+
+    return [
+      ...matchedTransfers,
+      ...matchedPasswords,
+      ...matchedMedia,
+      ...matchedNotes,
+      ...filteredCommands,
+    ];
   }, [
     query,
     notes,
     passwords,
     mediaItems,
+    transfers,
     theme,
     onSelectSection,
     onSelectNote,

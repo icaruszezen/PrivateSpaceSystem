@@ -371,16 +371,36 @@ final class PrivateSpaceKitTests: XCTestCase {
         )
         XCTAssertEqual(decryptedRangeSlice, syntheticVideo.subdata(in: 40_000..<110_001))
 
-        // 4. Verify incremental `since_seq` sync, cipher v2 inspection & Zero-Knowledge KEK password rotation
+        // 4. Verify Cross-Device Transfer (chat + PDF file + auto-archived media), incremental `since_seq` sync & cipher v2 inspection
+        let trText = try await client.sendTransferText(
+            CreateTransferTextRequest(text: "iOS XCTest 多端加密互传消息", tags: ["xctest"])
+        )
+        XCTAssertEqual(trText.messageKind, .text)
+        let pdfBytes = Data("%PDF-1.7\nCrossDeviceEncryptedSpec".utf8)
+        let (trFile, archivedNil) = try await client.sendTransferFile(
+            data: pdfBytes,
+            filename: "spec.pdf",
+            mimeType: "application/pdf",
+            caption: "PDF 规格书"
+        )
+        XCTAssertNil(archivedNil)
+        XCTAssertEqual(trFile.fileCategory, .document)
+        let decryptedPdf = try await client.fetchTransferData(transfer: trFile)
+        XCTAssertEqual(decryptedPdf, pdfBytes)
+
         let syncDelta = try await client.pullSync(sinceSeq: 0)
         XCTAssertTrue(syncDelta.notes.contains(where: { $0.id == note.id && $0.title == "SwiftUI Zero-Knowledge Note" }))
         XCTAssertTrue(syncDelta.passwords.contains(where: { $0.id == pw.id && $0.password == secretCredential }))
         XCTAssertTrue(syncDelta.media.contains(where: { $0.id == media.id }))
         XCTAssertTrue(syncDelta.albums.contains(where: { $0.id == album.id && $0.name == "iOS 零知识相册" }))
+        XCTAssertTrue(syncDelta.transfers.contains(where: { $0.id == trText.id && $0.text == "iOS XCTest 多端加密互传消息" }))
+        XCTAssertTrue(syncDelta.transfers.contains(where: { $0.id == trFile.id && $0.originalFilename == "spec.pdf" }))
 
         let cipher = try await client.inspectCipherEnvelope(itemId: media.id)
         XCTAssertEqual(cipher.cipherVersion, 2)
         XCTAssertEqual(cipher.chunkStore?.formatMagic, "PSENC001")
+        let transferCipher = try await client.inspectCipherEnvelope(itemId: trFile.id)
+        XCTAssertEqual(transferCipher.itemType, .transfer)
 
         let sessions = try await client.listSessions()
         XCTAssertTrue(sessions.contains(where: { $0.platform == .ios }))

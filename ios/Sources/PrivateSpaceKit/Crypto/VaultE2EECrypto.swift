@@ -613,6 +613,107 @@ public enum VaultE2EECrypto {
         )
     }
 
+    public static func classifyTransferFile(
+        filename: String,
+        mimeType: String = ""
+    ) -> (messageKind: TransferMessageKind, fileCategory: TransferFileCategory, normalizedMimeType: String) {
+        let cleanMime = mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let ext = (filename as NSString).pathExtension.lowercased()
+
+        let imageExts: [String: String] = [
+            "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+            "gif": "image/gif", "webp": "image/webp", "avif": "image/avif",
+            "bmp": "image/bmp", "heic": "image/heic", "heif": "image/heif",
+            "svg": "image/svg+xml",
+        ]
+        if cleanMime.hasPrefix("image/") || imageExts[ext] != nil {
+            let resolved = (!cleanMime.isEmpty && cleanMime != "application/octet-stream")
+                ? cleanMime
+                : (imageExts[ext] ?? "image/jpeg")
+            return (.image, .image, resolved)
+        }
+
+        let videoExts: [String: String] = [
+            "mp4": "video/mp4", "m4v": "video/x-m4v", "mov": "video/quicktime",
+            "webm": "video/webm", "mkv": "video/x-matroska", "avi": "video/x-msvideo",
+            "ogv": "video/ogg", "3gp": "video/3gpp",
+        ]
+        if cleanMime.hasPrefix("video/") || videoExts[ext] != nil {
+            let resolved = (!cleanMime.isEmpty && cleanMime != "application/octet-stream")
+                ? cleanMime
+                : (videoExts[ext] ?? "video/mp4")
+            return (.video, .video, resolved)
+        }
+
+        if cleanMime.hasPrefix("audio/") || ["mp3", "m4a", "wav", "flac", "ogg", "aac", "opus"].contains(ext) {
+            return (.file, .audio, cleanMime.isEmpty ? "audio/mpeg" : cleanMime)
+        }
+        if ["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"].contains(ext) {
+            return (.file, .archive, cleanMime.isEmpty ? "application/zip" : cleanMime)
+        }
+        if ["apk", "ipa", "dmg", "pkg", "exe", "msi", "deb", "rpm"].contains(ext) {
+            return (.file, .package, cleanMime.isEmpty ? "application/octet-stream" : cleanMime)
+        }
+        if ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "rtf", "epub"].contains(ext) {
+            let defaultMime = ext == "pdf" ? "application/pdf" : "text/plain"
+            return (.file, .document, cleanMime.isEmpty ? defaultMime : cleanMime)
+        }
+        if ["json", "js", "ts", "tsx", "jsx", "py", "go", "rs", "swift", "kt", "java", "sql", "yaml", "yml", "toml", "sh", "html", "css"].contains(ext) {
+            return (.file, .code, cleanMime.isEmpty ? "text/plain" : cleanMime)
+        }
+
+        return (.file, .other, cleanMime.isEmpty ? "application/octet-stream" : cleanMime)
+    }
+
+    public static func hydrateDecryptedTransfer(
+        dek: Data,
+        record: EncryptedTransferRecordDto
+    ) throws -> TransferItem {
+        let payload = try decryptItemPayload(
+            TransferDecryptedPayload.self,
+            dek: dek,
+            itemId: record.id,
+            itemType: .transfer,
+            revision: record.revision,
+            envelope: record.envelope
+        )
+        let mainMeta = record.transferBlobs?.main
+        let thumbMeta = record.transferBlobs?.thumbnail
+        let plainSize = payload.plainSize > 0 ? payload.plainSize : (mainMeta?.plainSize ?? 0)
+        return TransferItem(
+            id: record.id,
+            itemType: .transfer,
+            messageKind: payload.messageKind,
+            text: payload.text,
+            senderSessionId: payload.senderSessionId,
+            senderDeviceName: payload.senderDeviceName.isEmpty ? "已授权终端" : payload.senderDeviceName,
+            senderPlatform: payload.senderPlatform,
+            originalFilename: payload.originalFilename,
+            mimeType: payload.mimeType,
+            fileCategory: payload.fileCategory,
+            plainSize: plainSize,
+            sha256: payload.sha256.isEmpty ? (mainMeta?.sha256 ?? "") : payload.sha256,
+            width: payload.width,
+            height: payload.height,
+            durationMs: payload.durationMs,
+            thumbnailMimeType: payload.thumbnailMimeType,
+            linkedMediaId: payload.linkedMediaId,
+            replyToId: payload.replyToId,
+            replyPreview: payload.replyPreview,
+            tags: payload.tags,
+            isPinned: record.isPinned,
+            revision: record.revision,
+            syncSeq: record.syncSeq,
+            byteSize: record.byteSize,
+            encryptedSize: mainMeta?.encryptedSize ?? record.byteSize,
+            hasBlob: mainMeta != nil,
+            hasThumbnail: thumbMeta != nil,
+            blobKeyBundle: record.transferBlobs,
+            createdAt: record.createdAt,
+            updatedAt: record.updatedAt
+        )
+    }
+
     // MARK: - 4. PSENC001 Chunked Media E2EE & HTTP 206 Range Decryption
 
     public static func buildBlobKekInfo(blobId: String) -> String {

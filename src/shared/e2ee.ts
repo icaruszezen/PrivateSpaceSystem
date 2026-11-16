@@ -28,6 +28,7 @@ import type {
   E2EEKdfParams,
   EncryptedAlbumRecordDto,
   EncryptedBlobKeyMetaDto,
+  EncryptedTransferRecordDto,
   EncryptedVaultRecordDto,
   EncryptionSpecInfo,
   MediaAlbum,
@@ -40,6 +41,10 @@ import type {
   PasswordCustomField,
   PasswordDecryptedPayload,
   PasswordItem,
+  TransferDecryptedPayload,
+  TransferFileCategory,
+  TransferItem,
+  TransferMessageKind,
   VaultCipherDomain,
   VaultSyncItem,
   WrappedDekDto,
@@ -627,6 +632,218 @@ export async function hydrateDecryptedAlbum(
     coverMediaId: payload.coverMediaId ?? null,
     itemCount,
     syncSeq: Number(record.syncSeq),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+const IMAGE_EXT_MIME: Record<string, string> = {
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  png: 'image/png',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  avif: 'image/avif',
+  bmp: 'image/bmp',
+  heic: 'image/heic',
+  heif: 'image/heif',
+  svg: 'image/svg+xml',
+};
+
+const VIDEO_EXT_MIME: Record<string, string> = {
+  mp4: 'video/mp4',
+  m4v: 'video/x-m4v',
+  mov: 'video/quicktime',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+  avi: 'video/x-msvideo',
+  ogv: 'video/ogg',
+  '3gp': 'video/3gpp',
+};
+
+const EXT_CATEGORY_MAP: Record<string, { category: TransferFileCategory; mime: string }> = {
+  pdf: { category: 'document', mime: 'application/pdf' },
+  doc: { category: 'document', mime: 'application/msword' },
+  docx: {
+    category: 'document',
+    mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  },
+  xls: { category: 'document', mime: 'application/vnd.ms-excel' },
+  xlsx: {
+    category: 'document',
+    mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  },
+  ppt: { category: 'document', mime: 'application/vnd.ms-powerpoint' },
+  pptx: {
+    category: 'document',
+    mime: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  },
+  txt: { category: 'document', mime: 'text/plain' },
+  md: { category: 'document', mime: 'text/markdown' },
+  csv: { category: 'document', mime: 'text/csv' },
+  rtf: { category: 'document', mime: 'application/rtf' },
+  epub: { category: 'document', mime: 'application/epub+zip' },
+  zip: { category: 'archive', mime: 'application/zip' },
+  rar: { category: 'archive', mime: 'application/vnd.rar' },
+  '7z': { category: 'archive', mime: 'application/x-7z-compressed' },
+  tar: { category: 'archive', mime: 'application/x-tar' },
+  gz: { category: 'archive', mime: 'application/gzip' },
+  tgz: { category: 'archive', mime: 'application/gzip' },
+  bz2: { category: 'archive', mime: 'application/x-bzip2' },
+  xz: { category: 'archive', mime: 'application/x-xz' },
+  mp3: { category: 'audio', mime: 'audio/mpeg' },
+  m4a: { category: 'audio', mime: 'audio/mp4' },
+  wav: { category: 'audio', mime: 'audio/wav' },
+  flac: { category: 'audio', mime: 'audio/flac' },
+  ogg: { category: 'audio', mime: 'audio/ogg' },
+  aac: { category: 'audio', mime: 'audio/aac' },
+  opus: { category: 'audio', mime: 'audio/opus' },
+  apk: { category: 'package', mime: 'application/vnd.android.package-archive' },
+  ipa: { category: 'package', mime: 'application/octet-stream' },
+  dmg: { category: 'package', mime: 'application/x-apple-diskimage' },
+  pkg: { category: 'package', mime: 'application/octet-stream' },
+  exe: { category: 'package', mime: 'application/x-msdownload' },
+  msi: { category: 'package', mime: 'application/x-msi' },
+  deb: { category: 'package', mime: 'application/vnd.debian.binary-package' },
+  rpm: { category: 'package', mime: 'application/x-rpm' },
+  json: { category: 'code', mime: 'application/json' },
+  js: { category: 'code', mime: 'text/javascript' },
+  ts: { category: 'code', mime: 'text/plain' },
+  tsx: { category: 'code', mime: 'text/plain' },
+  jsx: { category: 'code', mime: 'text/plain' },
+  py: { category: 'code', mime: 'text/x-python' },
+  go: { category: 'code', mime: 'text/plain' },
+  rs: { category: 'code', mime: 'text/plain' },
+  swift: { category: 'code', mime: 'text/plain' },
+  kt: { category: 'code', mime: 'text/plain' },
+  java: { category: 'code', mime: 'text/plain' },
+  sql: { category: 'code', mime: 'application/sql' },
+  yaml: { category: 'code', mime: 'text/yaml' },
+  yml: { category: 'code', mime: 'text/yaml' },
+  toml: { category: 'code', mime: 'text/plain' },
+  sh: { category: 'code', mime: 'application/x-sh' },
+  html: { category: 'code', mime: 'text/html' },
+  css: { category: 'code', mime: 'text/css' },
+};
+
+/**
+ * Classifies an outgoing transfer file so images and videos are automatically
+ * routed into the encrypted Image/Video Libraries while arbitrary files stay in Transfer Hub.
+ */
+export function classifyTransferFile(
+  filename: string,
+  rawMimeType?: string,
+): {
+  messageKind: Exclude<TransferMessageKind, 'text'>;
+  fileCategory: TransferFileCategory;
+  normalizedMimeType: string;
+} {
+  const cleanMime = (rawMimeType || '').trim().toLowerCase();
+  const extMatch = /\.([a-z0-9]{1,10})$/i.exec((filename || '').trim());
+  const ext = extMatch ? extMatch[1].toLowerCase() : '';
+
+  if (cleanMime.startsWith('image/') || (ext && ext in IMAGE_EXT_MIME)) {
+    return {
+      messageKind: 'image',
+      fileCategory: 'image',
+      normalizedMimeType:
+        cleanMime && cleanMime !== 'application/octet-stream'
+          ? cleanMime
+          : IMAGE_EXT_MIME[ext] || 'image/jpeg',
+    };
+  }
+
+  if (cleanMime.startsWith('video/') || (ext && ext in VIDEO_EXT_MIME)) {
+    return {
+      messageKind: 'video',
+      fileCategory: 'video',
+      normalizedMimeType:
+        cleanMime && cleanMime !== 'application/octet-stream'
+          ? cleanMime
+          : VIDEO_EXT_MIME[ext] || 'video/mp4',
+    };
+  }
+
+  if (ext && ext in EXT_CATEGORY_MAP) {
+    const entry = EXT_CATEGORY_MAP[ext];
+    return {
+      messageKind: 'file',
+      fileCategory: entry.category,
+      normalizedMimeType:
+        cleanMime && cleanMime !== 'application/octet-stream' ? cleanMime : entry.mime,
+    };
+  }
+
+  if (cleanMime.startsWith('audio/')) {
+    return { messageKind: 'file', fileCategory: 'audio', normalizedMimeType: cleanMime };
+  }
+  if (cleanMime.startsWith('text/')) {
+    return { messageKind: 'file', fileCategory: 'document', normalizedMimeType: cleanMime };
+  }
+
+  return {
+    messageKind: 'file',
+    fileCategory: 'other',
+    normalizedMimeType: cleanMime || 'application/octet-stream',
+  };
+}
+
+export async function hydrateDecryptedTransfer(
+  dek: Uint8Array,
+  record: EncryptedTransferRecordDto,
+  forcePure = false,
+): Promise<TransferItem> {
+  const payload = await decryptItemPayload<TransferDecryptedPayload>(
+    dek,
+    record.id,
+    'transfer',
+    record.revision,
+    record.envelope,
+    forcePure,
+  );
+  const mainMeta = record.transferBlobs?.main;
+  const thumbMeta = record.transferBlobs?.thumbnail;
+  const kind: TransferMessageKind =
+    payload.messageKind === 'image' ||
+    payload.messageKind === 'video' ||
+    payload.messageKind === 'file'
+      ? payload.messageKind
+      : 'text';
+
+  return {
+    id: record.id,
+    itemType: 'transfer',
+    messageKind: kind,
+    text: payload.text || '',
+    senderSessionId: payload.senderSessionId ?? null,
+    senderDeviceName: payload.senderDeviceName || '未知设备',
+    senderPlatform: payload.senderPlatform || 'web',
+    originalFilename: payload.originalFilename || '',
+    mimeType: payload.mimeType || '',
+    fileCategory:
+      payload.fileCategory ??
+      (kind === 'image' ? 'image' : kind === 'video' ? 'video' : kind === 'file' ? 'other' : null),
+    plainSize: mainMeta ? Number(mainMeta.plainSize) : Number(payload.plainSize || 0),
+    sha256: payload.sha256 || mainMeta?.sha256 || '',
+    width: Number(payload.width || 0),
+    height: Number(payload.height || 0),
+    durationMs:
+      payload.durationMs !== null && payload.durationMs !== undefined
+        ? Number(payload.durationMs)
+        : null,
+    thumbnailMimeType: payload.thumbnailMimeType ?? null,
+    linkedMediaId: payload.linkedMediaId ?? null,
+    replyToId: payload.replyToId ?? null,
+    replyPreview: payload.replyPreview ?? null,
+    tags: Array.isArray(payload.tags) ? payload.tags : [],
+    isPinned: Boolean(record.isPinned),
+    revision: Number(record.revision),
+    syncSeq: Number(record.syncSeq),
+    byteSize: mainMeta ? Number(mainMeta.plainSize) : Number(record.byteSize),
+    encryptedSize: mainMeta ? Number(mainMeta.encryptedSize) : Number(record.byteSize),
+    hasBlob: Boolean(mainMeta),
+    hasThumbnail: Boolean(thumbMeta),
+    blobKeyBundle: record.transferBlobs,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };

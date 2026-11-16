@@ -293,6 +293,10 @@ struct SecuritySyncTabView: View {
                             "文本笔记 (\(summary.activeNotes))",
                             value: VaultFormatters.formatBytes(summary.notesEncryptedBytes)
                         )
+                        LabeledContent(
+                            "多端加密互传 (\(summary.activeTransfers ?? store.snapshot.transfers.count))",
+                            value: VaultFormatters.formatBytes(summary.transfersEncryptedBytes ?? 0)
+                        )
                     }
                 }
 
@@ -350,7 +354,8 @@ struct SecuritySyncTabView: View {
                         Label("零重写轮换管理员主密码 (KEK Re-Wrap)", systemImage: "key.radiowaves.forward.fill")
                     }
 
-                    if let sampleId = store.snapshot.passwords.keys.first
+                    if let sampleId = store.snapshot.transfers.keys.first
+                        ?? store.snapshot.passwords.keys.first
                         ?? store.snapshot.media.keys.first
                         ?? store.snapshot.notes.keys.first {
                         Button {

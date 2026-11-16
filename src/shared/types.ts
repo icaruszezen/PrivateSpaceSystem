@@ -4,9 +4,10 @@
  */
 
 export type VaultItemType = 'note' | 'password' | 'image' | 'video';
-export type VaultCipherDomain = VaultItemType | 'album' | 'upload';
+export type VaultCipherDomain = VaultItemType | 'album' | 'upload' | 'transfer';
 export type NoteFormat = 'markdown' | 'plain';
 export type MediaKind = 'image' | 'video';
+export type UploadSessionKind = MediaKind | 'file';
 
 export type PasswordCategory =
   | 'login'
@@ -281,12 +282,80 @@ export interface EncryptedResumableUploadCompleteRequest {
   encryptedThumbnailBase64?: string | null;
 }
 
+export interface EncryptedTransferRecordDto {
+  id: string;
+  isPinned: boolean;
+  revision: number;
+  syncSeq: number;
+  byteSize: number;
+  createdAt: string;
+  updatedAt: string;
+  envelope: CipherEnvelopeDto;
+  transferBlobs?: MediaBlobKeyBundleDto;
+}
+
+export interface CreateEncryptedTransferRequest {
+  id: string;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+  /** Optional UUID of an existing image/video MediaItem to share its PSENC001 blob without duplicating disk bytes */
+  reuseMediaId?: string | null;
+}
+
+export interface UpdateEncryptedTransferRequest {
+  isPinned?: boolean;
+  expectedRevision?: number;
+  revision: number;
+  envelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedTransferUploadMetadata {
+  id: string;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+  mainBlob: EncryptedBlobKeyMetaDto;
+  thumbBlob?: EncryptedBlobKeyMetaDto | null;
+}
+
+export interface EncryptedTransferResumableInitRequest {
+  uploadId?: string;
+  totalPlainBytes: number;
+  totalEncryptedBytes: number;
+  partPlainBytes: number;
+  totalParts: number;
+  metaEnvelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedTransferResumableStatusResponse {
+  uploadId: string;
+  kind: UploadSessionKind;
+  receivedChunks: number[];
+  totalChunks: number;
+  totalBytes: number;
+  totalEncryptedBytes: number;
+  chunkBytes: number;
+  metaEnvelope: CipherEnvelopeDto;
+}
+
+export interface EncryptedTransferResumableCompleteRequest {
+  id: string;
+  isPinned?: boolean;
+  revision?: number;
+  envelope: CipherEnvelopeDto;
+  mainBlob: EncryptedBlobKeyMetaDto;
+  thumbBlob?: EncryptedBlobKeyMetaDto | null;
+  encryptedThumbnailBase64?: string | null;
+}
+
 export interface EncryptedSyncPullResponse {
   serverTime: string;
   latestSyncSeq: number;
   sinceSeq: number;
   items: EncryptedVaultRecordDto[];
   albums: EncryptedAlbumRecordDto[];
+  transfers?: EncryptedTransferRecordDto[];
   deleted: SyncTombstone[];
 }
 
@@ -520,6 +589,76 @@ export interface ResumableUploadStatusResponse {
   chunkBytes: number;
 }
 
+// ==================== 3b. Decrypted Client Domain: Cross-Device Transfer & Chat ====================
+
+export type TransferMessageKind = 'text' | 'file' | 'image' | 'video';
+export type TransferDevicePlatform = 'web' | 'ios' | 'android' | 'api';
+export type TransferFileCategory =
+  | 'document'
+  | 'archive'
+  | 'audio'
+  | 'code'
+  | 'package'
+  | 'image'
+  | 'video'
+  | 'other';
+
+export interface TransferDecryptedPayload {
+  messageKind: TransferMessageKind;
+  text: string;
+  senderSessionId: string | null;
+  senderDeviceName: string;
+  senderPlatform: TransferDevicePlatform;
+  originalFilename: string;
+  mimeType: string;
+  fileCategory: TransferFileCategory | null;
+  plainSize: number;
+  sha256: string;
+  width: number;
+  height: number;
+  durationMs: number | null;
+  thumbnailMimeType: string | null;
+  /** UUID of the automatically archived MediaItem in Image/Video Library when messageKind is 'image' | 'video' */
+  linkedMediaId: string | null;
+  replyToId: string | null;
+  replyPreview: string | null;
+  tags: string[];
+}
+
+export interface TransferItem extends TransferDecryptedPayload {
+  id: string;
+  itemType: 'transfer';
+  isPinned: boolean;
+  revision: number;
+  syncSeq: number;
+  byteSize: number;
+  encryptedSize: number;
+  hasBlob: boolean;
+  hasThumbnail: boolean;
+  blobKeyBundle?: MediaBlobKeyBundleDto;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateTransferTextRequest {
+  id?: string;
+  text: string;
+  replyToId?: string | null;
+  replyPreview?: string | null;
+  tags?: string[];
+  isPinned?: boolean;
+  senderSessionId?: string | null;
+  senderDeviceName?: string;
+  senderPlatform?: TransferDevicePlatform;
+}
+
+export interface UpdateTransferRequest {
+  text?: string;
+  tags?: string[];
+  isPinned?: boolean;
+  expectedRevision?: number;
+}
+
 // ==================== 4. Cipher Inspection & Security Center ====================
 
 export interface ChunkStoreInspection {
@@ -537,7 +676,7 @@ export interface ChunkStoreInspection {
 
 export interface CipherEnvelopeInspection {
   itemId: string;
-  itemType: VaultItemType;
+  itemType: VaultItemType | 'transfer';
   revision: number;
   syncSeq: number;
   cipherVersion: number;
@@ -572,11 +711,14 @@ export interface VaultSecuritySummary {
   activeImages: number;
   totalVideos: number;
   activeVideos: number;
+  totalTransfers: number;
+  activeTransfers: number;
   totalEncryptedBytes: number;
   notesEncryptedBytes: number;
   passwordsEncryptedBytes: number;
   imagesEncryptedBytes: number;
   videosEncryptedBytes: number;
+  transfersEncryptedBytes: number;
   latestSyncSeq: number;
   createdAt: string;
   passwordUpdatedAt: string;
@@ -588,7 +730,7 @@ export type VaultSyncItem = NoteItem | PasswordItem | MediaItem;
 
 export interface SyncTombstone {
   id: string;
-  itemType: VaultItemType | 'album';
+  itemType: VaultItemType | 'album' | 'transfer';
   syncSeq: number;
   deletedAt: string;
 }
@@ -603,6 +745,7 @@ export interface SyncPullResponse {
   passwords: PasswordItem[];
   media: MediaItem[];
   albums: MediaAlbum[];
+  transfers: TransferItem[];
   deleted: SyncTombstone[];
 }
 

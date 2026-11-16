@@ -8,6 +8,7 @@ import {
   zeroBytes,
 } from '@shared/cryptoPrimitives';
 import {
+  classifyTransferFile,
   computeEncryptedRangeForPlainRange,
   computePsencEncryptedSize,
   createZeroKnowledgeMasterBundle,
@@ -23,6 +24,7 @@ import {
   hydrateDecryptedMedia,
   hydrateDecryptedNote,
   hydrateDecryptedPassword,
+  hydrateDecryptedTransfer,
   hydrateDecryptedVaultRecord,
   normalizeTags,
   sanitizeCustomFields,
@@ -47,14 +49,20 @@ import type {
   CipherEnvelopeInspection,
   CreateAlbumRequest,
   CreateEncryptedItemRequest,
+  CreateEncryptedTransferRequest,
   CreateNoteRequest,
   CreatePasswordRequest,
+  CreateTransferTextRequest,
   EncryptedAlbumRecordDto,
   EncryptedMediaUploadMetadata,
   EncryptedResumableUploadCompleteRequest,
   EncryptedResumableUploadInitResponse,
   EncryptedResumableUploadStatusResponse,
   EncryptedSyncPullResponse,
+  EncryptedTransferRecordDto,
+  EncryptedTransferResumableCompleteRequest,
+  EncryptedTransferResumableStatusResponse,
+  EncryptedTransferUploadMetadata,
   EncryptedVaultRecordDto,
   ImportPasswordEntryInput,
   LoginRequest,
@@ -71,9 +79,13 @@ import type {
   SessionInfo,
   SetupRequest,
   SyncPullResponse,
+  TransferDecryptedPayload,
+  TransferDevicePlatform,
+  TransferItem,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
+  UpdateTransferRequest,
   VaultSecuritySummary,
   ZeroKnowledgeChangePasswordRequest,
   ZeroKnowledgeSetupRequest,
@@ -94,11 +106,39 @@ export class ApiClientError extends Error {
 const TAB_DEK_SESSION_KEY = 'pss_e2ee_tab_dek_v2';
 
 let activeDek: Uint8Array | null = null;
+let cachedSessionInfo: SessionInfo | null = null;
 let unauthorizedListener: (() => void) | null = null;
 
 const mediaMetaCache = new Map<string, MediaItem>();
+const transferMetaCache = new Map<string, TransferItem>();
 const objectUrlCache = new Map<string, string>();
 const inFlightUrlLoads = new Map<string, Promise<string>>();
+
+function inferBrowserDeviceLabel(): {
+  deviceName: string;
+  platform: TransferDevicePlatform;
+} {
+  if (typeof navigator === 'undefined') {
+    return { deviceName: 'Desktop · Web', platform: 'web' };
+  }
+  const ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/i.test(ua)) {
+    return { deviceName: 'iOS · Safari/Web', platform: 'ios' };
+  }
+  if (/Android/i.test(ua)) {
+    return { deviceName: 'Android · Web', platform: 'android' };
+  }
+  if (/Macintosh|Mac OS X/i.test(ua)) {
+    return { deviceName: 'macOS · Web', platform: 'web' };
+  }
+  if (/Windows/i.test(ua)) {
+    return { deviceName: 'Windows · Web', platform: 'web' };
+  }
+  if (/Linux/i.test(ua)) {
+    return { deviceName: 'Linux · Web', platform: 'web' };
+  }
+  return { deviceName: 'Desktop · Web', platform: 'web' };
+}
 
 function toOwnedArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new Uint8Array(bytes.byteLength);
@@ -157,6 +197,8 @@ function clearUnlockedDekAndCaches(): void {
     // ignore
   }
   mediaMetaCache.clear();
+  transferMetaCache.clear();
+  cachedSessionInfo = null;
   inFlightUrlLoads.clear();
   if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
     for (const url of objectUrlCache.values()) {
@@ -264,9 +306,17 @@ export const api = {
     clearUnlockedDekAndCaches();
   },
 
+  getCurrentSession(): SessionInfo | null {
+    return cachedSessionInfo;
+  },
+
   // ==================== Auth & Sessions ====================
-  getAuthStatus(): Promise<AuthStatusResponse> {
-    return requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
+  async getAuthStatus(): Promise<AuthStatusResponse> {
+    const status = await requestJson<AuthStatusResponse>('/api/v1/auth/status', {}, true);
+    if (status.session) {
+      cachedSessionInfo = status.session;
+    }
+    return status;
   },
 
   getAuthParams(): Promise<AuthParamsResponse> {
@@ -295,6 +345,7 @@ export const api = {
         },
         true,
       );
+      cachedSessionInfo = session.session;
       setUnlockedDek(bundle.dek);
       return session;
     } finally {
@@ -340,6 +391,7 @@ export const api = {
       }
 
       try {
+        cachedSessionInfo = session.session;
         setUnlockedDek(dek);
       } finally {
         zeroBytes(dek);
@@ -1211,6 +1263,548 @@ export const api = {
     return `/api/v1/media/${encodeURIComponent(id)}/blob?rev=${revision}`;
   },
 
+  // ==================== 3b. Cross-Device Zero-Knowledge Transfers & Chat ====================
+
+  async listTransfers(opts?: {
+    pinnedOnly?: boolean;
+  }): Promise<{ items: TransferItem[]; latestSyncSeq: number }> {
+    const dek = requireUnlockedDek();
+    const qs = opts?.pinnedOnly ? '?pinnedOnly=true' : '';
+    const raw = await requestJson<{ items: EncryptedTransferRecordDto[]; latestSyncSeq: number }>(
+      `/api/v1/transfers${qs}`,
+    );
+    const items = await Promise.all(
+      raw.items.map((rec) => hydrateDecryptedTransfer(dek, rec)),
+    );
+    for (const item of items) {
+      transferMetaCache.set(item.id, item);
+    }
+    return { items, latestSyncSeq: raw.latestSyncSeq };
+  },
+
+  async sendTransferText(input: CreateTransferTextRequest): Promise<{ item: TransferItem }> {
+    const dek = requireUnlockedDek();
+    const id = input.id ?? randomUuid();
+    const revision = 1;
+    const fallbackDevice = inferBrowserDeviceLabel();
+    const senderSessionId = input.senderSessionId ?? cachedSessionInfo?.id ?? null;
+    const senderDeviceName =
+      input.senderDeviceName || cachedSessionInfo?.deviceName || fallbackDevice.deviceName;
+    const senderPlatform =
+      input.senderPlatform || cachedSessionInfo?.platform || fallbackDevice.platform;
+
+    const payload: TransferDecryptedPayload = {
+      messageKind: 'text',
+      text: (input.text || '').slice(0, 50_000),
+      senderSessionId,
+      senderDeviceName,
+      senderPlatform,
+      originalFilename: '',
+      mimeType: '',
+      fileCategory: null,
+      plainSize: 0,
+      sha256: '',
+      width: 0,
+      height: 0,
+      durationMs: null,
+      thumbnailMimeType: null,
+      linkedMediaId: null,
+      replyToId: input.replyToId ?? null,
+      replyPreview: input.replyPreview ? input.replyPreview.slice(0, 240) : null,
+      tags: normalizeTags(input.tags ?? []),
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'transfer', revision, payload);
+    const reqBody: CreateEncryptedTransferRequest = {
+      id,
+      isPinned: input.isPinned ?? false,
+      revision,
+      envelope,
+    };
+    const res = await requestJson<{ item: EncryptedTransferRecordDto }>('/api/v1/transfers', {
+      method: 'POST',
+      body: JSON.stringify(reqBody),
+    });
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    transferMetaCache.set(item.id, item);
+    return { item };
+  },
+
+  /**
+   * Sends any file in Cross-Device Transfer:
+   * - If the file is an image or video, it is automatically encrypted & archived into the
+   *   Image Library / Video Cinema AND linked via zero-duplication `reuseMediaId` in Transfer Hub!
+   * - Otherwise (PDF, ZIP, APK, DOCX, audio, code, etc.), it is encrypted into PSENC001 chunks
+   *   (multipart for <= 4 MiB, resumable chunked upload for > 4 MiB) and stored permanently in Transfer Hub.
+   */
+  async sendTransferFile(
+    file: File,
+    opts: {
+      text?: string;
+      replyToId?: string | null;
+      replyPreview?: string | null;
+      tags?: string[];
+      isPinned?: boolean;
+      onProgress?: (uploadedBytes: number, totalBytes: number) => void;
+    } = {},
+  ): Promise<{ item: TransferItem; autoSavedMedia: MediaItem | null }> {
+    const dek = requireUnlockedDek();
+    const fallbackDevice = inferBrowserDeviceLabel();
+    const senderSessionId = cachedSessionInfo?.id ?? null;
+    const senderDeviceName = cachedSessionInfo?.deviceName || fallbackDevice.deviceName;
+    const senderPlatform = cachedSessionInfo?.platform || fallbackDevice.platform;
+
+    const classification = classifyTransferFile(file.name, file.type);
+    const mergedTags = normalizeTags([...(opts.tags ?? []), '多端互传']);
+
+    // 1. Auto-archive Images & Videos into Encrypted Photo Gallery / Video Cinema
+    if (classification.messageKind === 'image' || classification.messageKind === 'video') {
+      const mediaKind: MediaKind = classification.messageKind;
+      const normalizedFile =
+        file.type === classification.normalizedMimeType
+          ? file
+          : new File([file], file.name, {
+              type: classification.normalizedMimeType,
+              lastModified: file.lastModified || Date.now(),
+            });
+
+      const useResumable = normalizedFile.size >= 4 * 1024 * 1024;
+      const { media } = useResumable
+        ? await api.uploadMediaResumable(normalizedFile, {
+            kind: mediaKind,
+            tags: mergedTags,
+            description: opts.text
+              ? `${opts.text}（来自 ${senderDeviceName} 多端互传）`
+              : `来自 ${senderDeviceName} 多端互传自动归档`,
+            onProgress: opts.onProgress,
+          })
+        : await api.uploadMediaMultipart(normalizedFile, {
+            kind: mediaKind,
+            tags: mergedTags,
+            description: opts.text
+              ? `${opts.text}（来自 ${senderDeviceName} 多端互传）`
+              : `来自 ${senderDeviceName} 多端互传自动归档`,
+          });
+
+      opts.onProgress?.(normalizedFile.size, normalizedFile.size);
+
+      const transferId = randomUuid();
+      const payload: TransferDecryptedPayload = {
+        messageKind: mediaKind,
+        text: (opts.text || '').slice(0, 50_000),
+        senderSessionId,
+        senderDeviceName,
+        senderPlatform,
+        originalFilename: file.name,
+        mimeType: media.mimeType,
+        fileCategory: mediaKind,
+        plainSize: media.byteSize,
+        sha256: media.sha256,
+        width: media.width,
+        height: media.height,
+        durationMs: media.durationMs,
+        thumbnailMimeType: media.thumbnailMimeType,
+        linkedMediaId: media.id,
+        replyToId: opts.replyToId ?? null,
+        replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
+        tags: normalizeTags(opts.tags ?? []),
+      };
+
+      const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+      const reqBody: CreateEncryptedTransferRequest = {
+        id: transferId,
+        isPinned: opts.isPinned ?? false,
+        revision: 1,
+        envelope,
+        reuseMediaId: media.id,
+      };
+
+      const res = await requestJson<{ item: EncryptedTransferRecordDto }>('/api/v1/transfers', {
+        method: 'POST',
+        body: JSON.stringify(reqBody),
+      });
+      const transferItem = await hydrateDecryptedTransfer(dek, res.item);
+      transferMetaCache.set(transferItem.id, transferItem);
+      return { item: transferItem, autoSavedMedia: media };
+    }
+
+    // 2. Arbitrary File Transfer (Documents, Archives, Audio, Packages, Code, 0B..multi-GB)
+    const plainBytes = new Uint8Array(await file.arrayBuffer());
+    const totalPlainBytes = plainBytes.byteLength;
+    const transferId = randomUuid();
+
+    if (totalPlainBytes >= 4 * 1024 * 1024) {
+      const partPlainBytes = 1024 * 1024; // 1 MiB (multiple of 64 KiB)
+      const sha256Hex = bytesToHex(await sha256(plainBytes));
+      const { chunkCount: psencChunkCount, encryptedSize: totalEncryptedBytes } =
+        computePsencEncryptedSize(totalPlainBytes, DEFAULT_MEDIA_CHUNK_SIZE);
+      const totalParts = Math.max(1, Math.ceil(totalPlainBytes / partPlainBytes));
+
+      const uploadId = randomUuid();
+      const mainBlobId = generateBlobId();
+      const fek = randomBytes(32);
+      const baseNonce = randomBytes(12);
+      const wrappedFek = await wrapBlobFek(dek, fek, mainBlobId);
+
+      try {
+        const metaEnvelope = await encryptItemPayload(dek, uploadId, 'upload', 1, {
+          itemId: transferId,
+          mainBlobId,
+          filename: file.name,
+        });
+
+        const init = await requestJson<EncryptedResumableUploadInitResponse>(
+          '/api/v1/transfers/uploads/init',
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              uploadId,
+              totalPlainBytes,
+              totalEncryptedBytes,
+              partPlainBytes,
+              totalParts,
+              metaEnvelope,
+            }),
+          },
+        );
+
+        const status = await requestJson<EncryptedTransferResumableStatusResponse>(
+          `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}`,
+        );
+        const doneSet = new Set(status.receivedChunks);
+
+        for (let idx = 0; idx < init.totalParts; idx++) {
+          if (doneSet.has(idx)) continue;
+          const start = idx * init.partPlainBytes;
+          const end = Math.min(totalPlainBytes, start + init.partPlainBytes);
+          const slice = plainBytes.subarray(start, end);
+
+          const encryptedPart = await encryptResumableMediaPart({
+            fek,
+            blobId: mainBlobId,
+            baseNonce,
+            partPlainBytes: slice,
+            partIndex: idx,
+            partStridePlainBytes: init.partPlainBytes,
+            totalPlainSize: totalPlainBytes,
+            chunkPlainSize: DEFAULT_MEDIA_CHUNK_SIZE,
+          });
+
+          const putRes = await fetch(
+            `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}/chunks/${idx}`,
+            {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              credentials: 'include',
+              body: toOwnedArrayBuffer(encryptedPart),
+            },
+          );
+          if (!putRes.ok) {
+            throw new ApiClientError(putRes.status, 'CHUNK_UPLOAD_FAILED', `互传分片 #${idx} 上传失败`);
+          }
+          opts.onProgress?.(end, totalPlainBytes);
+        }
+
+        const payload: TransferDecryptedPayload = {
+          messageKind: 'file',
+          text: (opts.text || '').slice(0, 50_000),
+          senderSessionId,
+          senderDeviceName,
+          senderPlatform,
+          originalFilename: file.name,
+          mimeType: classification.normalizedMimeType,
+          fileCategory: classification.fileCategory,
+          plainSize: totalPlainBytes,
+          sha256: sha256Hex,
+          width: 0,
+          height: 0,
+          durationMs: null,
+          thumbnailMimeType: null,
+          linkedMediaId: null,
+          replyToId: opts.replyToId ?? null,
+          replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
+          tags: normalizeTags(opts.tags ?? []),
+        };
+
+        const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+        const completeBody: EncryptedTransferResumableCompleteRequest = {
+          id: transferId,
+          isPinned: opts.isPinned ?? false,
+          revision: 1,
+          envelope,
+          mainBlob: {
+            blobId: mainBlobId,
+            ...wrappedFek,
+            baseNonce: bytesToBase64(baseNonce),
+            chunkSize: DEFAULT_MEDIA_CHUNK_SIZE,
+            chunkCount: psencChunkCount,
+            plainSize: totalPlainBytes,
+            encryptedSize: totalEncryptedBytes,
+            sha256: sha256Hex,
+          },
+          thumbBlob: null,
+          encryptedThumbnailBase64: null,
+        };
+
+        const completed = await requestJson<{ item: EncryptedTransferRecordDto }>(
+          `/api/v1/transfers/uploads/${encodeURIComponent(init.uploadId)}/complete`,
+          {
+            method: 'POST',
+            body: JSON.stringify(completeBody),
+          },
+        );
+        const item = await hydrateDecryptedTransfer(dek, completed.item);
+        transferMetaCache.set(item.id, item);
+        return { item, autoSavedMedia: null };
+      } finally {
+        zeroBytes(fek);
+      }
+    }
+
+    const mainEnc = await encryptMediaBytesToPsenc(dek, plainBytes);
+    const payload: TransferDecryptedPayload = {
+      messageKind: 'file',
+      text: (opts.text || '').slice(0, 50_000),
+      senderSessionId,
+      senderDeviceName,
+      senderPlatform,
+      originalFilename: file.name,
+      mimeType: classification.normalizedMimeType,
+      fileCategory: classification.fileCategory,
+      plainSize: totalPlainBytes,
+      sha256: mainEnc.meta.sha256,
+      width: 0,
+      height: 0,
+      durationMs: null,
+      thumbnailMimeType: null,
+      linkedMediaId: null,
+      replyToId: opts.replyToId ?? null,
+      replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
+      tags: normalizeTags(opts.tags ?? []),
+    };
+
+    const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
+    const metadata: EncryptedTransferUploadMetadata = {
+      id: transferId,
+      isPinned: opts.isPinned ?? false,
+      revision: 1,
+      envelope,
+      mainBlob: mainEnc.meta,
+      thumbBlob: null,
+    };
+
+    const form = new FormData();
+    form.append(
+      'encryptedFile',
+      new Blob([toOwnedArrayBuffer(mainEnc.encryptedBytes)], {
+        type: 'application/octet-stream',
+      }),
+      `${mainEnc.meta.blobId}.psenc`,
+    );
+    form.append('metadata', JSON.stringify(metadata));
+
+    const res = await requestJson<{ item: EncryptedTransferRecordDto }>(
+      '/api/v1/transfers/upload',
+      {
+        method: 'POST',
+        body: form,
+      },
+    );
+    opts.onProgress?.(totalPlainBytes, totalPlainBytes);
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    transferMetaCache.set(item.id, item);
+    return { item, autoSavedMedia: null };
+  },
+
+  async updateTransfer(id: string, input: UpdateTransferRequest): Promise<{ item: TransferItem }> {
+    const dek = requireUnlockedDek();
+    const currentRes = await requestJson<{ item: EncryptedTransferRecordDto }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}`,
+    );
+    const current = await hydrateDecryptedTransfer(dek, currentRes.item);
+    const nextRevision = current.revision + 1;
+
+    const payload: TransferDecryptedPayload = {
+      messageKind: current.messageKind,
+      text: input.text !== undefined ? input.text.slice(0, 50_000) : current.text,
+      senderSessionId: current.senderSessionId,
+      senderDeviceName: current.senderDeviceName,
+      senderPlatform: current.senderPlatform,
+      originalFilename: current.originalFilename,
+      mimeType: current.mimeType,
+      fileCategory: current.fileCategory,
+      plainSize: current.plainSize,
+      sha256: current.sha256,
+      width: current.width,
+      height: current.height,
+      durationMs: current.durationMs,
+      thumbnailMimeType: current.thumbnailMimeType,
+      linkedMediaId: current.linkedMediaId,
+      replyToId: current.replyToId,
+      replyPreview: current.replyPreview,
+      tags: input.tags !== undefined ? normalizeTags(input.tags) : current.tags,
+    };
+
+    const envelope = await encryptItemPayload(dek, id, 'transfer', nextRevision, payload);
+    const res = await requestJson<{ item: EncryptedTransferRecordDto }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({
+          isPinned: input.isPinned,
+          expectedRevision: input.expectedRevision ?? current.revision,
+          revision: nextRevision,
+          envelope,
+        }),
+      },
+    );
+    const item = await hydrateDecryptedTransfer(dek, res.item);
+    transferMetaCache.set(item.id, item);
+    return { item };
+  },
+
+  async deleteTransferPermanently(id: string): Promise<{ ok: boolean }> {
+    transferMetaCache.delete(id);
+    return requestJson(`/api/v1/transfers/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async ensureTransferItem(idOrItem: string | TransferItem): Promise<TransferItem> {
+    if (typeof idOrItem !== 'string' && idOrItem.blobKeyBundle) {
+      transferMetaCache.set(idOrItem.id, idOrItem);
+      return idOrItem;
+    }
+    const id = typeof idOrItem === 'string' ? idOrItem : idOrItem.id;
+    const cached = transferMetaCache.get(id);
+    if (cached?.blobKeyBundle) return cached;
+
+    const dek = requireUnlockedDek();
+    const res = await requestJson<{ item: EncryptedTransferRecordDto }>(
+      `/api/v1/transfers/${encodeURIComponent(id)}`,
+    );
+    const hydrated = await hydrateDecryptedTransfer(dek, res.item);
+    transferMetaCache.set(hydrated.id, hydrated);
+    return hydrated;
+  },
+
+  async loadTransferThumbnailObjectUrl(item: TransferItem): Promise<string> {
+    const cacheKey = `transfer:${item.id}:thumb:${item.revision}`;
+    const existing = objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const dek = requireUnlockedDek();
+      const resolved = await api.ensureTransferItem(item);
+      const bundle = resolved.blobKeyBundle;
+      if (!bundle) {
+        throw new ApiClientError(500, 'MISSING_BLOB_BUNDLE', '缺少加密互传文件密钥元数据');
+      }
+      const targetMeta =
+        bundle.thumbnail ?? (resolved.messageKind === 'image' ? bundle.main : null);
+      if (!targetMeta) {
+        throw new ApiClientError(404, 'NO_THUMBNAIL', '暂无加密缩略图');
+      }
+
+      const encryptedBytes = await fetchBinaryBytes(
+        `/api/v1/transfers/${encodeURIComponent(resolved.id)}/thumbnail-blob?rev=${resolved.revision}`,
+      );
+      const plainBytes = await decryptPsencFullBuffer(dek, encryptedBytes, targetMeta);
+      const mime = bundle.thumbnail
+        ? resolved.thumbnailMimeType || 'image/jpeg'
+        : resolved.mimeType || 'image/jpeg';
+      const url = URL.createObjectURL(
+        new Blob([toOwnedArrayBuffer(plainBytes)], { type: mime }),
+      );
+      zeroBytes(plainBytes);
+      objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      inFlightUrlLoads.delete(cacheKey);
+    });
+
+    inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
+  },
+
+  async loadTransferObjectUrl(item: TransferItem): Promise<string> {
+    const cacheKey = `transfer:${item.id}:full:${item.revision}`;
+    const existing = objectUrlCache.get(cacheKey);
+    if (existing) return existing;
+    const pending = inFlightUrlLoads.get(cacheKey);
+    if (pending) return pending;
+
+    const loader = (async () => {
+      const dek = requireUnlockedDek();
+      const resolved = await api.ensureTransferItem(item);
+      const mainMeta = resolved.blobKeyBundle?.main;
+      if (!mainMeta) {
+        throw new ApiClientError(500, 'MISSING_BLOB_BUNDLE', '缺少加密互传文件主密钥元数据');
+      }
+      const encryptedBytes = await fetchBinaryBytes(
+        `/api/v1/transfers/${encodeURIComponent(resolved.id)}/blob?rev=${resolved.revision}`,
+      );
+      const plainBytes = await decryptPsencFullBuffer(dek, encryptedBytes, mainMeta);
+      const url = URL.createObjectURL(
+        new Blob([toOwnedArrayBuffer(plainBytes)], {
+          type: resolved.mimeType || 'application/octet-stream',
+        }),
+      );
+      zeroBytes(plainBytes);
+      objectUrlCache.set(cacheKey, url);
+      return url;
+    })().finally(() => {
+      inFlightUrlLoads.delete(cacheKey);
+    });
+
+    inFlightUrlLoads.set(cacheKey, loader);
+    return loader;
+  },
+
+  async decryptTransferByteRange(
+    idOrItem: string | TransferItem,
+    startPlainByte: number,
+    endPlainByte?: number,
+  ): Promise<Uint8Array> {
+    const dek = requireUnlockedDek();
+    const resolved = await api.ensureTransferItem(idOrItem);
+    const mainMeta = resolved.blobKeyBundle?.main;
+    if (!mainMeta) {
+      throw new ApiClientError(500, 'MISSING_BLOB_BUNDLE', '缺少加密互传文件密钥元数据');
+    }
+
+    const range = computeEncryptedRangeForPlainRange(mainMeta, startPlainByte, endPlainByte);
+    const encryptedSlice = await fetchBinaryBytes(
+      `/api/v1/transfers/${encodeURIComponent(resolved.id)}/blob`,
+      {
+        Range: `bytes=${range.diskStart}-${range.diskEnd}`,
+      },
+    );
+
+    return decryptPsencRangeSlice({
+      dek,
+      encryptedSlice,
+      meta: mainMeta,
+      clampedStart: range.clampedStart,
+      clampedEnd: range.clampedEnd,
+      firstChunkIdx: range.firstChunkIdx,
+      lastChunkIdx: range.lastChunkIdx,
+    });
+  },
+
+  async downloadDecryptedTransfer(item: TransferItem): Promise<void> {
+    const url = await api.loadTransferObjectUrl(item);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = item.originalFilename || `transfer-${item.id.slice(0, 8)}`;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  },
+
   // ==================== 4. Universal Cipher Inspection & Sync ====================
   inspectItemCipher(id: string): Promise<{ envelope: CipherEnvelopeInspection }> {
     return requestJson(`/api/v1/sync/cipher/${encodeURIComponent(id)}`);
@@ -1245,6 +1839,13 @@ export const api = {
       raw.albums.map((rec) => hydrateDecryptedAlbum(dek, rec, 0)),
     );
 
+    const transfers = await Promise.all(
+      (raw.transfers ?? []).map((rec) => hydrateDecryptedTransfer(dek, rec)),
+    );
+    for (const tr of transfers) {
+      transferMetaCache.set(tr.id, tr);
+    }
+
     return {
       serverTime: raw.serverTime,
       latestSyncSeq: raw.latestSyncSeq,
@@ -1254,6 +1855,7 @@ export const api = {
       passwords,
       media,
       albums,
+      transfers,
       deleted: raw.deleted,
     };
   },
