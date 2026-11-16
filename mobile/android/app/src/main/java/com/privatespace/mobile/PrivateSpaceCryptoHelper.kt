@@ -300,7 +300,11 @@ object PrivateSpaceCryptoHelper {
             "flac" -> "audio/flac"
             "ts", "tsx", "js", "jsx", "py", "kt", "swift", "go", "rs", "java", "c", "cpp", "sh", "sql" ->
                 "text/plain"
-            else -> if (normalizedExplicit.isNotEmpty()) normalizedExplicit else "application/octet-stream"
+            else -> if (normalizedExplicit.isNotEmpty() && normalizedExplicit != "*/*" && normalizedExplicit != "application/*") {
+                normalizedExplicit
+            } else {
+                "application/octet-stream"
+            }
         }
     }
 

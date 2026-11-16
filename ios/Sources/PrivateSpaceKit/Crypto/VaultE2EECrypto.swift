@@ -617,7 +617,17 @@ public enum VaultE2EECrypto {
         filename: String,
         mimeType: String = ""
     ) -> (messageKind: TransferMessageKind, fileCategory: TransferFileCategory, normalizedMimeType: String) {
-        let cleanMime = mimeType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let rawMime = mimeType
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(separator: ";")
+            .first
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        let isGenericMime = rawMime.isEmpty
+            || rawMime == "*/*"
+            || rawMime == "application/*"
+            || rawMime == "application/octet-stream"
+        let cleanMime = isGenericMime ? "" : rawMime
         let ext = (filename as NSString).pathExtension.lowercased()
 
         let imageExts: [String: String] = [
@@ -627,9 +637,7 @@ public enum VaultE2EECrypto {
             "svg": "image/svg+xml",
         ]
         if cleanMime.hasPrefix("image/") || imageExts[ext] != nil {
-            let resolved = (!cleanMime.isEmpty && cleanMime != "application/octet-stream")
-                ? cleanMime
-                : (imageExts[ext] ?? "image/jpeg")
+            let resolved = !cleanMime.isEmpty ? cleanMime : (imageExts[ext] ?? "image/jpeg")
             return (.image, .image, resolved)
         }
 
@@ -639,30 +647,67 @@ public enum VaultE2EECrypto {
             "ogv": "video/ogg", "3gp": "video/3gpp",
         ]
         if cleanMime.hasPrefix("video/") || videoExts[ext] != nil {
-            let resolved = (!cleanMime.isEmpty && cleanMime != "application/octet-stream")
-                ? cleanMime
-                : (videoExts[ext] ?? "video/mp4")
+            let resolved = !cleanMime.isEmpty ? cleanMime : (videoExts[ext] ?? "video/mp4")
             return (.video, .video, resolved)
         }
 
-        if cleanMime.hasPrefix("audio/") || ["mp3", "m4a", "wav", "flac", "ogg", "aac", "opus"].contains(ext) {
-            return (.file, .audio, cleanMime.isEmpty ? "audio/mpeg" : cleanMime)
-        }
-        if ["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"].contains(ext) {
-            return (.file, .archive, cleanMime.isEmpty ? "application/zip" : cleanMime)
-        }
-        if ["apk", "ipa", "dmg", "pkg", "exe", "msi", "deb", "rpm"].contains(ext) {
-            return (.file, .package, cleanMime.isEmpty ? "application/octet-stream" : cleanMime)
-        }
-        if ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "rtf", "epub"].contains(ext) {
-            let defaultMime = ext == "pdf" ? "application/pdf" : "text/plain"
-            return (.file, .document, cleanMime.isEmpty ? defaultMime : cleanMime)
-        }
-        if ["json", "js", "ts", "tsx", "jsx", "py", "go", "rs", "swift", "kt", "java", "sql", "yaml", "yml", "toml", "sh", "html", "css"].contains(ext) {
-            return (.file, .code, cleanMime.isEmpty ? "text/plain" : cleanMime)
+        let audioExts: [String: String] = [
+            "mp3": "audio/mpeg", "m4a": "audio/mp4", "wav": "audio/wav",
+            "flac": "audio/flac", "ogg": "audio/ogg", "aac": "audio/aac", "opus": "audio/opus",
+        ]
+        if cleanMime.hasPrefix("audio/") || audioExts[ext] != nil {
+            return (.file, .audio, cleanMime.isEmpty ? (audioExts[ext] ?? "audio/mpeg") : cleanMime)
         }
 
-        return (.file, .other, cleanMime.isEmpty ? "application/octet-stream" : cleanMime)
+        let archiveExts: [String: String] = [
+            "zip": "application/zip", "rar": "application/vnd.rar",
+            "7z": "application/x-7z-compressed", "tar": "application/x-tar",
+            "gz": "application/gzip", "tgz": "application/gzip",
+            "bz2": "application/x-bzip2", "xz": "application/x-xz",
+        ]
+        if archiveExts[ext] != nil {
+            return (.file, .archive, cleanMime.isEmpty ? (archiveExts[ext] ?? "application/zip") : cleanMime)
+        }
+
+        let packageExts: [String: String] = [
+            "apk": "application/vnd.android.package-archive",
+            "ipa": "application/octet-stream",
+            "dmg": "application/x-apple-diskimage",
+            "pkg": "application/x-newton-compatible-pkg",
+            "exe": "application/vnd.microsoft.portable-executable",
+            "msi": "application/x-msi",
+            "deb": "application/vnd.debian.binary-package",
+            "rpm": "application/x-rpm",
+        ]
+        if packageExts[ext] != nil || cleanMime == "application/vnd.android.package-archive" {
+            return (.file, .package, cleanMime.isEmpty ? (packageExts[ext] ?? "application/octet-stream") : cleanMime)
+        }
+
+        let docExts: [String: String] = [
+            "pdf": "application/pdf",
+            "doc": "application/msword",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "xls": "application/vnd.ms-excel",
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "ppt": "application/vnd.ms-powerpoint",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "txt": "text/plain",
+            "md": "text/markdown",
+            "csv": "text/csv",
+            "rtf": "application/rtf",
+            "epub": "application/epub+zip",
+        ]
+        if docExts[ext] != nil {
+            return (.file, .document, cleanMime.isEmpty ? (docExts[ext] ?? "text/plain") : cleanMime)
+        }
+
+        if ["json", "js", "ts", "tsx", "jsx", "py", "go", "rs", "swift", "kt", "java", "sql", "yaml", "yml", "toml", "sh", "html", "css"].contains(ext) {
+            let defaultCodeMime = ext == "json" ? "application/json" : "text/plain"
+            return (.file, .code, cleanMime.isEmpty ? defaultCodeMime : cleanMime)
+        }
+
+        let fallbackMime = !cleanMime.isEmpty ? cleanMime : (!rawMime.isEmpty && rawMime != "*/*" && rawMime != "application/*" ? rawMime : "application/octet-stream")
+        return (.file, .other, fallbackMime)
     }
 
     public static func hydrateDecryptedTransfer(

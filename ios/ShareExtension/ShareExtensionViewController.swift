@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import PrivateSpaceKit
 import SwiftUI
 import UIKit
@@ -12,6 +13,20 @@ struct StagedShareAttachment: Identifiable, Sendable {
     let byteSize: Int
     let stagedFileURL: URL
     let sharedText: String?
+}
+
+private struct CopiedProviderFile: Sendable {
+    let fileURL: URL
+    let filename: String
+    let mimeType: String?
+    let byteSize: Int
+}
+
+@MainActor
+@Observable
+private final class ShareSendProgressState {
+    var currentFileIndex: Int = 0
+    var currentProgress: Double = 0
 }
 
 /// Native iOS System Share Extension (`com.apple.share-services`, display name: `发送`).
@@ -28,30 +43,28 @@ final class ShareExtensionViewController: UIViewController {
         secretStore: secretStore
     )
     private let biometricService = BiometricAuthService()
-    private lazy var stagingDir: URL = {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pss-inbound-share-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }()
+    private let stagingDir: URL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pss-inbound-share-\(UUID().uuidString)", isDirectory: true)
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        try? FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
         mountShareSendView()
     }
 
     deinit {
-        try? FileManager.default.removeItem(at: stagingDir)
+        Self.shredStagingDirectory(stagingDir)
     }
 
     private func mountShareSendView() {
         let extensionItems = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
         let targetDir = stagingDir
+        let store = localStore
 
         let rootView = ShareExtensionSendSheetView(
             biometricService: biometricService,
-            loadSession: { [localStore] in
-                try? localStore.loadShareExtensionSession()
+            loadSession: {
+                try? store.loadShareExtensionSession()
             },
             extractAttachments: {
                 await Self.extractSharedAttachments(from: extensionItems, into: targetDir)
@@ -82,7 +95,7 @@ final class ShareExtensionViewController: UIViewController {
         host.didMove(toParent: self)
     }
 
-    private static func shredStagingDirectory(_ dir: URL) {
+    nonisolated private static func shredStagingDirectory(_ dir: URL) {
         if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
             for file in files {
                 if let size = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize),
@@ -193,13 +206,6 @@ final class ShareExtensionViewController: UIViewController {
         return nil
     }
 
-    private struct CopiedProviderFile: Sendable {
-        let fileURL: URL
-        let filename: String
-        let mimeType: String?
-        let byteSize: Int
-    }
-
     private static func copyFileRepresentation(
         from provider: NSItemProvider,
         typeIdentifier: String,
@@ -253,11 +259,11 @@ final class ShareExtensionViewController: UIViewController {
     ) async -> String? {
         await withCheckedContinuation { continuation in
             provider.loadItem(forTypeIdentifier: typeIdentifier, options: nil) { item, _ in
-                if let url = item as? URL {
-                    continuation.resume(returning: url.absoluteString)
-                } else if let str = item as? String {
+                if let url = item as? NSURL, let str = url.absoluteString {
                     continuation.resume(returning: str)
-                } else if let data = item as? Data, let str = String(data: data, encoding: .utf8) {
+                } else if let str = item as? NSString {
+                    continuation.resume(returning: str as String)
+                } else if let data = item as? NSData, let str = String(data: data as Data, encoding: .utf8) {
                     continuation.resume(returning: str)
                 } else {
                     continuation.resume(returning: nil)
@@ -280,8 +286,7 @@ private struct ShareExtensionSendSheetView: View {
     @State private var sessionRecord: ShareExtensionSessionRecord?
     @State private var noteText: String = ""
     @State private var isSending = false
-    @State private var currentFileIndex = 0
-    @State private var currentProgress: Double = 0
+    @State private var progressState = ShareSendProgressState()
     @State private var errorMessage: String?
     @State private var didCompleteSend = false
 
@@ -366,13 +371,13 @@ private struct ShareExtensionSendSheetView: View {
                             Section("加密传输进度") {
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack {
-                                        Text("正在加密发送 (\(min(attachments.count, currentFileIndex + 1))/\(attachments.count))")
+                                        Text("正在加密发送 (\(min(attachments.count, progressState.currentFileIndex + 1))/\(attachments.count))")
                                             .font(.caption.weight(.semibold))
                                         Spacer()
-                                        Text("\(Int(currentProgress * 100))%")
+                                        Text("\(Int(progressState.currentProgress * 100))%")
                                             .font(.caption2.monospacedDigit())
                                     }
-                                    ProgressView(value: currentProgress)
+                                    ProgressView(value: progressState.currentProgress)
                                 }
                             }
                         }
@@ -463,9 +468,12 @@ private struct ShareExtensionSendSheetView: View {
             )
 
             let trimmedNote = noteText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let totalAttachmentCount = max(1, attachments.count)
+            let progressRef = progressState
+
             for (idx, attachment) in attachments.enumerated() {
-                currentFileIndex = idx
-                currentProgress = Double(idx) / Double(max(1, attachments.count))
+                progressRef.currentFileIndex = idx
+                progressRef.currentProgress = Double(idx) / Double(totalAttachmentCount)
 
                 let plainData = try Data(contentsOf: attachment.stagedFileURL)
                 let effectiveCaption: String
@@ -482,15 +490,15 @@ private struct ShareExtensionSendSheetView: View {
                     tags: ["system-share"],
                     sourceVia: .systemShare,
                     chunkBytes: 512 * 1024
-                ) { uploaded, total in
+                ) { [weak progressRef] uploaded, total in
                     Task { @MainActor in
                         let fileRatio = Double(uploaded) / Double(max(1, total))
-                        self.currentProgress = (Double(idx) + fileRatio) / Double(max(1, self.attachments.count))
+                        progressRef?.currentProgress = (Double(idx) + fileRatio) / Double(totalAttachmentCount)
                     }
                 }
             }
 
-            currentProgress = 1.0
+            progressRef.currentProgress = 1.0
             didCompleteSend = true
             isSending = false
             try? await Task.sleep(nanoseconds: 250_000_000)

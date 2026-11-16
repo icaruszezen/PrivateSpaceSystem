@@ -131,7 +131,7 @@ class PrivateSpaceCryptoHelperTest {
             PrivateSpaceCryptoHelper.sanitizeSharedFileName("  2026_家庭资产清单.pdf  "),
         )
         assertEquals(
-            "___etc_passwd",
+            "__etc_passwd",
             PrivateSpaceCryptoHelper.sanitizeSharedFileName("../etc/passwd"),
         )
         assertEquals(

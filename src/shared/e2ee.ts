@@ -738,29 +738,30 @@ export function classifyTransferFile(
   fileCategory: TransferFileCategory;
   normalizedMimeType: string;
 } {
-  const cleanMime = (rawMimeType || '').trim().toLowerCase();
+  const rawMime = (rawMimeType || '').trim().toLowerCase().split(';')[0].trim();
+  const isWildcardOrGeneric =
+    !rawMime ||
+    rawMime === '*/*' ||
+    rawMime === 'application/*' ||
+    rawMime === 'application/octet-stream' ||
+    rawMime.endsWith('/*');
+  const cleanMime = isWildcardOrGeneric ? '' : rawMime;
   const extMatch = /\.([a-z0-9]{1,10})$/i.exec((filename || '').trim());
   const ext = extMatch ? extMatch[1].toLowerCase() : '';
 
-  if (cleanMime.startsWith('image/') || (ext && ext in IMAGE_EXT_MIME)) {
+  if (rawMime.startsWith('image/') || (ext && ext in IMAGE_EXT_MIME)) {
     return {
       messageKind: 'image',
       fileCategory: 'image',
-      normalizedMimeType:
-        cleanMime && cleanMime !== 'application/octet-stream'
-          ? cleanMime
-          : IMAGE_EXT_MIME[ext] || 'image/jpeg',
+      normalizedMimeType: cleanMime || IMAGE_EXT_MIME[ext] || 'image/jpeg',
     };
   }
 
-  if (cleanMime.startsWith('video/') || (ext && ext in VIDEO_EXT_MIME)) {
+  if (rawMime.startsWith('video/') || (ext && ext in VIDEO_EXT_MIME)) {
     return {
       messageKind: 'video',
       fileCategory: 'video',
-      normalizedMimeType:
-        cleanMime && cleanMime !== 'application/octet-stream'
-          ? cleanMime
-          : VIDEO_EXT_MIME[ext] || 'video/mp4',
+      normalizedMimeType: cleanMime || VIDEO_EXT_MIME[ext] || 'video/mp4',
     };
   }
 
@@ -769,16 +770,23 @@ export function classifyTransferFile(
     return {
       messageKind: 'file',
       fileCategory: entry.category,
-      normalizedMimeType:
-        cleanMime && cleanMime !== 'application/octet-stream' ? cleanMime : entry.mime,
+      normalizedMimeType: cleanMime || entry.mime,
     };
   }
 
-  if (cleanMime.startsWith('audio/')) {
-    return { messageKind: 'file', fileCategory: 'audio', normalizedMimeType: cleanMime };
+  if (rawMime.startsWith('audio/')) {
+    return {
+      messageKind: 'file',
+      fileCategory: 'audio',
+      normalizedMimeType: cleanMime || 'audio/mpeg',
+    };
   }
-  if (cleanMime.startsWith('text/')) {
-    return { messageKind: 'file', fileCategory: 'document', normalizedMimeType: cleanMime };
+  if (rawMime.startsWith('text/')) {
+    return {
+      messageKind: 'file',
+      fileCategory: 'document',
+      normalizedMimeType: cleanMime || 'text/plain',
+    };
   }
 
   return {
