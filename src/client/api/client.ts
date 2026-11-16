@@ -84,6 +84,7 @@ import type {
   TransferDecryptedPayload,
   TransferDevicePlatform,
   TransferItem,
+  TransferSourceVia,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
@@ -1387,6 +1388,7 @@ export const api = {
       replyToId?: string | null;
       replyPreview?: string | null;
       tags?: string[];
+      sourceVia?: TransferSourceVia;
       isPinned?: boolean;
       onProgress?: (uploadedBytes: number, totalBytes: number) => void;
     } = {},
@@ -1398,7 +1400,11 @@ export const api = {
     const senderPlatform = cachedSessionInfo?.platform || fallbackDevice.platform;
 
     const classification = classifyTransferFile(file.name, file.type);
-    const mergedTags = normalizeTags([...(opts.tags ?? []), '多端互传']);
+    const extraTags = [
+      ...(opts.tags ?? []),
+      ...(opts.sourceVia === 'system-share' ? ['system-share'] : []),
+    ];
+    const mergedTags = normalizeTags([...extraTags, '多端互传']);
 
     // 1. Auto-archive Images & Videos into Encrypted Photo Gallery / Video Cinema
     if (classification.messageKind === 'image' || classification.messageKind === 'video') {
@@ -1438,6 +1444,7 @@ export const api = {
         senderSessionId,
         senderDeviceName,
         senderPlatform,
+        sourceVia: opts.sourceVia,
         originalFilename: file.name,
         mimeType: media.mimeType,
         fileCategory: mediaKind,
@@ -1450,7 +1457,7 @@ export const api = {
         linkedMediaId: media.id,
         replyToId: opts.replyToId ?? null,
         replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
-        tags: normalizeTags(opts.tags ?? []),
+        tags: normalizeTags(extraTags),
       };
 
       const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -1554,6 +1561,7 @@ export const api = {
           senderSessionId,
           senderDeviceName,
           senderPlatform,
+          sourceVia: opts.sourceVia,
           originalFilename: file.name,
           mimeType: classification.normalizedMimeType,
           fileCategory: classification.fileCategory,
@@ -1566,7 +1574,7 @@ export const api = {
           linkedMediaId: null,
           replyToId: opts.replyToId ?? null,
           replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
-          tags: normalizeTags(opts.tags ?? []),
+          tags: normalizeTags(extraTags),
         };
 
         const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -1611,6 +1619,7 @@ export const api = {
       senderSessionId,
       senderDeviceName,
       senderPlatform,
+      sourceVia: opts.sourceVia,
       originalFilename: file.name,
       mimeType: classification.normalizedMimeType,
       fileCategory: classification.fileCategory,
@@ -1623,7 +1632,7 @@ export const api = {
       linkedMediaId: null,
       replyToId: opts.replyToId ?? null,
       replyPreview: opts.replyPreview ? opts.replyPreview.slice(0, 240) : null,
-      tags: normalizeTags(opts.tags ?? []),
+      tags: normalizeTags(extraTags),
     };
 
     const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -1673,6 +1682,7 @@ export const api = {
       senderSessionId: current.senderSessionId,
       senderDeviceName: current.senderDeviceName,
       senderPlatform: current.senderPlatform,
+      sourceVia: current.sourceVia,
       originalFilename: current.originalFilename,
       mimeType: current.mimeType,
       fileCategory: current.fileCategory,

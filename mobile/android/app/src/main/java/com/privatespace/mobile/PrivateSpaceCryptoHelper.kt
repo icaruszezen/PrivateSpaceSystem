@@ -228,6 +228,132 @@ object PrivateSpaceCryptoHelper {
         return 0
     }
 
+    const val SHARE_ACTION_LABEL = "发送"
+
+    fun sanitizeSharedFileName(rawName: String?, fallbackIndex: Int = 1): String {
+        val cleaned = rawName
+            ?.trim()
+            ?.replace('\\', '_')
+            ?.replace('/', '_')
+            ?.replace("..", "_")
+            ?.replace(Regex("[\\u0000-\\u001F\\u007F:*?\"<>|]"), "_")
+            ?.trim('.', ' ')
+            ?.take(180)
+            ?.takeIf { it.isNotEmpty() }
+        return cleaned ?: "shared_file_$fallbackIndex.bin"
+    }
+
+    fun inferMimeTypeFromName(fileName: String?, explicitMime: String? = null): String {
+        val normalizedExplicit = explicitMime
+            ?.trim()
+            ?.lowercase()
+            ?.substringBefore(';')
+            ?.trim()
+            .orEmpty()
+        if (normalizedExplicit.isNotEmpty() &&
+            normalizedExplicit != "*/*" &&
+            normalizedExplicit != "application/octet-stream"
+        ) {
+            return normalizedExplicit
+        }
+        val ext = fileName
+            ?.trim()
+            ?.substringAfterLast('.', "")
+            ?.lowercase()
+            .orEmpty()
+        return when (ext) {
+            "pdf" -> "application/pdf"
+            "txt", "log", "ini", "conf" -> "text/plain"
+            "md", "markdown" -> "text/markdown"
+            "csv" -> "text/csv"
+            "json" -> "application/json"
+            "xml" -> "application/xml"
+            "yaml", "yml" -> "application/x-yaml"
+            "html", "htm" -> "text/html"
+            "doc" -> "application/msword"
+            "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "xls" -> "application/vnd.ms-excel"
+            "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "ppt" -> "application/vnd.ms-powerpoint"
+            "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "zip" -> "application/zip"
+            "7z" -> "application/x-7z-compressed"
+            "rar" -> "application/vnd.rar"
+            "tar" -> "application/x-tar"
+            "gz", "tgz" -> "application/gzip"
+            "apk" -> "application/vnd.android.package-archive"
+            "ipa" -> "application/octet-stream"
+            "dmg" -> "application/x-apple-diskimage"
+            "png" -> "image/png"
+            "jpg", "jpeg" -> "image/jpeg"
+            "webp" -> "image/webp"
+            "gif" -> "image/gif"
+            "heic" -> "image/heic"
+            "svg" -> "image/svg+xml"
+            "mp4", "m4v" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "wav" -> "audio/wav"
+            "flac" -> "audio/flac"
+            "ts", "tsx", "js", "jsx", "py", "kt", "swift", "go", "rs", "java", "c", "cpp", "sh", "sql" ->
+                "text/plain"
+            else -> if (normalizedExplicit.isNotEmpty()) normalizedExplicit else "application/octet-stream"
+        }
+    }
+
+    fun classifyTransferFile(fileName: String?, mimeType: String? = null): String {
+        val resolvedMime = inferMimeTypeFromName(fileName, mimeType)
+        val ext = fileName
+            ?.trim()
+            ?.substringAfterLast('.', "")
+            ?.lowercase()
+            .orEmpty()
+
+        if (ext in setOf("apk", "ipa", "aab", "dmg", "pkg", "exe", "msi", "deb", "rpm", "appimage") ||
+            resolvedMime == "application/vnd.android.package-archive"
+        ) {
+            return "package"
+        }
+        if (ext in setOf("zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz", "zst") ||
+            resolvedMime in setOf(
+                "application/zip",
+                "application/x-7z-compressed",
+                "application/vnd.rar",
+                "application/x-tar",
+                "application/gzip",
+            )
+        ) {
+            return "archive"
+        }
+        if (resolvedMime.startsWith("image/") ||
+            resolvedMime.startsWith("video/") ||
+            resolvedMime.startsWith("audio/")
+        ) {
+            return "media"
+        }
+        if (ext in setOf(
+                "ts", "tsx", "js", "jsx", "mjs", "cjs", "json", "yaml", "yml", "toml", "xml",
+                "html", "css", "scss", "py", "kt", "kts", "swift", "go", "rs", "java", "c",
+                "cpp", "h", "hpp", "sh", "zsh", "sql", "ini", "conf", "env",
+            )
+        ) {
+            return "code"
+        }
+        if (ext in setOf(
+                "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "markdown",
+                "csv", "rtf", "epub", "pages", "numbers", "key",
+            ) ||
+            resolvedMime == "application/pdf" ||
+            resolvedMime.startsWith("text/")
+        ) {
+            return "document"
+        }
+        return "other"
+    }
+
     private fun parseSemverParts(raw: String?): Pair<IntArray, List<String>>? {
         val trimmed = raw?.trim()?.removePrefix("v")?.removePrefix("V")?.substringBefore('+') ?: return null
         if (trimmed.isEmpty()) return null

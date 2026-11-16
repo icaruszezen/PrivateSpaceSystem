@@ -41,6 +41,71 @@ public enum TransferFileCategory: String, Codable, Sendable, CaseIterable {
     case image
     case video
     case other
+
+    public var displayName: String {
+        switch self {
+        case .document: return "办公文档"
+        case .archive: return "压缩归档"
+        case .audio: return "音频媒体"
+        case .code: return "代码配置"
+        case .package: return "安装包体"
+        case .image: return "高清图片"
+        case .video: return "视频媒体"
+        case .other: return "其他文件"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .document: return "doc.text.fill"
+        case .archive: return "archivebox.fill"
+        case .audio: return "waveform"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .package: return "shippingbox.fill"
+        case .image: return "photo.fill"
+        case .video: return "film.fill"
+        case .other: return "doc.fill"
+        }
+    }
+}
+
+public enum TransferSourceVia: String, Codable, Sendable, CaseIterable {
+    case systemShare = "system-share"
+    case manualUpload = "manual-upload"
+    case dragDrop = "drag-drop"
+    case clipboard = "clipboard"
+    case chat = "chat"
+}
+
+public enum TransferFileClassifier {
+    public static func sanitizeFilename(_ rawName: String, fallbackExtension: String = "") -> String {
+        let lastComponent = rawName.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? ""
+        let invalidChars = CharacterSet(charactersIn: "<>:\"|?*\u{0000}\u{0001}\u{0002}\u{0003}\u{0004}\u{0005}\u{0006}\u{0007}\u{0008}\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{007F}")
+        let cleaned = lastComponent.components(separatedBy: invalidChars).joined(separator: "_")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        if cleaned.isEmpty {
+            let ext = fallbackExtension.trimmingCharacters(in: CharacterSet(charactersIn: ". ")).lowercased()
+            return ext.isEmpty ? "shared-file" : "shared-file.\(ext)"
+        }
+        return String(cleaned.prefix(180))
+    }
+
+    public static func inferMimeType(filename: String, providedMimeType: String? = nil) -> String {
+        return VaultE2EECrypto.classifyTransferFile(
+            filename: filename,
+            mimeType: providedMimeType ?? ""
+        ).normalizedMimeType
+    }
+
+    public static func classify(filename: String, mimeType: String? = nil) -> TransferFileCategory {
+        return VaultE2EECrypto.classifyTransferFile(
+            filename: filename,
+            mimeType: mimeType ?? ""
+        ).fileCategory
+    }
 }
 
 public enum NoteFormat: String, Codable, Sendable, CaseIterable {
@@ -1397,6 +1462,7 @@ public struct TransferDecryptedPayload: Codable, Sendable, Equatable {
     public var senderSessionId: String?
     public var senderDeviceName: String
     public var senderPlatform: DevicePlatform
+    public var sourceVia: TransferSourceVia?
     public var originalFilename: String
     public var mimeType: String
     public var fileCategory: TransferFileCategory?
@@ -1417,6 +1483,7 @@ public struct TransferDecryptedPayload: Codable, Sendable, Equatable {
         senderSessionId: String? = nil,
         senderDeviceName: String,
         senderPlatform: DevicePlatform = .ios,
+        sourceVia: TransferSourceVia? = nil,
         originalFilename: String = "",
         mimeType: String = "",
         fileCategory: TransferFileCategory? = nil,
@@ -1436,6 +1503,7 @@ public struct TransferDecryptedPayload: Codable, Sendable, Equatable {
         self.senderSessionId = senderSessionId
         self.senderDeviceName = senderDeviceName
         self.senderPlatform = senderPlatform
+        self.sourceVia = sourceVia
         self.originalFilename = originalFilename
         self.mimeType = mimeType
         self.fileCategory = fileCategory
@@ -1460,6 +1528,7 @@ public struct TransferItem: Codable, Sendable, Identifiable, Equatable, Hashable
     public var senderSessionId: String?
     public var senderDeviceName: String
     public var senderPlatform: DevicePlatform
+    public var sourceVia: TransferSourceVia?
     public var originalFilename: String
     public var mimeType: String
     public var fileCategory: TransferFileCategory?
@@ -1492,6 +1561,7 @@ public struct TransferItem: Codable, Sendable, Identifiable, Equatable, Hashable
         senderSessionId: String? = nil,
         senderDeviceName: String,
         senderPlatform: DevicePlatform = .ios,
+        sourceVia: TransferSourceVia? = nil,
         originalFilename: String = "",
         mimeType: String = "",
         fileCategory: TransferFileCategory? = nil,
@@ -1523,6 +1593,7 @@ public struct TransferItem: Codable, Sendable, Identifiable, Equatable, Hashable
         self.senderSessionId = senderSessionId
         self.senderDeviceName = senderDeviceName
         self.senderPlatform = senderPlatform
+        self.sourceVia = sourceVia
         self.originalFilename = originalFilename
         self.mimeType = mimeType
         self.fileCategory = fileCategory
@@ -1841,6 +1912,31 @@ public struct AutoFillCredentialRecord: Codable, Sendable, Identifiable, Equatab
         return domain == queryDomain
             || domain.hasSuffix(".\(queryDomain)")
             || queryDomain.hasSuffix(".\(domain)")
+    }
+}
+
+public struct ShareExtensionSessionRecord: Codable, Sendable, Equatable {
+    public let serverURL: String
+    public let sessionToken: String
+    public let masterDekBase64: String
+    public let vaultName: String
+    public let deviceName: String
+    public let updatedAt: String
+
+    public init(
+        serverURL: String,
+        sessionToken: String,
+        masterDekBase64: String,
+        vaultName: String,
+        deviceName: String,
+        updatedAt: String = ISO8601DateFormatter().string(from: Date())
+    ) {
+        self.serverURL = serverURL
+        self.sessionToken = sessionToken
+        self.masterDekBase64 = masterDekBase64
+        self.vaultName = vaultName
+        self.deviceName = deviceName
+        self.updatedAt = updatedAt
     }
 }
 

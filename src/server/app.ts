@@ -142,13 +142,14 @@ export function createApp(config: ServerConfig, options: CreateAppOptions = {}):
   app.get('/.well-known/apple-app-site-association', (c) => {
     const appId = config.appleAppId;
     const autofillId = `${appId}.autofill`;
+    const shareId = `${appId}.share`;
     return c.json(
       {
         applinks: {
           apps: [],
           details: [
             {
-              appIDs: [appId],
+              appIDs: [appId, shareId],
               components: [
                 { '/': '/ios*' },
                 { '/': '/*' },
@@ -157,7 +158,7 @@ export function createApp(config: ServerConfig, options: CreateAppOptions = {}):
           ],
         },
         webcredentials: {
-          apps: [appId, autofillId],
+          apps: [appId, autofillId, shareId],
         },
       },
       200,

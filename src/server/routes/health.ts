@@ -24,6 +24,7 @@ export function createHealthRoutes(repo: VaultRepository): Hono {
         'resumable-upload',
         'sse-sync',
         'cross-device-transfer',
+        'mobile-system-share-send',
         'ios-autofill',
         'mobile-auto-update',
       ],

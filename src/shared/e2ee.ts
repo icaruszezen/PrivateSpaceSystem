@@ -818,6 +818,11 @@ export async function hydrateDecryptedTransfer(
     senderSessionId: payload.senderSessionId ?? null,
     senderDeviceName: payload.senderDeviceName || '未知设备',
     senderPlatform: payload.senderPlatform || 'web',
+    sourceVia:
+      payload.sourceVia ??
+      (Array.isArray(payload.tags) && payload.tags.includes('system-share')
+        ? 'system-share'
+        : undefined),
     originalFilename: payload.originalFilename || '',
     mimeType: payload.mimeType || '',
     fileCategory:

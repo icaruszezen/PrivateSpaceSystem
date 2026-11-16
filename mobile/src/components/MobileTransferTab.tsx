@@ -492,7 +492,7 @@ export const MobileTransferTab: React.FC<MobileTransferTabProps> = ({
             <div className="m-tr-empty-desc">
               {query || filter !== 'all'
                 ? '可尝试清空关键词或切换筛选标签查看全部永久记录。'
-                : '电脑与手机随时互发任意格式文件或文字消息，多端实时同步、永久保存；互传的图片与视频自动进入加密图库与影院。'}
+                : '电脑与手机随时互发任意格式文件或文字消息；在手机任意外部应用选择文件 → 点击系统分享中的 PSS 图标 → 点击「发送」，即可零知识分块加密直达此处。'}
             </div>
           </div>
         ) : (
@@ -505,6 +505,8 @@ export const MobileTransferTab: React.FC<MobileTransferTabProps> = ({
               {group.items.map((item) => {
                 const self = isSentByThisDevice(item);
                 const isQueued = item.syncSeq === 0;
+                const isSystemShare =
+                  item.sourceVia === 'system-share' || item.tags.includes('system-share');
                 return (
                   <article
                     key={item.id}
@@ -516,6 +518,12 @@ export const MobileTransferTab: React.FC<MobileTransferTabProps> = ({
                         <PlatformIcon platform={item.senderPlatform} />
                         <span>{item.senderDeviceName || platformLabel(item.senderPlatform)}</span>
                       </span>
+                      {isSystemShare && (
+                        <span className="m-tr-share-tag">
+                          <Send size={9} />
+                          <span>系统分享 · 发送</span>
+                        </span>
+                      )}
                       <span className="m-tr-time mono">{formatHm(item.createdAt)}</span>
                       {item.isPinned && (
                         <Star

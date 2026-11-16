@@ -93,8 +93,8 @@ public struct ResolvedIosInstallAction: Sendable, Equatable {
 public enum AppUpdateService {
     public static let defaultGithubRepo = "icaruszezen/PrivateSpaceSystem"
     public static let defaultGithubApiBase = "https://api.github.com"
-    public static let fallbackMarketingVersion = "0.5.0"
-    public static let fallbackBuildNumber = 500
+    public static let fallbackMarketingVersion = "0.6.0"
+    public static let fallbackBuildNumber = 600
 
     private struct GithubAssetPayload: Decodable, Sendable {
         let name: String

@@ -86,22 +86,38 @@ describe('PrivateSpace iOS Native & Standalone Zero-Knowledge Mobile Client Suit
     cleanups.push({ dir: envSetup.dir, inst: envSetup.inst });
     const { app } = envSetup.inst;
 
-    // 1. Verify /.well-known/apple-app-site-association for iOS AutoFill Credential Provider
+    // 1. Verify /.well-known/apple-app-site-association for iOS AutoFill & Share Extension
     const aasaRes = await app.request('/.well-known/apple-app-site-association');
     expect(aasaRes.status).toBe(200);
     const aasa = await aasaRes.json();
     expect(aasa.webcredentials.apps).toContain('9Z8Y7X6W5V.io.privatespace.ios');
     expect(aasa.webcredentials.apps).toContain('9Z8Y7X6W5V.io.privatespace.ios.autofill');
-    expect(aasa.applinks.details[0].appIDs).toEqual(['9Z8Y7X6W5V.io.privatespace.ios']);
+    expect(aasa.applinks.details[0].appIDs).toEqual([
+      '9Z8Y7X6W5V.io.privatespace.ios',
+      '9Z8Y7X6W5V.io.privatespace.ios.share',
+    ]);
 
-    // 2. Verify /api/v1/health exposes Zero-Knowledge E2EE v2 + ios-autofill capability
+    // 2. Verify /api/v1/health exposes Zero-Knowledge E2EE v2 + ios-autofill + mobile-system-share-send
     const healthRes = await app.request('/api/v1/health');
     expect(healthRes.status).toBe(200);
     const health = await healthRes.json();
-    expect(health.version).toBe('0.5.0');
+    expect(health.version).toBe('0.6.0');
     expect(health.encryption.zeroKnowledge).toBe(true);
     expect(health.capabilities).toContain('zero-knowledge-e2ee-v2');
     expect(health.capabilities).toContain('ios-autofill');
+    expect(health.capabilities).toContain('mobile-system-share-send');
+
+    // Verify iOS Share Extension Info.plist displays exact label "发送" & XcodeGen project embeds PrivateSpaceShareExtension
+    const sharePlist = fs.readFileSync(
+      path.resolve('ios/ShareExtension/Info.plist'),
+      'utf8',
+    );
+    expect(sharePlist).toContain('<key>CFBundleDisplayName</key>');
+    expect(sharePlist).toContain('<string>发送</string>');
+    expect(sharePlist).toContain('<string>com.apple.share-services</string>');
+    const projectYml = fs.readFileSync(path.resolve('ios/project.yml'), 'utf8');
+    expect(projectYml).toContain('MARKETING_VERSION: "0.6.0"');
+    expect(projectYml).toContain('PrivateSpaceShareExtension:');
 
     // 3. Verify CFNetwork/Darwin User-Agent auto-detects platform = 'ios' during Zero-Knowledge login
     const paramsRes = await app.request('/api/v1/auth/params');

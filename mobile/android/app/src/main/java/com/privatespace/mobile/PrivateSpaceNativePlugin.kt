@@ -5,6 +5,9 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -13,14 +16,17 @@ import android.os.PersistableBundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Base64
 import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.getcapacitor.JSArray
 import com.getcapacitor.JSObject
 import com.getcapacitor.Plugin
 import com.getcapacitor.PluginCall
@@ -28,17 +34,58 @@ import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 import java.io.File
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.net.HttpURLConnection
 import java.net.URL
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.time.Instant
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+
+private data class StagedSharedFileEntry(
+    val fileId: String,
+    val batchId: String,
+    val name: String,
+    val mimeType: String,
+    val size: Long,
+    val sha256Hex: String,
+    val stagedFile: File,
+) {
+    fun toJSObject(): JSObject = JSObject().apply {
+        put("fileId", fileId)
+        put("name", name)
+        put("mimeType", mimeType)
+        put("size", size)
+        put("sha256Hex", sha256Hex)
+    }
+}
+
+private data class StagedSharedBatch(
+    val batchId: String,
+    val files: List<StagedSharedFileEntry>,
+    val sharedText: String?,
+    val subject: String?,
+    val receivedAt: String,
+) {
+    fun toJSObject(): JSObject = JSObject().apply {
+        put("batchId", batchId)
+        val arr = JSArray()
+        files.forEach { arr.put(it.toJSObject()) }
+        put("files", arr)
+        if (sharedText != null) put("sharedText", sharedText) else put("sharedText", JSObject.NULL)
+        if (subject != null) put("subject", subject) else put("subject", JSObject.NULL)
+        put("actionLabel", PrivateSpaceCryptoHelper.SHARE_ACTION_LABEL)
+        put("receivedAt", receivedAt)
+    }
+}
 
 @CapacitorPlugin(name = "PrivateSpaceNative")
 class PrivateSpaceNativePlugin : Plugin() {
@@ -51,35 +98,101 @@ class PrivateSpaceNativePlugin : Plugin() {
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
         private const val EXTRA_IS_SENSITIVE_COMPAT = "android.content.extra.IS_SENSITIVE"
+        private const val SHARE_SHORTCUT_ID = "pss_share_send"
+        private const val SHARE_CATEGORY_DIRECT_SEND = "com.privatespace.mobile.category.DIRECT_SEND"
+        private const val MAX_CHUNK_READ_BYTES = 4 * 1024 * 1024
+        private const val STAGED_FILE_TTL_MS = 2L * 3600L * 1000L
 
         private val pendingSharedNote = AtomicReference<SharedInboundNote?>(null)
+        private val pendingSharedBatch = AtomicReference<StagedSharedBatch?>(null)
+        private val stagedFilesById = ConcurrentHashMap<String, StagedSharedFileEntry>()
         private val pendingVerifiedApkFile = AtomicReference<File?>(null)
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val downloadExecutor = Executors.newSingleThreadExecutor()
+    private val shareStagingExecutor = Executors.newSingleThreadExecutor()
     private var pendingClipboardClearTask: Runnable? = null
+
+    override fun load() {
+        super.load()
+        publishSendShareShortcut()
+        shareStagingExecutor.execute {
+            cleanupExpiredShareCacheFiles()
+        }
+        activity?.intent?.let { initialIntent ->
+            processIncomingIntent(initialIntent)
+        }
+    }
 
     override fun handleOnNewIntent(intent: Intent?) {
         super.handleOnNewIntent(intent)
+        processIncomingIntent(intent)
+    }
+
+    private fun publishSendShareShortcut() {
+        try {
+            val shortcutManager = context.getSystemService(ShortcutManager::class.java) ?: return
+            val iconRes = context.applicationInfo.icon.takeIf { it != 0 } ?: R.mipmap.ic_launcher
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                setClassName(context.packageName, "${context.packageName}.ShareSendAlias")
+                addCategory(Intent.CATEGORY_DEFAULT)
+            }
+            val builder = ShortcutInfo.Builder(context, SHARE_SHORTCUT_ID)
+                .setShortLabel(PrivateSpaceCryptoHelper.SHARE_ACTION_LABEL)
+                .setLongLabel(PrivateSpaceCryptoHelper.SHARE_ACTION_LABEL)
+                .setIcon(Icon.createWithResource(context, iconRes))
+                .setCategories(setOf(SHARE_CATEGORY_DIRECT_SEND))
+                .setIntent(sendIntent)
+                .setRank(0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setLongLived(true)
+            }
+            shortcutManager.addDynamicShortcuts(listOf(builder.build()))
+        } catch (_: Exception) {
+            // Non-critical on restricted custom launchers
+        }
+    }
+
+    private fun processIncomingIntent(intent: Intent?) {
         if (intent == null) return
 
         when (intent.action) {
-            Intent.ACTION_SEND -> {
-                if (intent.type?.startsWith("text/") == true) {
-                    val rawText = intent.getStringExtra(Intent.EXTRA_TEXT)
-                    val rawSubject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+            Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE -> {
+                val uris = extractSharedUris(intent)
+                val rawText = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+                    ?: intent.getStringExtra(Intent.EXTRA_TEXT)
+                val rawSubject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                val intentMime = intent.type
+
+                // Prevent duplicate consumption on configuration change / activity recreation
+                intent.action = Intent.ACTION_MAIN
+                intent.removeExtra(Intent.EXTRA_STREAM)
+                intent.removeExtra(Intent.EXTRA_TEXT)
+                intent.clipData = null
+
+                if (uris.isEmpty() && rawText.isNullOrBlank()) {
+                    return
+                }
+
+                if (uris.isEmpty() && intentMime?.startsWith("text/") == true) {
                     val normalized = PrivateSpaceCryptoHelper.normalizeInboundShare(
-                        mimeType = intent.type,
+                        mimeType = intentMime,
                         rawSubject = rawSubject,
                         rawText = rawText,
                     )
-                    // Prevent duplicate consumption on configuration change / activity recreation
-                    intent.action = Intent.ACTION_MAIN
-                    intent.removeExtra(Intent.EXTRA_TEXT)
                     if (normalized != null) {
-                        deliverOrQueueInboundShare(normalized)
+                        pendingSharedNote.set(normalized)
                     }
+                }
+
+                shareStagingExecutor.execute {
+                    stageIncomingShareBatch(
+                        uris = uris,
+                        intentMime = intentMime,
+                        rawSubject = rawSubject,
+                        rawText = rawText,
+                    )
                 }
             }
             Intent.ACTION_VIEW -> {
@@ -95,6 +208,211 @@ class PrivateSpaceNativePlugin : Plugin() {
                             text = dataUri,
                         )
                     )
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun extractSharedUris(intent: Intent): List<Uri> {
+        val seen = LinkedHashSet<String>()
+        val result = ArrayList<Uri>()
+
+        fun addUriIfValid(candidate: Uri?) {
+            if (candidate == null) return
+            val scheme = candidate.scheme?.lowercase().orEmpty()
+            if (scheme != "content" && scheme != "file") return
+            val key = candidate.toString()
+            if (seen.add(key)) {
+                result.add(candidate)
+            }
+        }
+
+        if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
+            val streamList = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+            }
+            streamList?.forEach { addUriIfValid(it) }
+        } else {
+            val single = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            }
+            addUriIfValid(single)
+        }
+
+        val clip = intent.clipData
+        if (clip != null) {
+            for (i in 0 until clip.itemCount) {
+                addUriIfValid(clip.getItemAt(i)?.uri)
+            }
+        }
+        return result
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        if (uri.scheme.equals("content", ignoreCase = true)) {
+            try {
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0 && !cursor.isNull(idx)) {
+                            val name = cursor.getString(idx)?.trim()
+                            if (!name.isNullOrEmpty()) return name
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Fall back to URI path segment
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+    }
+
+    private fun stageIncomingShareBatch(
+        uris: List<Uri>,
+        intentMime: String?,
+        rawSubject: String?,
+        rawText: String?,
+    ) {
+        val inboundDir = File(context.cacheDir, "inbound_shares").apply {
+            if (!exists()) mkdirs()
+        }
+        val batchId = UUID.randomUUID().toString()
+        val stagedEntries = ArrayList<StagedSharedFileEntry>()
+
+        for ((index, uri) in uris.withIndex()) {
+            val fileId = UUID.randomUUID().toString()
+            val stagedFile = File(inboundDir, "$fileId.bin")
+            try {
+                val rawName = queryDisplayName(uri)
+                val cleanName = PrivateSpaceCryptoHelper.sanitizeSharedFileName(rawName, index + 1)
+                val resolverMime = try {
+                    context.contentResolver.getType(uri)
+                } catch (_: Exception) {
+                    null
+                }
+                val resolvedMime = PrivateSpaceCryptoHelper.inferMimeTypeFromName(
+                    cleanName,
+                    resolverMime ?: intentMime,
+                )
+
+                val digest = MessageDigest.getInstance("SHA-256")
+                var byteCount = 0L
+                val opened = context.contentResolver.openInputStream(uri) ?: continue
+                opened.use { input ->
+                    FileOutputStream(stagedFile).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            output.write(buffer, 0, read)
+                            digest.update(buffer, 0, read)
+                            byteCount += read
+                        }
+                        output.flush()
+                    }
+                }
+
+                val shaHex = digest.digest().joinToString("") { b -> String.format("%02x", b) }
+                val entry = StagedSharedFileEntry(
+                    fileId = fileId,
+                    batchId = batchId,
+                    name = cleanName,
+                    mimeType = resolvedMime,
+                    size = byteCount,
+                    sha256Hex = shaHex,
+                    stagedFile = stagedFile,
+                )
+                stagedEntries.add(entry)
+            } catch (_: Exception) {
+                stagedFile.delete()
+            }
+        }
+
+        // If another app shared plain text/URL via "发送" without a binary stream, stage as UTF-8 .txt
+        if (stagedEntries.isEmpty() && !rawText.isNullOrBlank()) {
+            val fileId = UUID.randomUUID().toString()
+            val stagedFile = File(inboundDir, "$fileId.bin")
+            try {
+                val baseTitle = rawSubject?.trim()?.takeIf { it.isNotEmpty() } ?: "分享文本"
+                val fileName = PrivateSpaceCryptoHelper.sanitizeSharedFileName(
+                    if (baseTitle.endsWith(".txt", ignoreCase = true)) baseTitle else "$baseTitle.txt",
+                    1,
+                )
+                val utf8Bytes = rawText.toByteArray(StandardCharsets.UTF_8)
+                FileOutputStream(stagedFile).use { output ->
+                    output.write(utf8Bytes)
+                    output.flush()
+                }
+                val shaHex = MessageDigest.getInstance("SHA-256")
+                    .digest(utf8Bytes)
+                    .joinToString("") { b -> String.format("%02x", b) }
+                stagedEntries.add(
+                    StagedSharedFileEntry(
+                        fileId = fileId,
+                        batchId = batchId,
+                        name = fileName,
+                        mimeType = "text/plain",
+                        size = utf8Bytes.size.toLong(),
+                        sha256Hex = shaHex,
+                        stagedFile = stagedFile,
+                    )
+                )
+            } catch (_: Exception) {
+                stagedFile.delete()
+            }
+        }
+
+        if (stagedEntries.isEmpty()) return
+
+        // Replace any unconsumed previous batch safely
+        val previous = pendingSharedBatch.getAndSet(null)
+        previous?.files?.forEach { old ->
+            stagedFilesById.remove(old.fileId)
+            old.stagedFile.delete()
+        }
+
+        stagedEntries.forEach { entry ->
+            stagedFilesById[entry.fileId] = entry
+        }
+
+        val batch = StagedSharedBatch(
+            batchId = batchId,
+            files = stagedEntries,
+            sharedText = rawText?.trim()?.takeIf { it.isNotEmpty() },
+            subject = rawSubject?.trim()?.takeIf { it.isNotEmpty() },
+            receivedAt = Instant.now().toString(),
+        )
+        pendingSharedBatch.set(batch)
+
+        val payload = batch.toJSObject()
+        mainHandler.post {
+            vibrateInternal("light")
+            if (hasListeners("sharedFilesReceived")) {
+                notifyListeners("sharedFilesReceived", payload)
+            }
+        }
+    }
+
+    private fun cleanupExpiredShareCacheFiles() {
+        val cutoff = System.currentTimeMillis() - STAGED_FILE_TTL_MS
+        listOf("inbound_shares", "exports").forEach { subDir ->
+            val dir = File(context.cacheDir, subDir)
+            if (dir.exists()) {
+                dir.listFiles()?.forEach { f ->
+                    if (f.isFile && f.lastModified() < cutoff) {
+                        f.delete()
+                    }
                 }
             }
         }
@@ -175,7 +493,7 @@ class PrivateSpaceNativePlugin : Plugin() {
         } catch (_: Exception) {
             null
         }
-        val appVersionName = pkgInfo?.versionName ?: "0.5.0"
+        val appVersionName = pkgInfo?.versionName ?: "0.6.0"
         val appVersionCode = if (pkgInfo != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 pkgInfo.longVersionCode.toInt()
@@ -184,7 +502,7 @@ class PrivateSpaceNativePlugin : Plugin() {
                 pkgInfo.versionCode
             }
         } else {
-            500
+            600
         }
         val canInstallPackages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.packageManager.canRequestPackageInstalls()
@@ -442,6 +760,159 @@ class PrivateSpaceNativePlugin : Plugin() {
             res.put("shared", JSObject.NULL)
         }
         call.resolve(res)
+    }
+
+    @PluginMethod
+    fun getPendingSharedFiles(call: PluginCall) {
+        shareStagingExecutor.execute {
+            val current = pendingSharedBatch.get()
+            val res = JSObject()
+            if (current != null && current.files.isNotEmpty()) {
+                res.put("batch", current.toJSObject())
+            } else {
+                res.put("batch", JSObject.NULL)
+            }
+            call.resolve(res)
+        }
+    }
+
+    @PluginMethod
+    fun readSharedFileChunk(call: PluginCall) {
+        val fileId = call.getString("fileId")?.trim()
+        if (fileId.isNullOrEmpty()) {
+            call.reject("fileId is required for readSharedFileChunk")
+            return
+        }
+        val offset = call.data.optLong("offset", 0L).coerceAtLeast(0L)
+        val requestedLen = call.data.optInt("length", 524_288).coerceIn(1, MAX_CHUNK_READ_BYTES)
+
+        shareStagingExecutor.execute {
+            val entry = stagedFilesById[fileId]
+            if (entry == null || !entry.stagedFile.exists()) {
+                call.reject("待发送的系统分享暂存文件不存在或已被清理")
+                return@execute
+            }
+            try {
+                RandomAccessFile(entry.stagedFile, "r").use { raf ->
+                    val fileLen = raf.length()
+                    if (offset >= fileLen) {
+                        call.resolve(
+                            JSObject().apply {
+                                put("chunkBase64", "")
+                                put("bytesRead", 0)
+                                put("eof", true)
+                            }
+                        )
+                        return@execute
+                    }
+                    raf.seek(offset)
+                    val toRead = minOf(requestedLen.toLong(), fileLen - offset).toInt()
+                    val buffer = ByteArray(toRead)
+                    var totalRead = 0
+                    while (totalRead < toRead) {
+                        val r = raf.read(buffer, totalRead, toRead - totalRead)
+                        if (r <= 0) break
+                        totalRead += r
+                    }
+                    val chunkBase64 = if (totalRead > 0) {
+                        Base64.encodeToString(buffer, 0, totalRead, Base64.NO_WRAP)
+                    } else {
+                        ""
+                    }
+                    call.resolve(
+                        JSObject().apply {
+                            put("chunkBase64", chunkBase64)
+                            put("bytesRead", totalRead)
+                            put("eof", offset + totalRead >= fileLen)
+                        }
+                    )
+                }
+            } catch (ex: Exception) {
+                call.reject("读取系统分享暂存分片失败: ${ex.message}", ex)
+            }
+        }
+    }
+
+    @PluginMethod
+    fun discardSharedFiles(call: PluginCall) {
+        val targetBatchId = call.getString("batchId")?.trim()?.takeIf { it.isNotEmpty() }
+        shareStagingExecutor.execute {
+            var discardedCount = 0
+            val currentBatch = pendingSharedBatch.get()
+            if (targetBatchId == null || currentBatch?.batchId == targetBatchId) {
+                pendingSharedBatch.set(null)
+            }
+            val iterator = stagedFilesById.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next().value
+                if (targetBatchId == null || entry.batchId == targetBatchId) {
+                    iterator.remove()
+                    if (entry.stagedFile.exists() && entry.stagedFile.delete()) {
+                        discardedCount += 1
+                    }
+                }
+            }
+            call.resolve(JSObject().put("discardedCount", discardedCount))
+        }
+    }
+
+    @PluginMethod
+    fun exportOrShareFile(call: PluginCall) {
+        val rawName = call.getString("filename")
+        val explicitMime = call.getString("mimeType")
+        val base64Data = call.getString("base64Data")
+        val mode = call.getString("mode") ?: "share"
+
+        if (base64Data == null) {
+            call.reject("base64Data is required for exportOrShareFile")
+            return
+        }
+
+        shareStagingExecutor.execute {
+            try {
+                val safeName = PrivateSpaceCryptoHelper.sanitizeSharedFileName(rawName, 1)
+                val mimeType = PrivateSpaceCryptoHelper.inferMimeTypeFromName(safeName, explicitMime)
+                val decodedBytes = Base64.decode(base64Data, Base64.DEFAULT)
+
+                val exportsDir = File(context.cacheDir, "exports").apply {
+                    if (!exists()) mkdirs()
+                }
+                val outFile = File(exportsDir, safeName)
+                FileOutputStream(outFile).use { out ->
+                    out.write(decodedBytes)
+                    out.flush()
+                }
+
+                val authority = "${context.packageName}.fileprovider"
+                val contentUri = FileProvider.getUriForFile(context, authority, outFile)
+
+                mainHandler.post {
+                    try {
+                        val actionIntent = if (mode == "open") {
+                            Intent(Intent.ACTION_VIEW).apply {
+                                setDataAndType(contentUri, mimeType)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                        } else {
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = mimeType
+                                putExtra(Intent.EXTRA_STREAM, contentUri)
+                                clipData = ClipData.newRawUri(safeName, contentUri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            }
+                        }
+                        val chooser = Intent.createChooser(actionIntent, safeName)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(chooser)
+                        call.resolve(JSObject().put("ok", true))
+                    } catch (uiEx: Exception) {
+                        call.reject("唤起系统分享/打开面板失败: ${uiEx.message}", uiEx)
+                    }
+                }
+            } catch (ex: Exception) {
+                call.reject("导出解密文件失败: ${ex.message}", ex)
+            }
+        }
     }
 
     @PluginMethod

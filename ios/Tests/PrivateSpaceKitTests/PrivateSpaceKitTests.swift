@@ -554,5 +554,69 @@ final class PrivateSpaceKitTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(actions.count, 3)
         XCTAssertEqual(actions.first?.url.scheme, "itms-services")
     }
+
+    // MARK: - 7. iOS System Share Extension (`发送`) Encrypted Session Bridge & Arbitrary File Classifier
+
+    func testShareExtensionSessionEncryptionAndFileClassifier() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pss-ios-share-ext-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let memKeychain = InMemorySecretStore()
+        let store = EncryptedLocalVaultStore(
+            directoryURL: tempDir,
+            appGroupIdentifier: nil,
+            secretStore: memKeychain
+        )
+
+        let secretToken = "SHARE_EXT_BLIND_SESSION_TOKEN_998877"
+        let secretDekB64 = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let session = ShareExtensionSessionRecord(
+            serverURL: "https://vault.example.internal",
+            sessionToken: secretToken,
+            masterDekBase64: secretDekB64,
+            vaultName: "PSS",
+            deviceName: "iPhone 16 Pro · PSS"
+        )
+
+        try store.saveShareExtensionSession(session)
+
+        let rawShareBytes = try Data(contentsOf: store.shareSessionFileURL)
+        XCTAssertEqual(rawShareBytes.subdata(in: 0..<8), Data("PSCACHE1".utf8))
+        XCTAssertNil(rawShareBytes.range(of: Data(secretToken.utf8)))
+        XCTAssertNil(rawShareBytes.range(of: Data(secretDekB64.utf8)))
+
+        let loaded = try XCTUnwrap(store.loadShareExtensionSession())
+        XCTAssertEqual(loaded.serverURL, "https://vault.example.internal")
+        XCTAssertEqual(loaded.sessionToken, secretToken)
+        XCTAssertEqual(loaded.masterDekBase64, secretDekB64)
+        XCTAssertEqual(loaded.vaultName, "PSS")
+
+        store.clearShareExtensionSession()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.shareSessionFileURL.path))
+        XCTAssertNil(try store.loadShareExtensionSession())
+
+        XCTAssertEqual(
+            TransferFileClassifier.sanitizeFilename("../../etc/2026_资产清单.pdf"),
+            "2026_资产清单.pdf"
+        )
+        XCTAssertEqual(
+            TransferFileClassifier.inferMimeType(filename: "PSS-Android-v0.6.0.apk", providedMimeType: "*/*"),
+            "application/vnd.android.package-archive"
+        )
+        XCTAssertEqual(
+            TransferFileClassifier.classify(filename: "PSS-Android-v0.6.0.apk"),
+            .package
+        )
+        XCTAssertEqual(
+            TransferFileClassifier.classify(filename: "backup-vault.zip"),
+            .archive
+        )
+        XCTAssertEqual(AppUpdateService.fallbackMarketingVersion, "0.6.0")
+        XCTAssertEqual(AppUpdateService.fallbackBuildNumber, 600)
+    }
 }
+
 

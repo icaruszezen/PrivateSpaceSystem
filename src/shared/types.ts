@@ -618,12 +618,20 @@ export type TransferFileCategory =
   | 'video'
   | 'other';
 
+export type TransferSourceVia =
+  | 'system-share'
+  | 'manual-upload'
+  | 'drag-drop'
+  | 'clipboard'
+  | 'chat';
+
 export interface TransferDecryptedPayload {
   messageKind: TransferMessageKind;
   text: string;
   senderSessionId: string | null;
   senderDeviceName: string;
   senderPlatform: TransferDevicePlatform;
+  sourceVia?: TransferSourceVia;
   originalFilename: string;
   mimeType: string;
   fileCategory: TransferFileCategory | null;

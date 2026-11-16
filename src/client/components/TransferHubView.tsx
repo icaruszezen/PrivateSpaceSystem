@@ -760,6 +760,8 @@ export const TransferHubView: React.FC<TransferHubViewProps> = ({
                   : item.senderPlatform === 'web';
                 const isMobileSender =
                   item.senderPlatform === 'android' || item.senderPlatform === 'ios';
+                const isSystemShare =
+                  item.sourceVia === 'system-share' || item.tags.includes('system-share');
 
                 return (
                   <React.Fragment key={item.id}>
@@ -785,6 +787,15 @@ export const TransferHubView: React.FC<TransferHubViewProps> = ({
                             · {renderPlatformLabel(item.senderPlatform)}
                           </span>
                         </span>
+                        {isSystemShare && (
+                          <span
+                            className="pss-transfer-device-badge is-mobile"
+                            title="来自手机外部应用系统分享「发送」"
+                          >
+                            <Send size={10} />
+                            <span>系统分享 · 发送</span>
+                          </span>
+                        )}
                         <span title={formatFullDateTime(item.createdAt)}>
                           {formatTimeClock(item.createdAt)}
                         </span>

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: 'Optional SemVer override (e.g. 0.5.0) for manual build test'
+        description: 'Optional SemVer override (e.g. 0.6.0) for manual build test'
         required: false
         type: string
 
@@ -63,6 +63,7 @@ jobs:
               echo "Container healthcheck & headless bootstrap verified!"
               curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"ZERO_KNOWLEDGE_E2EE_V2"'
               curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"mobile-auto-update"'
+              curl -sf http://127.0.0.1:18080/api/v1/health | grep -q '"mobile-system-share-send"'
               curl -sf http://127.0.0.1:18080/api/v1/updates/config | grep -q '"githubRepo"'
               curl -sf "http://127.0.0.1:18080/api/v1/updates/ios-manifest.plist?ipa_url=https://example.com/PrivateSpace.ipa&version=0.4.0" | grep -q 'software-package'
               curl -sf http://127.0.0.1:18080/.well-known/apple-app-site-association | grep -q '"webcredentials"'
@@ -347,7 +348,7 @@ jobs:
 
           PRIVATESPACE_TEST_SERVER_URL=http://127.0.0.1:18080 swift test --package-path ios
 
-      - name: Generate Xcode project & build PrivateSpaceIOS + AutoFill Extension (Simulator)
+      - name: Generate Xcode project & build PrivateSpaceIOS + AutoFill & Share Extensions (Simulator)
         working-directory: ios
         env:
           IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID || 'io.privatespace.ios' }}
@@ -380,6 +381,7 @@ jobs:
           IOS_P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
           IOS_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
           IOS_AUTOFILL_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_AUTOFILL_PROVISION_PROFILE_BASE64 }}
+          IOS_SHARE_PROVISION_PROFILE_BASE64: ${{ secrets.IOS_SHARE_PROVISION_PROFILE_BASE64 }}
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
           APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
@@ -410,6 +412,12 @@ jobs:
               printf '%s' "$IOS_AUTOFILL_PROVISION_PROFILE_BASE64" | tr -d ' \n\r\t' | base64 -D > "$RUNNER_TEMP/autofill.mobileprovision"
               EXT_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/autofill.mobileprovision")")
               cp "$RUNNER_TEMP/autofill.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${EXT_UUID}.mobileprovision"
+            fi
+
+            if [ -n "$IOS_SHARE_PROVISION_PROFILE_BASE64" ]; then
+              printf '%s' "$IOS_SHARE_PROVISION_PROFILE_BASE64" | tr -d ' \n\r\t' | base64 -D > "$RUNNER_TEMP/share.mobileprovision"
+              SHARE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(security cms -D -i "$RUNNER_TEMP/share.mobileprovision")")
+              cp "$RUNNER_TEMP/share.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/${SHARE_UUID}.mobileprovision"
             fi
 
             xcodebuild archive \

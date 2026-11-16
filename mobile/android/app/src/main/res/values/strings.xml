@@ -5,4 +5,5 @@
     <string name="package_name">com.privatespace.mobile</string>
     <string name="custom_url_scheme">privatespace</string>
     <string name="pss_url_scheme">pss</string>
+    <string name="share_action_send">发送</string>
 </resources>

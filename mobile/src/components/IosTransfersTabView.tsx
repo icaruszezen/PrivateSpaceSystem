@@ -421,6 +421,8 @@ export function IosTransfersTabView(props: IosTransfersTabViewProps): React.JSX.
         ) : (
           visibleItems.map((item) => {
             const self = isSelfItem(item);
+            const isSystemShare =
+              item.sourceVia === 'system-share' || item.tags.includes('system-share');
             return (
               <View
                 key={item.id}
@@ -436,6 +438,7 @@ export function IosTransfersTabView(props: IosTransfersTabViewProps): React.JSX.
                     flexDirection: 'row',
                     alignItems: 'center',
                     justifyContent: self ? 'flex-end' : 'flex-start',
+                    flexWrap: 'wrap',
                     gap: 6,
                   }}
                 >
@@ -443,6 +446,22 @@ export function IosTransfersTabView(props: IosTransfersTabViewProps): React.JSX.
                     {item.senderDeviceName || platformBadgeText(item.senderPlatform)} ·{' '}
                     {platformBadgeText(item.senderPlatform)}
                   </Text>
+                  {isSystemShare && (
+                    <View
+                      style={{
+                        backgroundColor: theme.accentSoft,
+                        borderWidth: 1,
+                        borderColor: theme.accentBorder,
+                        borderRadius: 999,
+                        paddingHorizontal: 7,
+                        paddingVertical: 1,
+                      }}
+                    >
+                      <Text style={{ fontSize: 10, fontWeight: '700', color: theme.accent }}>
+                        系统分享 · 发送
+                      </Text>
+                    </View>
+                  )}
                   <Text style={{ fontSize: 10, color: theme.textTertiary }}>
                     {formatIosTime(item.createdAt)}
                   </Text>
@@ -587,7 +606,7 @@ export function IosTransfersTabView(props: IosTransfersTabViewProps): React.JSX.
                     <Text
                       style={{
                         fontSize: 13.5,
-                        lineHeight: 19,
+                        lineHeight: 1.45,
                         color: theme.textPrimary,
                       }}
                     >

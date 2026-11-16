@@ -15,15 +15,16 @@
 - **`BiometricPrompt` 指纹 / 面容快锁**：集成 `androidx.biometric:biometric`，支持 6 位快捷 PIN 码与系统生物识别秒级恢复内存 `DEK` 解锁保险库。
 - **`FLAG_SECURE` 防截屏与后台遮蔽**：在 `MainActivity.onCreate` 首帧渲染前默认挂载 `WindowManager.LayoutParams.FLAG_SECURE`，防止多任务切换卡片泄密及恶意录屏，可在「安全」页按需切换。
 - **Android 13+ 敏感剪贴板遮罩与定时擦除**：复制密码或 2FA 验证码时自动标记 `ClipDescription.EXTRA_IS_SENSITIVE` 隐藏系统悬浮预览，并在 30 秒后通过常量时间 `SHA-256` 摘要比对精准擦除剪贴板。
-- **系统分享菜单（`Intent.ACTION_SEND`）与一键配对深链（`privatespace://pair`）**：支持从外部 App 直接将链接/文本「分享」至 PrivateSpace 客户端加密入库；支持点击或粘贴 `privatespace://pair?server=...&vault=...` 配对码一键填入自部署服务器地址。
+- **系统任意文件分享「发送」（`.ShareSendAlias` + Direct Share）与一键配对深链（`privatespace://pair`）**：在手机端其他任意 App（文件管理、微信、浏览器、相册等）选中任意单文件或多文件（`ACTION_SEND` / `ACTION_SEND_MULTIPLE`，`mimeType="*/*"`）调用系统分享时，点击 `PSS` 应用图标后直接显示唯一选项 **「发送」**；原生层将 `content://` 流暂存至私有缓存并由前端按 `64 KiB` 分片流式执行 `PSENC001`（`AES-256-GCM` + `StreamingSha256`）零知识加密发送至多端互传空间，完成后立即清理暂存文件；同时支持点击或粘贴 `privatespace://pair?server=...&vault=...` 配对码一键填入自部署服务器地址。
 - **局域网 HTTP 与私有根证书双兼容**：内置 WebCrypto + Pure-TS 双引擎密码学原语与 [`network_security_config.xml`](./android/app/src/main/res/xml/network_security_config.xml)，在家庭局域网 HTTP、Tailscale 或自签证书 HTTPS 下均能完整执行客户端端到端加密。
 
-### 2. 五大手机触控工作区
+### 2. 六大手机触控工作区
 1. **密码保险箱（`密码`）**：客户端解密渲染、实时刷新 RFC 6238 动态两步验证码（30s 倒计时）、安全健康评分与风险过滤（弱口令 / 重复密码 / 未开启 2FA）、CSPRNG 随机密码与助记词组生成器、CSV 本地加密批量导入、自定义隐藏字段与历史密码版本回溯。
 2. **加密相册（`相册`）**：支持手机相机直拍与相册多选原图在本地提取缩略图并封装为 `PSENC001` 密文上传、加密相册目录管理、暗房级全屏查看器（90° 旋转、双倍缩放、幻灯片轮播）与 `.psenc` 分块密文透视。
 3. **私密影院（`影院`）**：`512 KiB` 客户端分片加密断点续传 + `SHA-256` 校验上传手机 4K 视频，客户端拉取 `.psenc` 密文流并在本机内存执行 `AES-256-GCM` 解密播放、支持 `±10s` 快进退与倍速控制。
 4. **私密笔记（`笔记`）**：支持 Markdown 源码编辑与安全渲染预览切换、单手快捷排版工具栏、待办清单交互勾选、置顶/归档/回收站与永久覆写销毁。
-5. **安全中心（`安全`）**：深浅双色主题、防截屏护盾开关、剪贴板自动擦除开关、6 位 PIN + 生物识别配置、多端在线设备管理与远程一键吊销、客户端零重写主密码轮换（KEK 重封装）以及底层 `ZERO_KNOWLEDGE_E2EE_V2` / `PSENC001` 密文十六进制透视器。
+5. **多端互传空间（`互传`）**：跨 Android / iOS / 桌面网页端到端零知识加密接收与发送任意类型文件（文档、压缩包、APK/IPA 安装包、代码配置、影音文件等），支持分类检索、来源设备与「系统分享发送」溯源标记、本地解密在线预览、通过原生 `FileProvider` 导出/二次分享至其他应用及全零覆写销毁。
+6. **安全中心（`安全`）**：深浅双色主题、防截屏护盾开关、剪贴板自动擦除开关、6 位 PIN + 生物识别配置、多端在线设备管理与远程一键吊销、客户端零重写主密码轮换（KEK 重封装）以及底层 `ZERO_KNOWLEDGE_E2EE_V2` / `PSENC001` 密文十六进制透视器。
 
 ---
 

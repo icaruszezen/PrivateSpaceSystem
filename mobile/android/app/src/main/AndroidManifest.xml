@@ -26,13 +26,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Android System Share Sheet -> PSS Quick Note -->
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="text/plain" />
-            </intent-filter>
-
             <!-- Quick-Pair URI scheme: pss://pair?server=... & privatespace://pair?server=... -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
@@ -46,7 +39,34 @@
                     android:host="pair" />
             </intent-filter>
 
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/share_shortcuts" />
+
         </activity>
+
+        <!-- Android System Share Sheet -> PSS icon -> sole action option "发送" for any file(s) (*/*) -->
+        <activity-alias
+            android:name=".ShareSendAlias"
+            android:targetActivity=".MainActivity"
+            android:label="@string/share_action_send"
+            android:icon="@mipmap/ic_launcher"
+            android:roundIcon="@mipmap/ic_launcher_round"
+            android:exported="true">
+
+            <intent-filter android:label="@string/share_action_send">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+            <intent-filter android:label="@string/share_action_send">
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+
+        </activity-alias>
 
         <provider
             android:name="androidx.core.content.FileProvider"

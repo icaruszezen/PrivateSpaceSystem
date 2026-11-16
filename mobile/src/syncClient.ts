@@ -107,6 +107,7 @@ import type {
   SyncPullResponse,
   TransferDecryptedPayload,
   TransferItem,
+  TransferSourceVia,
   UpdateChannel,
   UpdateMediaRequest,
   UpdateNoteRequest,
@@ -2785,6 +2786,7 @@ export class PrivateSpaceMobileClient {
     replyToId?: string | null;
     replyPreview?: string | null;
     tags?: string[];
+    sourceVia?: TransferSourceVia;
     isPinned?: boolean;
     chunkBytes?: number;
     forceResumable?: boolean;
@@ -2807,7 +2809,11 @@ export class PrivateSpaceMobileClient {
       params.filename,
       params.mimeType || params.file?.type || '',
     );
-    const mergedTags = normalizeTags([...(params.tags ?? []), '多端互传']);
+    const extraTags = [
+      ...(params.tags ?? []),
+      ...(params.sourceVia === 'system-share' ? ['system-share'] : []),
+    ];
+    const mergedTags = normalizeTags([...extraTags, '多端互传']);
 
     // 1. Auto-archive Images & Videos into Encrypted Photo Gallery / Video Cinema
     if (
@@ -2835,6 +2841,7 @@ export class PrivateSpaceMobileClient {
         senderSessionId,
         senderDeviceName,
         senderPlatform,
+        sourceVia: params.sourceVia,
         originalFilename: params.filename,
         mimeType: media.mimeType,
         fileCategory: mediaKind,
@@ -2847,7 +2854,7 @@ export class PrivateSpaceMobileClient {
         linkedMediaId: media.id,
         replyToId: params.replyToId ?? null,
         replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
-        tags: normalizeTags(params.tags ?? []),
+        tags: normalizeTags(extraTags),
       };
 
       const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -2983,6 +2990,7 @@ export class PrivateSpaceMobileClient {
           senderSessionId,
           senderDeviceName,
           senderPlatform,
+          sourceVia: params.sourceVia,
           originalFilename: params.filename,
           mimeType: classification.normalizedMimeType,
           fileCategory: classification.fileCategory,
@@ -2995,7 +3003,7 @@ export class PrivateSpaceMobileClient {
           linkedMediaId: null,
           replyToId: params.replyToId ?? null,
           replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
-          tags: normalizeTags(params.tags ?? []),
+          tags: normalizeTags(extraTags),
         };
 
         const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -3044,6 +3052,7 @@ export class PrivateSpaceMobileClient {
       senderSessionId,
       senderDeviceName,
       senderPlatform,
+      sourceVia: params.sourceVia,
       originalFilename: params.filename,
       mimeType: classification.normalizedMimeType,
       fileCategory: classification.fileCategory,
@@ -3056,7 +3065,7 @@ export class PrivateSpaceMobileClient {
       linkedMediaId: null,
       replyToId: params.replyToId ?? null,
       replyPreview: params.replyPreview ? params.replyPreview.slice(0, 240) : null,
-      tags: normalizeTags(params.tags ?? []),
+      tags: normalizeTags(extraTags),
     };
 
     const envelope = await encryptItemPayload(dek, transferId, 'transfer', 1, payload);
@@ -3107,6 +3116,7 @@ export class PrivateSpaceMobileClient {
       senderSessionId: current.senderSessionId,
       senderDeviceName: current.senderDeviceName,
       senderPlatform: current.senderPlatform,
+      sourceVia: current.sourceVia,
       originalFilename: current.originalFilename,
       mimeType: current.mimeType,
       fileCategory: current.fileCategory,

@@ -344,6 +344,17 @@ private struct TransferMessageBubbleView: View {
                     Text(item.senderDeviceName)
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
+                    if item.sourceVia == .systemShare || item.tags.contains("system-share") {
+                        Label("系统分享 · 发送", systemImage: "paperplane.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(MineralPineTheme.primaryAccent(for: colorScheme))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                MineralPineTheme.primaryAccent(for: colorScheme).opacity(0.12),
+                                in: Capsule()
+                            )
+                    }
                     Spacer(minLength: 8)
                     if item.isPinned {
                         Image(systemName: "star.fill")

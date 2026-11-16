@@ -2256,5 +2256,85 @@ select {
   cursor: not-allowed;
 }
 
+/* ==================== System Share ("发送") Sheet & Badges ==================== */
 
+.m-transfer-hero-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--m-accent-soft);
+  border: 1px solid var(--m-accent-border);
+  color: var(--m-accent);
+  flex-shrink: 0;
+}
 
+.m-share-e2ee-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--m-accent-soft);
+  border: 1px solid var(--m-accent-border);
+  margin-bottom: 12px;
+}
+
+.m-share-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 248px;
+  overflow-y: auto;
+}
+
+.m-share-file-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--m-border);
+  background: var(--m-bg-subtle);
+}
+
+.m-transfer-cat-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px solid var(--m-border);
+  background: var(--m-bg-elevated);
+  color: var(--m-accent);
+  flex-shrink: 0;
+}
+
+.m-transfer-cat-box.is-package {
+  background: var(--m-amber-soft);
+  color: var(--m-amber);
+  border-color: rgba(180, 118, 22, 0.24);
+}
+
+.m-progress-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--m-border);
+  overflow: hidden;
+}
+
+.m-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--m-accent);
+  transition: width 160ms ease;
+}
+
+.m-tr-share-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  background: var(--m-accent-soft);
+  border: 1px solid var(--m-accent-border);
+  color: var(--m-accent);
+}

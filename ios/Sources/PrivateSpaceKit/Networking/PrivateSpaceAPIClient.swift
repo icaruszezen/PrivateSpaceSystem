@@ -45,7 +45,7 @@ public actor PrivateSpaceAPIClient {
     private var baseURLString: String
     private var sessionToken: String?
     private var masterDek: Data?
-    private let deviceName: String
+    public nonisolated let deviceName: String
     private let session: URLSession
     private let streamSession: URLSession
 
@@ -1180,6 +1180,7 @@ public actor PrivateSpaceAPIClient {
         mimeType: String = "",
         caption: String = "",
         tags: [String] = [],
+        sourceVia: TransferSourceVia? = nil,
         replyToId: String? = nil,
         replyPreview: String? = nil,
         chunkBytes: Int = 512 * 1024,
@@ -1187,7 +1188,8 @@ public actor PrivateSpaceAPIClient {
     ) async throws -> (transfer: TransferItem, archivedMedia: MediaItem?) {
         let dek = try requireUnlockedDek()
         let classified = VaultE2EECrypto.classifyTransferFile(filename: filename, mimeType: mimeType)
-        let normalizedTags = VaultE2EECrypto.normalizeTags(["多端互传"] + tags)
+        let extraTags = tags + (sourceVia == .systemShare ? ["system-share"] : [])
+        let normalizedTags = VaultE2EECrypto.normalizeTags(["多端互传"] + extraTags)
 
         // 1. Auto-ingest images & videos into Image / Video Library with zero duplicate ciphertext storage
         if classified.messageKind == .image || classified.messageKind == .video {
@@ -1211,6 +1213,7 @@ public actor PrivateSpaceAPIClient {
                 senderSessionId: nil,
                 senderDeviceName: deviceName,
                 senderPlatform: .ios,
+                sourceVia: sourceVia,
                 originalFilename: filename,
                 mimeType: classified.normalizedMimeType,
                 fileCategory: classified.fileCategory,
@@ -1338,6 +1341,7 @@ public actor PrivateSpaceAPIClient {
             senderSessionId: nil,
             senderDeviceName: deviceName,
             senderPlatform: .ios,
+            sourceVia: sourceVia,
             originalFilename: filename,
             mimeType: classified.normalizedMimeType,
             fileCategory: classified.fileCategory,
@@ -1402,6 +1406,7 @@ public actor PrivateSpaceAPIClient {
             senderSessionId: current.senderSessionId,
             senderDeviceName: current.senderDeviceName,
             senderPlatform: current.senderPlatform,
+            sourceVia: current.sourceVia,
             originalFilename: current.originalFilename,
             mimeType: current.mimeType,
             fileCategory: current.fileCategory,
