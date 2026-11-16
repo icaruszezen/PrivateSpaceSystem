@@ -959,7 +959,12 @@ public final class VaultStore {
                 snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, item.syncSeq)
             }
             try? localStore.saveSnapshot(snapshot)
-            showToast("成功导入 \(imported.count) 条加密密码")
+            let batchCount = (imported.count + PrivateSpaceAPIClient.passwordImportBatchSize - 1) / PrivateSpaceAPIClient.passwordImportBatchSize
+            if batchCount > 1 {
+                showToast("已自动分 \(batchCount) 批导入 \(imported.count) 条加密密码")
+            } else {
+                showToast("成功导入 \(imported.count) 条加密密码")
+            }
             return imported.count
         } catch {
             errorBanner = error.localizedDescription

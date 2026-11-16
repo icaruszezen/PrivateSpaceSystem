@@ -31,10 +31,16 @@ import {
   generateMemorablePassphrase,
   generateSecurePassword,
 } from '../src/shared/passwordGenerator.js';
+import {
+  chunkPasswordImportEntries,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  parsePasswordCsv,
+} from '../src/shared/passwordCsv.js';
 import type {
   EncryptedMediaUploadMetadata,
   EncryptedVaultRecordDto,
   MediaDecryptedPayload,
+  PasswordImportProgress,
   PasswordItem,
 } from '../src/shared/types.js';
 import { PrivateSpaceMobileClient } from '../mobile/src/syncClient.js';
@@ -534,6 +540,109 @@ describe('Passwords, TOTP, Client-Side PSENC001 Chunked Media, Blind HTTP 206 St
     expect(rawDb).not.toContain('root-admin@corp-vault.internal');
     expect(rawDb).not.toContain('AWS Root Console_SECRET_TITLE');
     expect(rawDb).not.toContain('ImportedGhPassword!42');
+  });
+
+  it('automatically splits >500 Google Chrome CSV passwords into 500-item encrypted batches with BOM & multiline notes support', async () => {
+    const { inst, dbPath } = bootTestApp();
+    const { app } = inst;
+
+    const client = new PrivateSpaceMobileClient({
+      baseUrl: 'http://privatespace.local',
+      platform: 'android',
+      deviceName: 'Chrome CSV Batch Importer',
+      fetchImpl: makeInProcessFetch(app),
+    });
+    const session = await client.setupAdmin({
+      password: 'BatchImportMaster#2026',
+      vaultName: 'ChromeLargeVault',
+    });
+
+    // Build a 1,125-entry Google Chrome CSV export (with UTF-8 BOM + quoted multiline note)
+    const totalRows = 1_125;
+    const csvLines: string[] = ['\uFEFFname,url,username,password,note'];
+    for (let i = 1; i <= totalRows; i++) {
+      if (i === 1) {
+        csvLines.push(
+          `"Google Cloud Prod #1",https://console.cloud.google.com,sre-1@corp.io,"ChromeSecret#0001","Recovery codes:\n1111-2222\nQuote ""escaped"" ok"`,
+        );
+      } else if (i === 501) {
+        // Empty name -> falls back to normalized domain
+        csvLines.push(
+          `,https://www.cloudflare-batch2.com/login,ops-501@corp.io,BatchTwoBoundaryPass#501,Second batch boundary`,
+        );
+      } else {
+        csvLines.push(
+          `Chrome Account #${i},https://service-${i}.example.com,user${i}@example.com,ChromeVaultPass#${i},Imported note ${i}`,
+        );
+      }
+    }
+
+    const parsed = parsePasswordCsv(csvLines.join('\r\n'));
+    expect(parsed).toHaveLength(totalRows);
+    expect(parsed[0].title).toBe('Google Cloud Prod #1');
+    expect(parsed[0].notes).toBe('Recovery codes:\n1111-2222\nQuote "escaped" ok');
+    expect(parsed[500].title).toBe('cloudflare-batch2.com');
+
+    const chunks = chunkPasswordImportEntries(parsed);
+    expect(PASSWORD_IMPORT_BATCH_SIZE).toBe(500);
+    expect(chunks.map((c) => c.length)).toEqual([500, 500, 125]);
+
+    const progressSnapshots: PasswordImportProgress[] = [];
+    const imported = await client.importPasswords(parsed, {
+      onProgress: (prog) => {
+        progressSnapshots.push({ ...prog });
+      },
+    });
+
+    expect(imported).toHaveLength(totalRows);
+    expect(imported[0].password).toBe('ChromeSecret#0001');
+    expect(imported[500].password).toBe('BatchTwoBoundaryPass#501');
+    expect(imported[1124].title).toBe('Chrome Account #1125');
+    expect(imported[1124].password).toBe('ChromeVaultPass#1125');
+
+    // Progress must cover batches 1, 2, 3 and final completed state
+    expect(progressSnapshots.some((p) => p.batchIndex === 1 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots.some((p) => p.batchIndex === 2 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots.some((p) => p.batchIndex === 3 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots[progressSnapshots.length - 1]).toEqual({
+      phase: 'completed',
+      batchIndex: 3,
+      totalBatches: 3,
+      processedCount: totalRows,
+      totalCount: totalRows,
+    });
+
+    // Server must hold all 1,125 encrypted records
+    const listRes = await app.request('/api/v1/passwords', {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listJson = (await listRes.json()) as { items: EncryptedVaultRecordDto[] };
+    expect(listJson.items).toHaveLength(totalRows);
+
+    // Direct raw API call exceeding 500 items in a single request must return 400 BATCH_LIMIT_EXCEEDED
+    const oversizedItems = Array.from({ length: 501 }, (_, idx) => ({
+      id: randomUuid(),
+      revision: 1,
+      envelope: listJson.items[idx % listJson.items.length].envelope,
+    }));
+    const oversizedRes = await app.request('/api/v1/passwords/import', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: oversizedItems }),
+    });
+    expect(oversizedRes.status).toBe(400);
+    const oversizedErr = (await oversizedRes.json()) as { error: { code: string } };
+    expect(oversizedErr.error.code).toBe('BATCH_LIMIT_EXCEEDED');
+
+    // Zero plaintext proof on SQLite even for batch #3 (entry #1125)
+    inst.db.exec('PRAGMA wal_checkpoint(FULL);');
+    const rawDb = fs.readFileSync(dbPath).toString('utf8');
+    expect(rawDb).not.toContain('ChromeVaultPass#1125');
+    expect(rawDb).not.toContain('BatchTwoBoundaryPass#501');
   });
 
   it('handles client-encrypted multipart images, resumable PSENC001 MP4 videos, HTTP 206 range decryption, and Android + iOS delta sync', async () => {

@@ -33,12 +33,19 @@ import {
   evaluatePasswordEntropy,
   generateSecurePassword,
 } from '@shared/passwordGenerator';
+import {
+  chunkPasswordImportEntries,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  parsePasswordCsv,
+} from '@shared/passwordCsv';
 import { parseTotpInput, tryGenerateTotp } from '@shared/totp';
 import type {
   CreatePasswordRequest,
   ImportPasswordEntryInput,
   PasswordCategory,
   PasswordCustomField,
+  PasswordImportOptions,
+  PasswordImportProgress,
   PasswordItem,
   UpdatePasswordRequest,
 } from '@shared/types';
@@ -70,7 +77,10 @@ interface PasswordVaultViewProps {
   selectedId: string | null;
   onSelectId: (id: string | null) => void;
   onCreatePassword: (input: CreatePasswordRequest) => Promise<PasswordItem>;
-  onImportPasswords: (entries: ImportPasswordEntryInput[]) => Promise<number>;
+  onImportPasswords: (
+    entries: ImportPasswordEntryInput[],
+    options?: PasswordImportOptions,
+  ) => Promise<{ count: number; batchCount: number }>;
   onUpdatePassword: (id: string, patch: UpdatePasswordRequest) => Promise<PasswordItem>;
   onDeletePermanent: (id: string) => Promise<void>;
   onEmptyTrash: () => Promise<void>;
@@ -122,17 +132,22 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  // Modals
+  // Modals & CSV Batch Import state
   const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [csvModalOpen, setCsvModalOpen] = useState(false);
+  const [importProgress, setImportProgress] = useState<PasswordImportProgress | null>(null);
+  const [lastBatchSummary, setLastBatchSummary] = useState<{
+    count: number;
+    batchCount: number;
+    sourceName?: string;
+  } | null>(null);
   const [formState, setFormState] = useState<{
     open: boolean;
     editing: PasswordItem | null;
     defaultCategory?: PasswordCategory;
   }>({ open: false, editing: null });
 
-  const csvInputRef = useRef<HTMLInputElement | null>(null);
   const copyTimerRef = useRef<number | null>(null);
-
   useEffect(() => {
     return () => {
       if (copyTimerRef.current !== null) {
@@ -298,68 +313,36 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
     onNotify(`${label}已复制到剪贴板`);
   }
 
-  async function handleCsvFile(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    e.target.value = '';
-    if (!file) return;
-
-    const text = await file.text();
-    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length < 2) {
-      onNotify('CSV 文件为空或格式不正确');
-      return;
+  async function executeBatchImport(
+    entries: ImportPasswordEntryInput[],
+    sourceName?: string,
+  ): Promise<{ count: number; batchCount: number }> {
+    if (entries.length === 0) {
+      onNotify('未解析到有效的 CSV 密码记录');
+      return { count: 0, batchCount: 0 };
     }
 
-    const parseCsvRow = (line: string): string[] => {
-      const cols: string[] = [];
-      let cur = '';
-      let inQuotes = false;
-      for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (ch === '"') {
-          if (inQuotes && line[i + 1] === '"') {
-            cur += '"';
-            i++;
-          } else {
-            inQuotes = !inQuotes;
-          }
-        } else if (ch === ',' && !inQuotes) {
-          cols.push(cur.trim());
-          cur = '';
-        } else {
-          cur += ch;
-        }
-      }
-      cols.push(cur.trim());
-      return cols;
-    };
-
-    const headers = parseCsvRow(lines[0]).map((h) => h.toLowerCase());
-    const idxTitle = headers.findIndex((h) => /name|title|标题|名称/.test(h));
-    const idxUrl = headers.findIndex((h) => /url|website|网址/.test(h));
-    const idxUser = headers.findIndex((h) => /user|login|account|账号|用户名/.test(h));
-    const idxPass = headers.findIndex((h) => /pass|密码/.test(h));
-    const idxTotp = headers.findIndex((h) => /totp|otp|2fa/.test(h));
-    const idxNotes = headers.findIndex((h) => /note|extra|备注/.test(h));
-
-    const entries: ImportPasswordEntryInput[] = [];
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCsvRow(lines[i]);
-      const password = idxPass >= 0 ? row[idxPass] || '' : '';
-      const title = idxTitle >= 0 ? row[idxTitle] || '' : idxUrl >= 0 ? row[idxUrl] || '' : '';
-      if (!title && !password) continue;
-      entries.push({
-        title: title || 'CSV 导入账号',
-        url: idxUrl >= 0 ? row[idxUrl] : '',
-        username: idxUser >= 0 ? row[idxUser] : '',
-        password,
-        totpSecret: idxTotp >= 0 ? row[idxTotp] : '',
-        notes: idxNotes >= 0 ? row[idxNotes] : '',
+    setLastBatchSummary(null);
+    try {
+      const res = await onImportPasswords(entries, {
+        onProgress: (prog) => {
+          setImportProgress(prog);
+        },
       });
+      setLastBatchSummary({
+        count: res.count,
+        batchCount: res.batchCount,
+        sourceName,
+      });
+      if (res.batchCount > 1) {
+        onNotify(`已自动分 ${res.batchCount} 批加密导入 ${res.count} 条密码记录`);
+      } else {
+        onNotify(`成功加密导入 ${res.count} 条密码记录`);
+      }
+      return res;
+    } finally {
+      setImportProgress(null);
     }
-
-    const count = await onImportPasswords(entries);
-    onNotify(`成功加密导入 ${count} 条密码记录`);
   }
 
   const healthTone =
@@ -400,19 +383,14 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
             </div>
 
             <div className="notelist-controls pss-pwd-header-actions">
-              <input
-                ref={csvInputRef}
-                type="file"
-                accept=".csv,text/csv"
-                style={{ display: 'none' }}
-                onChange={(e) => void handleCsvFile(e)}
-              />
               <button
+                id="csv-import-btn"
                 type="button"
                 className="btn-icon pss-header-icon-btn"
-                title="从浏览器 / 1Password / Bitwarden CSV 导入"
+                title="从 Google Chrome / Apple 密码 / 1Password / Bitwarden CSV 自动分批导入"
                 aria-label="CSV 批量导入密码"
-                onClick={() => csvInputRef.current?.click()}
+                disabled={Boolean(importProgress)}
+                onClick={() => setCsvModalOpen(true)}
               >
                 <Upload size={15} />
               </button>
@@ -436,6 +414,65 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
               </button>
             </div>
           </div>
+
+          {importProgress ? (
+            <div className="pss-batch-banner is-running" role="status" aria-live="polite">
+              <div className="pss-batch-banner-top">
+                <span className="pss-batch-banner-title">
+                  <RefreshCw size={13} className="pss-spin" />
+                  <span>
+                    正在分批加密导入 · 第 {importProgress.batchIndex} / {importProgress.totalBatches}{' '}
+                    批
+                  </span>
+                </span>
+                <span className="mono pss-batch-banner-meta">
+                  {importProgress.processedCount} / {importProgress.totalCount}
+                </span>
+              </div>
+              <div className="pss-health-bar" aria-hidden="true">
+                <span
+                  className="pss-health-bar-fill"
+                  style={{
+                    width: `${Math.max(
+                      8,
+                      Math.round(
+                        ((importProgress.batchIndex -
+                          (importProgress.phase === 'uploading' ? 0.35 : 0.7)) /
+                          Math.max(1, importProgress.totalBatches)) *
+                          100,
+                      ),
+                    )}%`,
+                  }}
+                />
+              </div>
+            </div>
+          ) : lastBatchSummary ? (
+            <div className="pss-batch-banner is-done" role="status">
+              <div className="pss-batch-banner-top">
+                <span className="pss-batch-banner-title">
+                  <ShieldCheck size={13} style={{ color: 'var(--accent)' }} />
+                  <span>
+                    {lastBatchSummary.batchCount > 1
+                      ? `已自动分 ${lastBatchSummary.batchCount} 批导入 ${lastBatchSummary.count} 条密码`
+                      : `已加密导入 ${lastBatchSummary.count} 条密码`}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  className="btn-icon"
+                  style={{ width: 20, height: 20 }}
+                  onClick={() => setLastBatchSummary(null)}
+                  aria-label="关闭导入提示"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+              <span className="pss-batch-banner-sub">
+                {lastBatchSummary.sourceName ? `${lastBatchSummary.sourceName} · ` : ''}
+                每批上限 {PASSWORD_IMPORT_BATCH_SIZE} 条 · 客户端零知识 AES-256-GCM
+              </span>
+            </div>
+          ) : null}
 
           {/* Security Health Audit Banner (Password Strength, Reuse & Rotation — 2FA never penalized) */}
           <div className="pss-health-card">
@@ -822,7 +859,8 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => csvInputRef.current?.click()}
+                    disabled={Boolean(importProgress)}
+                    onClick={() => setCsvModalOpen(true)}
                   >
                     <Upload size={15} />
                     <span>导入 CSV</span>
@@ -1378,6 +1416,21 @@ export const PasswordVaultView: React.FC<PasswordVaultViewProps> = ({
         onClose={() => setGeneratorOpen(false)}
         onNotify={onNotify}
       />
+
+      {csvModalOpen && (
+        <PasswordCsvImportModal
+          progress={importProgress}
+          onClose={() => {
+            if (!importProgress) setCsvModalOpen(false);
+          }}
+          onImport={async (entries, sourceName) => {
+            const res = await executeBatchImport(entries, sourceName);
+            if (res.count > 0) {
+              setCsvModalOpen(false);
+            }
+          }}
+        />
+      )}
 
       {formState.open && (
         <PasswordEditorModal
@@ -2025,5 +2078,310 @@ const PasswordEditorModal: React.FC<PasswordEditorModalProps> = ({
         onNotify={onNotify}
       />
     </>
+  );
+};
+
+interface PasswordCsvImportModalProps {
+  progress: PasswordImportProgress | null;
+  onClose: () => void;
+  onImport: (entries: ImportPasswordEntryInput[], sourceName?: string) => Promise<void>;
+}
+
+const PasswordCsvImportModal: React.FC<PasswordCsvImportModalProps> = ({
+  progress,
+  onClose,
+  onImport,
+}) => {
+  const [csvText, setCsvText] = useState('');
+  const [fileName, setFileName] = useState<string>('');
+  const [dragOver, setDragOver] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const parsedEntries = useMemo(() => parsePasswordCsv(csvText), [csvText]);
+  const batches = useMemo(() => chunkPasswordImportEntries(parsedEntries), [parsedEntries]);
+  const isImporting = Boolean(progress);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !isImporting) {
+        onClose();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isImporting, onClose]);
+
+  async function loadCsvFile(file: File) {
+    setError(null);
+    try {
+      const content = await file.text();
+      setFileName(file.name);
+      setCsvText(content);
+      if (parsePasswordCsv(content).length === 0) {
+        setError('未在该 CSV 文件中识别到有效账号密码，请确认首行包含表头（如 name,url,username,password,note）');
+      }
+    } catch {
+      setError('读取 CSV 文件失败，请检查文件权限或编码格式');
+    }
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (parsedEntries.length === 0 || isImporting) return;
+    setError(null);
+    try {
+      await onImport(parsedEntries, fileName || undefined);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '分批加密导入失败');
+    }
+  }
+
+  const progressPercent = progress
+    ? Math.min(
+        98,
+        Math.max(
+          8,
+          Math.round(
+            ((progress.batchIndex - (progress.phase === 'uploading' ? 0.35 : 0.7)) /
+              Math.max(1, progress.totalBatches)) *
+              100,
+          ),
+        ),
+      )
+    : 0;
+
+  return (
+    <div
+      className="modal-backdrop"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !isImporting) onClose();
+      }}
+    >
+      <form
+        className="modal-dialog pss-editor-dialog"
+        style={{ maxWidth: 620 }}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="csv-import-modal-title"
+        onSubmit={(e) => void handleSubmit(e)}
+      >
+        <header className="modal-header">
+          <div className="modal-title-wrap">
+            <Upload size={18} style={{ color: 'var(--accent)' }} />
+            <h2 id="csv-import-modal-title" className="modal-title">
+              CSV 密码批量加密导入
+            </h2>
+          </div>
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={onClose}
+            disabled={isImporting}
+            aria-label="关闭"
+          >
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="modal-body pss-editor-form-body">
+          <input
+            id="csv-file-picker-input"
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) void loadCsvFile(f);
+            }}
+          />
+
+          <div
+            className={`pss-csv-dropzone ${dragOver ? 'is-dragover' : ''}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setDragOver(true);
+            }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) void loadCsvFile(f);
+            }}
+            onClick={() => {
+              if (!isImporting) fileInputRef.current?.click();
+            }}
+          >
+            <div className="pss-csv-dropzone-icon">
+              <Upload size={18} />
+            </div>
+            <div className="pss-csv-dropzone-copy">
+              <strong>
+                {fileName ? `已载入文件：${fileName}` : '点击选择或拖入 Google Chrome 密码 CSV 文件'}
+              </strong>
+              <span>
+                兼容 Chrome (name,url,username,password,note)、Apple 密码、1Password、Bitwarden；超过{' '}
+                {PASSWORD_IMPORT_BATCH_SIZE} 条自动分批加密上传
+              </span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ height: 30, padding: '0 11px', fontSize: '0.78rem', flexShrink: 0 }}
+              disabled={isImporting}
+              onClick={(e) => {
+                e.stopPropagation();
+                fileInputRef.current?.click();
+              }}
+            >
+              选择文件
+            </button>
+          </div>
+
+          <div className="field-group">
+            <div className="field-label">
+              <span>或直接粘贴 CSV 内容（本地内存解析，不上传明文）</span>
+              {csvText && !isImporting ? (
+                <button
+                  type="button"
+                  className="pss-link-mini"
+                  onClick={() => {
+                    setCsvText('');
+                    setFileName('');
+                    setError(null);
+                  }}
+                >
+                  清空内容
+                </button>
+              ) : null}
+            </div>
+            <textarea
+              id="csv-import-textarea"
+              className="field-input pss-modal-textarea mono"
+              style={{ minHeight: 108, fontSize: '0.77rem' }}
+              disabled={isImporting}
+              placeholder={
+                'name,url,username,password,note\nGitHub,https://github.com,dev@example.com,StrongPass!2026,主研发账号\nCloudflare,https://dash.cloudflare.com,ops@example.com,DnsVault#99,生产域名托管'
+              }
+              value={csvText}
+              onChange={(e) => {
+                setCsvText(e.target.value);
+                if (error) setError(null);
+              }}
+            />
+          </div>
+
+          {parsedEntries.length > 0 && (
+            <div className="pss-csv-plan-card" data-testid="csv-batch-plan-card">
+              <div className="pss-csv-plan-header">
+                <div className="pss-csv-plan-title">
+                  <ShieldCheck size={15} style={{ color: 'var(--accent)' }} />
+                  <span>
+                    已解析 <strong className="mono">{parsedEntries.length}</strong> 条有效凭据
+                  </span>
+                </div>
+                <span className={`pss-health-tag ${batches.length > 1 ? 'is-warn' : 'is-good'}`}>
+                  {batches.length > 1
+                    ? `超 ${PASSWORD_IMPORT_BATCH_SIZE} 条 · 自动分 ${batches.length} 批导入`
+                    : `单批直传 (1 / 1 批)`}
+                </span>
+              </div>
+
+              {batches.length > 1 && (
+                <div className="pss-csv-batch-pills" aria-label="自动分批拆分计划">
+                  {batches.slice(0, 6).map((b, idx) => (
+                    <span
+                      key={idx}
+                      className={`pss-csv-batch-pill ${
+                        progress && progress.batchIndex === idx + 1 ? 'is-current' : ''
+                      } ${progress && progress.batchIndex > idx + 1 ? 'is-completed' : ''}`}
+                    >
+                      第 {idx + 1} 批 · {b.length} 条
+                    </span>
+                  ))}
+                  {batches.length > 6 && (
+                    <span className="pss-csv-batch-pill">… 共 {batches.length} 批</span>
+                  )}
+                </div>
+              )}
+
+              <div className="pss-csv-preview-list" aria-label="解析条目预览">
+                {parsedEntries.slice(0, 4).map((entry, idx) => (
+                  <div key={idx} className="pss-csv-preview-row">
+                    <span className="pss-csv-preview-name">{entry.title}</span>
+                    <span className="pss-csv-preview-user mono">
+                      {entry.username || extractDisplayHost(entry.url || '') || '—'}
+                    </span>
+                    <span className="pss-csv-preview-mask mono">••••••••</span>
+                  </div>
+                ))}
+                {parsedEntries.length > 4 && (
+                  <div className="pss-csv-preview-more">
+                    其余 {parsedEntries.length - 4} 条凭据将在本地逐条派生子密钥并封装为 AES-256-GCM 密文
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {progress && (
+            <div className="pss-csv-progress-box" role="status" aria-live="polite">
+              <div className="pss-csv-progress-top">
+                <span>
+                  <RefreshCw size={13} className="pss-spin" /> 正在执行第{' '}
+                  <strong className="mono">
+                    {progress.batchIndex} / {progress.totalBatches}
+                  </strong>{' '}
+                  批 ·{' '}
+                  {progress.phase === 'encrypting'
+                    ? '本地 AES-256-GCM 逐条加密中'
+                    : '正在上传加密信封至密文库'}
+                </span>
+                <span className="mono">
+                  已完成 {progress.processedCount} / {progress.totalCount} 条 ({progressPercent}%)
+                </span>
+              </div>
+              <div className="pss-health-bar" style={{ height: 6 }}>
+                <span
+                  className="pss-health-bar-fill"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+            </div>
+          )}
+
+          {error && <div className="auth-error">{error}</div>}
+        </div>
+
+        <footer className="pss-modal-footer">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onClose}
+            disabled={isImporting}
+          >
+            取消
+          </button>
+          <button
+            id="csv-confirm-import-btn"
+            type="submit"
+            className="btn btn-primary"
+            disabled={parsedEntries.length === 0 || isImporting}
+          >
+            <ShieldCheck size={15} />
+            <span>
+              {isImporting
+                ? `正在分批加密导入 (${progress?.batchIndex}/${progress?.totalBatches} 批)...`
+                : batches.length > 1
+                  ? `自动分 ${batches.length} 批加密导入 (${parsedEntries.length} 条)`
+                  : `AES-256-GCM 加密导入 (${parsedEntries.length} 条)`}
+            </span>
+          </button>
+        </footer>
+      </form>
+    </div>
   );
 };

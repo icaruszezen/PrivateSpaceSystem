@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
+import { parsePasswordCsv } from '@shared/passwordCsv';
 import type { ImportPasswordEntryInput, PasswordCategory } from '@shared/types';
 
 export const PASSWORD_CATEGORIES: Array<{ id: PasswordCategory; label: string }> = [
@@ -109,57 +110,7 @@ export function toggleMarkdownTaskAtIndex(markdown: string, targetIndex: number)
 }
 
 export function parsePasswordCsvText(text: string): ImportPasswordEntryInput[] {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (lines.length < 2) return [];
-
-  const parseRow = (line: string): string[] => {
-    const cols: string[] = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          cur += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (ch === ',' && !inQuotes) {
-        cols.push(cur.trim());
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    cols.push(cur.trim());
-    return cols;
-  };
-
-  const headers = parseRow(lines[0]).map((h) => h.toLowerCase());
-  const idxTitle = headers.findIndex((h) => /name|title|标题|名称/.test(h));
-  const idxUrl = headers.findIndex((h) => /url|website|网址/.test(h));
-  const idxUser = headers.findIndex((h) => /user|login|account|账号|用户名/.test(h));
-  const idxPass = headers.findIndex((h) => /pass|密码/.test(h));
-  const idxTotp = headers.findIndex((h) => /totp|otp|2fa/.test(h));
-  const idxNotes = headers.findIndex((h) => /note|extra|备注/.test(h));
-
-  const entries: ImportPasswordEntryInput[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const row = parseRow(lines[i]);
-    const password = idxPass >= 0 ? row[idxPass] || '' : '';
-    const title = idxTitle >= 0 ? row[idxTitle] || '' : idxUrl >= 0 ? row[idxUrl] || '' : '';
-    if (!title && !password) continue;
-    entries.push({
-      title: title || 'CSV 导入账号',
-      url: idxUrl >= 0 ? row[idxUrl] : '',
-      username: idxUser >= 0 ? row[idxUser] : '',
-      password,
-      totpSecret: idxTotp >= 0 ? row[idxTotp] : '',
-      notes: idxNotes >= 0 ? row[idxNotes] : '',
-    });
-  }
-  return entries;
+  return parsePasswordCsv(text);
 }
 
 export function extractMonogram(title: string, url?: string): string {

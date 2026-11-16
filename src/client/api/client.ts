@@ -31,6 +31,7 @@ import {
   unwrapMasterDek,
   wrapBlobFek,
 } from '@shared/e2ee';
+import { chunkPasswordImportEntries } from '@shared/passwordCsv';
 import { CURRENT_APP_VERSION } from '@shared/appUpdate';
 import { probeMediaOnClient } from '@shared/mediaProbe';
 import type {
@@ -67,6 +68,7 @@ import type {
   NoteItem,
   PasswordDecryptedPayload,
   PasswordHistoryEntry,
+  PasswordImportOptions,
   PasswordItem,
   SessionInfo,
   SetupRequest,
@@ -575,43 +577,84 @@ export const api = {
 
   async importPasswords(
     entries: ImportPasswordEntryInput[],
-  ): Promise<{ imported: PasswordItem[]; count: number }> {
+    options?: PasswordImportOptions,
+  ): Promise<{ imported: PasswordItem[]; count: number; batchCount: number }> {
     const dek = requireUnlockedDek();
-    const now = new Date().toISOString();
-    const items: CreateEncryptedItemRequest[] = [];
-
-    for (const entry of entries.slice(0, 500)) {
-      if (!entry.title && !entry.password && !entry.username) continue;
-      const id = randomUuid();
-      const payload: PasswordDecryptedPayload = {
-        title: (entry.title || entry.url || '导入凭据').trim().slice(0, 120),
-        username: (entry.username || '').trim().slice(0, 240),
-        password: entry.password || '',
-        url: (entry.url || '').trim().slice(0, 500),
-        totpSecret: (entry.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
-        category: entry.category || 'login',
-        notes: (entry.notes || '').slice(0, 10_000),
-        tags: normalizeTags(entry.tags ?? []),
-        customFields: [],
-        history: [],
-        passwordChangedAt: now,
-      };
-      const envelope = await encryptItemPayload(dek, id, 'password', 1, payload);
-      items.push({ id, revision: 1, envelope });
+    const batches = chunkPasswordImportEntries(entries, options?.batchSize);
+    if (batches.length === 0) {
+      return { imported: [], count: 0, batchCount: 0 };
     }
 
-    const res = await requestJson<{ items: EncryptedVaultRecordDto[]; count: number }>(
-      '/api/v1/passwords/import',
-      {
-        method: 'POST',
-        body: JSON.stringify({ items }),
-      },
-    );
+    const totalBatches = batches.length;
+    const totalCount = batches.reduce((sum, batch) => sum + batch.length, 0);
+    const allImported: PasswordItem[] = [];
+    let totalSavedCount = 0;
 
-    const imported = await Promise.all(
-      res.items.map((rec) => hydrateDecryptedPassword(dek, rec)),
-    );
-    return { imported, count: res.count };
+    for (let bIdx = 0; bIdx < totalBatches; bIdx++) {
+      const batch = batches[bIdx];
+      const batchIndex = bIdx + 1;
+
+      options?.onProgress?.({
+        phase: 'encrypting',
+        batchIndex,
+        totalBatches,
+        processedCount: allImported.length,
+        totalCount,
+      });
+
+      const now = new Date().toISOString();
+      const items: CreateEncryptedItemRequest[] = [];
+      for (const entry of batch) {
+        const id = randomUuid();
+        const payload: PasswordDecryptedPayload = {
+          title: (entry.title || entry.url || '导入凭据').trim().slice(0, 120),
+          username: (entry.username || '').trim().slice(0, 240),
+          password: entry.password || '',
+          url: (entry.url || '').trim().slice(0, 500),
+          totpSecret: (entry.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
+          category: entry.category || 'login',
+          notes: (entry.notes || '').slice(0, 10_000),
+          tags: normalizeTags(entry.tags ?? []),
+          customFields: [],
+          history: [],
+          passwordChangedAt: now,
+        };
+        const envelope = await encryptItemPayload(dek, id, 'password', 1, payload);
+        items.push({ id, revision: 1, envelope });
+      }
+
+      options?.onProgress?.({
+        phase: 'uploading',
+        batchIndex,
+        totalBatches,
+        processedCount: allImported.length,
+        totalCount,
+      });
+
+      const res = await requestJson<{ items: EncryptedVaultRecordDto[]; count: number }>(
+        '/api/v1/passwords/import',
+        {
+          method: 'POST',
+          body: JSON.stringify({ items }),
+        },
+      );
+
+      const batchHydrated = await Promise.all(
+        res.items.map((rec) => hydrateDecryptedPassword(dek, rec)),
+      );
+      allImported.push(...batchHydrated);
+      totalSavedCount += res.count;
+    }
+
+    options?.onProgress?.({
+      phase: 'completed',
+      batchIndex: totalBatches,
+      totalBatches,
+      processedCount: allImported.length,
+      totalCount,
+    });
+
+    return { imported: allImported, count: totalSavedCount, batchCount: totalBatches };
   },
 
   async updatePassword(id: string, input: UpdatePasswordRequest): Promise<{ password: PasswordItem }> {

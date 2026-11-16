@@ -990,24 +990,32 @@ struct PasswordCsvImportSheet: View {
     @Bindable var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     @State private var csvContent: String = ""
+    @State private var isImporting: Bool = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("粘贴 Apple 密码 / Chrome / 1Password / Bitwarden CSV") {
                     TextField(
-                        "name,url,username,password,totp\nGitHub,https://github.com,me@dev.io,Secret!123,JBSWY3DPEHPK3PXP",
+                        "name,url,username,password,note\nGitHub,https://github.com,me@dev.io,Secret!123,主研发账号",
                         text: $csvContent,
                         axis: .vertical
                     )
                     .font(.system(.caption, design: .monospaced))
                     .lineLimit(8...16)
+                    .disabled(isImporting)
                 }
                 Section {
                     let previewCount = PasswordSecurityEngine.parsePasswordCsv(csvContent).count
-                    Text("已识别可导入条目：\(previewCount) 条（入库后全量 AES-256-GCM 静态加密）")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    let batchSize = PrivateSpaceAPIClient.passwordImportBatchSize
+                    let batchCount = (previewCount + batchSize - 1) / batchSize
+                    Text(
+                        batchCount > 1
+                            ? "已识别可导入条目：\(previewCount) 条 · 将自动拆分为 \(batchCount) 批（每批最多 \(batchSize) 条）AES-256-GCM 加密上传"
+                            : "已识别可导入条目：\(previewCount) 条（入库后全量 AES-256-GCM 静态加密）"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(batchCount > 1 ? .primary : .secondary)
                 }
             }
             .navigationTitle("CSV 批量导入")
@@ -1015,15 +1023,18 @@ struct PasswordCsvImportSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(isImporting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("加密导入") {
+                    Button(isImporting ? "正在分批导入..." : "加密导入") {
                         Task {
+                            isImporting = true
+                            defer { isImporting = false }
                             let count = await store.importPasswordCsv(csvContent)
                             if count > 0 { dismiss() }
                         }
                     }
-                    .disabled(csvContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isImporting || csvContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

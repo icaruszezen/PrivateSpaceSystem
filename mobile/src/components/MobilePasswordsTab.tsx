@@ -33,6 +33,8 @@ import type {
   ImportPasswordEntryInput,
   PasswordCategory,
   PasswordCustomField,
+  PasswordImportOptions,
+  PasswordImportProgress,
   PasswordItem,
   UpdatePasswordRequest,
 } from '@shared/types';
@@ -50,7 +52,10 @@ interface MobilePasswordsTabProps {
   onUpdatePassword: (id: string, input: UpdatePasswordRequest) => Promise<void>;
   onDeletePermanent: (id: string) => Promise<void>;
   onEmptyTrash: () => Promise<void>;
-  onImportCsv: (entries: ImportPasswordEntryInput[]) => Promise<void>;
+  onImportCsv: (
+    entries: ImportPasswordEntryInput[],
+    options?: PasswordImportOptions,
+  ) => Promise<void>;
   onCopySensitive: (text: string, label: string) => Promise<void>;
   onInspectCipher: (itemId: string) => void;
   onNotify: (msg: string) => void;
@@ -352,6 +357,8 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
     }
   }
 
+  const [csvProgress, setCsvProgress] = useState<PasswordImportProgress | null>(null);
+
   async function handleCsvUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = '';
@@ -362,7 +369,13 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
       onNotify('未解析到有效的 CSV 密码记录');
       return;
     }
-    await onImportCsv(entries);
+    try {
+      await onImportCsv(entries, {
+        onProgress: (prog) => setCsvProgress(prog),
+      });
+    } finally {
+      setCsvProgress(null);
+    }
   }
 
   const detailTotp = useMemo(
@@ -470,11 +483,16 @@ export const MobilePasswordsTab: React.FC<MobilePasswordsTabProps> = ({
           type="button"
           className="m-btn m-btn-sm"
           style={{ height: 40 }}
+          disabled={Boolean(csvProgress)}
           onClick={() => csvRef.current?.click()}
-          title="导入 CSV 密码表"
+          title="导入 CSV 密码表（超过 500 条自动分批）"
         >
           <Upload size={14} />
-          <span>导入</span>
+          <span>
+            {csvProgress
+              ? `第 ${csvProgress.batchIndex}/${csvProgress.totalBatches} 批`
+              : '导入'}
+          </span>
         </button>
       </div>
 
