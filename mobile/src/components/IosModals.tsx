@@ -33,7 +33,12 @@ import {
   IosStreamingVideoSurface,
   IosTotpRing,
 } from '../iosNativeBridge';
-import { parseMobilePasswordCsv, type PrivateSpaceMobileClient } from '../syncClient';
+import {
+  parseMobilePasswordCsv,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  type PasswordImportProgress,
+  type PrivateSpaceMobileClient,
+} from '../syncClient';
 
 export const PASSWORD_CATEGORIES: Array<{ id: PasswordCategory; label: string }> = [
   { id: 'login', label: '网站登录' },
@@ -1047,14 +1052,38 @@ export function IosCsvImportModal(props: {
   visible: boolean;
   theme: IosThemeTokens;
   onClose: () => void;
-  onImport: (csvText: string) => Promise<void>;
+  onImport: (
+    csvText: string,
+    onProgress?: (progress: PasswordImportProgress) => void,
+  ) => Promise<void>;
 }): React.JSX.Element | null {
   const [csv, setCsv] = useState('');
+  const [progress, setProgress] = useState<PasswordImportProgress | null>(null);
   if (!props.visible) return null;
   const parsedCount = parseMobilePasswordCsv(csv).length;
+  const batchCount = Math.ceil(parsedCount / PASSWORD_IMPORT_BATCH_SIZE);
+  const isImporting = Boolean(progress);
+
+  const handleRunImport = async () => {
+    if (!parsedCount || isImporting) return;
+    try {
+      await props.onImport(csv, (prog) => setProgress(prog));
+      setCsv('');
+      props.onClose();
+    } finally {
+      setProgress(null);
+    }
+  };
 
   return (
-    <Modal visible transparent animationType="slide" onRequestClose={props.onClose}>
+    <Modal
+      visible
+      transparent
+      animationType="slide"
+      onRequestClose={() => {
+        if (!isImporting) props.onClose();
+      }}
+    >
       <View
         style={{
           backgroundColor: props.theme.bgPage,
@@ -1068,21 +1097,44 @@ export function IosCsvImportModal(props: {
         <SheetHeader
           title="CSV 密码批量加密导入"
           leftLabel="取消"
-          rightLabel={`导入 (${parsedCount})`}
-          rightDisabled={parsedCount === 0}
-          onLeft={props.onClose}
-          onRight={() => void props.onImport(csv).then(props.onClose)}
+          rightLabel={
+            isImporting
+              ? `第 ${progress?.batchIndex}/${progress?.totalBatches} 批`
+              : batchCount > 1
+                ? `分 ${batchCount} 批导入 (${parsedCount})`
+                : `导入 (${parsedCount})`
+          }
+          rightDisabled={parsedCount === 0 || isImporting}
+          onLeft={() => {
+            if (!isImporting) props.onClose();
+          }}
+          onRight={() => void handleRunImport()}
           theme={props.theme}
         />
         <View style={{ padding: 16, gap: 10 }}>
           <Text style={{ fontSize: 12, color: props.theme.textSecondary }}>
-            兼容 Apple 密码、Chrome、1Password、Bitwarden 导出的 CSV 格式：
+            兼容 Google Chrome、Apple 密码、1Password、Bitwarden CSV 格式（超过{' '}
+            {PASSWORD_IMPORT_BATCH_SIZE} 条自动分批加密上传）：
           </Text>
+          {parsedCount > PASSWORD_IMPORT_BATCH_SIZE && (
+            <Text style={{ fontSize: 12, fontWeight: '600', color: props.theme.accent }}>
+              已识别 {parsedCount} 条记录 · 将自动拆分为 {batchCount} 批（每批最多{' '}
+              {PASSWORD_IMPORT_BATCH_SIZE} 条）顺序加密入库
+            </Text>
+          )}
+          {progress && (
+            <Text style={{ fontSize: 12, color: props.theme.accent }}>
+              正在执行第 {progress.batchIndex} / {progress.totalBatches} 批（已完成{' '}
+              {progress.processedCount} / {progress.totalCount} 条）...
+            </Text>
+          )}
           <TextInput
             value={csv}
-            onChangeText={setCsv}
+            onChangeText={(val) => {
+              if (!isImporting) setCsv(val);
+            }}
             multiline
-            placeholder={'name,url,username,password,totp\nGitHub,https://github.com,me@io.dev,Secret!99,JBSWY3DPEHPK3PXP'}
+            placeholder={'name,url,username,password,note\nGitHub,https://github.com,me@io.dev,Secret!99,主研发账号'}
             style={{
               minHeight: 140,
               backgroundColor: props.theme.bgInput,

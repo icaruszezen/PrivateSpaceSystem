@@ -1466,6 +1466,233 @@
   margin-bottom: 14px;
 }
 
+/* CSV Multi-Batch Import Banner & Modal */
+@keyframes pss-spin-anim {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.pss-spin {
+  animation: pss-spin-anim 0.9s linear infinite;
+}
+
+.pss-batch-banner {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.pss-batch-banner.is-done {
+  background: var(--bg-canvas);
+  border-color: var(--accent-border);
+}
+
+.pss-batch-banner-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pss-batch-banner-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pss-batch-banner-meta {
+  font-size: 0.72rem;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pss-batch-banner-sub {
+  font-size: 0.69rem;
+  color: var(--text-secondary);
+}
+
+.pss-csv-dropzone {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1.5px dashed var(--border-strong, var(--border-default));
+  background: var(--bg-list);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.pss-csv-dropzone:hover,
+.pss-csv-dropzone.is-dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pss-csv-dropzone-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.pss-csv-dropzone-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pss-csv-dropzone-copy strong {
+  font-size: 0.83rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pss-csv-dropzone-copy span {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.pss-csv-plan-card {
+  padding: 11px 13px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: var(--bg-list);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.pss-csv-plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pss-csv-plan-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+}
+
+.pss-csv-batch-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pss-csv-batch-pill {
+  font-size: 0.71rem;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+}
+
+.pss-csv-batch-pill.is-current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.pss-csv-batch-pill.is-completed {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.pss-csv-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.pss-csv-preview-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.75rem;
+  padding: 3px 4px;
+}
+
+.pss-csv-preview-name {
+  font-weight: 560;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pss-csv-preview-user {
+  color: var(--text-secondary);
+  font-size: 0.73rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pss-csv-preview-mask {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+}
+
+.pss-csv-preview-more {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  padding: 2px 4px 0;
+}
+
+.pss-csv-progress-box {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.pss-csv-progress-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.75rem;
+  color: var(--text-primary);
+}
+
+.pss-csv-progress-top > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 @media (max-width: 960px) {
   .workspace-shell.is-gallery-mode {
     grid-template-columns: 1fr;

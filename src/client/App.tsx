@@ -7,6 +7,7 @@ import type {
   MediaItem,
   MediaKind,
   NoteItem,
+  PasswordImportOptions,
   PasswordItem,
   UpdateMediaRequest,
   UpdateNoteRequest,
@@ -340,14 +341,17 @@ export const App: React.FC = () => {
     return res.password;
   }, []);
 
-  const handleImportPasswords = useCallback(async (entries: ImportPasswordEntryInput[]) => {
-    const res = await api.importPasswords(entries);
-    if (res.imported.length > 0) {
-      setPasswords((prev) => [...res.imported, ...prev]);
-      setLatestSyncSeq(res.imported[res.imported.length - 1].syncSeq);
-    }
-    return res.count;
-  }, []);
+  const handleImportPasswords = useCallback(
+    async (entries: ImportPasswordEntryInput[], options?: PasswordImportOptions) => {
+      const res = await api.importPasswords(entries, options);
+      if (res.imported.length > 0) {
+        setPasswords((prev) => [...res.imported, ...prev]);
+        setLatestSyncSeq(res.imported[res.imported.length - 1].syncSeq);
+      }
+      return { count: res.count, batchCount: res.batchCount };
+    },
+    [],
+  );
 
   const handleUpdatePassword = useCallback(async (id: string, patch: UpdatePasswordRequest) => {
     const res = await api.updatePassword(id, patch);

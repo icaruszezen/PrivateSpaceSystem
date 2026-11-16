@@ -35,11 +35,13 @@ import type {
   MediaKind,
   MobileUpdatePreferences,
   NoteItem,
+  PasswordImportOptions,
   PasswordItem,
   UpdateMediaRequest,
   UpdateNoteRequest,
   UpdatePasswordRequest,
 } from '@shared/types';
+import { PASSWORD_IMPORT_BATCH_SIZE } from '@shared/passwordCsv';
 import { MobileAuthScreen } from './src/components/MobileAuthScreen';
 import { MobileDisguiseCover, MobilePssMark } from './src/components/MobileDisguiseCover';
 import { MobileNotesTab } from './src/components/MobileNotesTab';
@@ -473,10 +475,15 @@ export default function PrivateSpaceMobileApp() {
   }, [client, refreshSnapshotFromCache, notify]);
 
   const handleImportCsv = useCallback(
-    async (entries: ImportPasswordEntryInput[]) => {
-      const imported = await client.importPasswords(entries);
+    async (entries: ImportPasswordEntryInput[], options?: PasswordImportOptions) => {
+      const imported = await client.importPasswords(entries, options);
       await refreshSnapshotFromCache();
-      notify(`成功加密导入 ${imported.length} 条密码记录`);
+      const batchCount = Math.ceil(imported.length / PASSWORD_IMPORT_BATCH_SIZE);
+      if (batchCount > 1) {
+        notify(`已自动分 ${batchCount} 批加密导入 ${imported.length} 条密码记录`);
+      } else {
+        notify(`成功加密导入 ${imported.length} 条密码记录`);
+      }
     },
     [client, refreshSnapshotFromCache, notify],
   );
