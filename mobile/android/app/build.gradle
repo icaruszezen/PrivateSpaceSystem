@@ -7,11 +7,11 @@ def resolvedAppId = project.hasProperty('applicationId')
 
 def resolvedVersionName = project.hasProperty('versionName')
     ? project.property('versionName').toString()
-    : (System.getenv('ANDROID_VERSION_NAME') ?: "0.5.0")
+    : (System.getenv('ANDROID_VERSION_NAME') ?: "0.6.0")
 
 def resolvedVersionCode = (project.hasProperty('versionCode')
     ? project.property('versionCode').toString()
-    : (System.getenv('ANDROID_VERSION_CODE') ?: "500")).toInteger()
+    : (System.getenv('ANDROID_VERSION_CODE') ?: "600")).toInteger()
 
 def keystorePath = System.getenv('ANDROID_KEYSTORE_PATH')
 def keystorePassword = System.getenv('ANDROID_KEYSTORE_PASSWORD')

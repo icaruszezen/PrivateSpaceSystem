@@ -53,14 +53,14 @@
   2. **密码保险箱（Passwords）**：客户端加密存储站点、账号、密码、**RFC 6238 动态两步验证码（TOTP `SHA-1` / `SHA-256` 实时倒计时环）**、自定义隐藏字段与最近 15 次历史密码版本；内置 **无偏拒绝采样 CSPRNG 随机密码与助记词组生成器**、**安全健康度审计面板**（弱口令、重复密码、未启用 2FA 筛选）以及主流密码管理器 CSV 本地加密批量导入。
   3. **加密相册（Images）**：支持拖拽、手机相机直拍与 `PhotosPicker` 多图客户端加密上传、客户端纯本地探测 PNG/JPEG/GIF/WebP 尺寸与生成加密缩略图、加密相册分类管理、**暗房级灯箱预览**（缩放、90° 旋转、镜像翻转、幻灯片播放、信息编辑）与 `.psenc` 分块密文透视。
   4. **私密视频影院（Videos）**：支持大文件 **客户端分片加密断点续传 + SHA-256 完整性校验**、客户端封面帧提取加密，以及 **`PSENC001` HTTP `206` 客户端按需分块解密流式播放**（倍速、`±10s` 快进退、循环、画中画 PiP）。
-  5. **多端加密互传（Cross-Device Transfer & Chat）**：电脑（Web）与手机（Android / iOS）可随时互发 **聊天文本、引用回复与任意格式文件（PDF、ZIP、APK/IPA、音频、代码等 `PSENC001` 分片加密直传）**，SSE 游标实时多端自动同步，记录永久加密保存并支持按内容/文件名/终端/SHA-256/星标多维检索；互传中发送的 **图片与视频自动归档进入加密相册与私密视频影院（零重复 `.psenc` 密文块共享引用计数）**。
+  5. **多端加密互传与手机系统分享「发送」（Cross-Device Transfer & System Share）**：电脑（Web）与手机（Android / iOS）可随时互发 **聊天文本、引用回复与任意格式文件（PDF、ZIP、APK/IPA、音频、代码等 `PSENC001` 分片加密直传）**，并支持在手机其他任意 App 选择任意文件后通过系统分享点击本应用图标直接选择 **「发送」** 一键端到端加密送入互传空间；SSE 游标实时多端自动同步，记录永久加密保存并支持多维检索，且发送的 **图片与视频自动归档进入加密相册与私密视频影院（零重复 `.psenc` 密文块共享引用计数）**。
 - **全平台双层隐蔽伪装体系（Web「松间手记」+ 移动端 `PSS` 系统工具）**：
   - **桌面网页端静态文集伪装**：未登录访问 `/` 时默认伪装为可正常阅读、检索与分类浏览的个人阅读与工程静态文集 **「松间手记」**，浏览器标题、Favicon、Manifest、首屏 DOM 及初始网络请求均零私密空间特征暴露；本人可通过 **连点左上角站点标题/页脚版权 5 次**、**`Ctrl/Cmd + Shift + L` 快捷键** 或在搜索框输入唤醒暗语（默认 `:unlock`）唤出低调的「作者后台」口令验证框，解锁后亦支持 `Ctrl/Cmd + Shift + L` 一键紧急锁定切回手记页。
   - **Android & iOS 移动端 `PSS` 工具伪装**：移动端应用图标与名称脱敏为 **`PSS`（Personal System Service）**，默认启动呈现程序员进制/字节换算与节点延迟探测工具封面，输入自定义暗码（默认 `2580`）或连点底部版本号 5 次即可进入保险库，切入后台可自动恢复伪装层。
 - **Android 原生手机客户端（[`mobile/`](mobile/README.md)，`com.privatespace.mobile`）**：
-  - 基于 **Capacitor 6 + Kotlin 原生安全插件** 构建，支持 **`AndroidKeyStore` 硬件级 `AES-256-GCM` 封装 `{ token, dek }`、`BiometricPrompt` 指纹/面容零知识快锁、`FLAG_SECURE` 防截屏与多任务遮蔽、Android 13+ 敏感剪贴板隐私遮罩与 30s 自动擦除、系统分享直存加密笔记、`privatespace://pair?...` 一键配对、离线加密队列重放与相机直拍 `.psenc` 入库**；服务端亦在 `/mobile/` 托管移动端伴侣包。
+  - 基于 **Capacitor 6 + Kotlin 原生安全插件** 构建，支持 **`AndroidKeyStore` 硬件级 `AES-256-GCM` 封装 `{ token, dek }`、`BiometricPrompt` 指纹/面容零知识快锁、`FLAG_SECURE` 防截屏与多任务遮蔽、Android 13+ 敏感剪贴板隐私遮罩与 30s 自动擦除、任意第三方应用系统分享 `*/*` 点击图标直显「发送」加密传至互传空间、`privatespace://pair?...` 一键配对、离线加密队列重放与相机直拍 `.psenc` 入库**；服务端亦在 `/mobile/` 托管移动端伴侣包。
 - **完备的 Apple iOS 客户端体系（原生 SwiftUI + `/ios` 独立应用）**：
-  - **纯原生 Apple Swift / SwiftUI 工程（[`ios/`](ios/README.md)，iOS 17+）**：基于 `CommonCrypto` + `CryptoKit` 原生实现与桌面/安卓端完全互通的零知识 E2EE v2 引擎、Keychain 硬件隔离托管 `DEK`、`LocalAuthentication` **Face ID / Touch ID** 解锁、`PrivateSpaceAutoFill` 系统密码自动填充扩展（配合 `/.well-known/apple-app-site-association`）以及基于 `AVAssetResourceLoaderDelegate`（`psenc-stream://`）的 **原生 `AVPlayer` HTTP `206` 边下边解密零落盘流式播放**。
+  - **纯原生 Apple Swift / SwiftUI 工程（[`ios/`](ios/README.md)，iOS 17+）**：基于 `CommonCrypto` + `CryptoKit` 原生实现与桌面/安卓端完全互通的零知识 E2EE v2 引擎、Keychain 硬件隔离托管 `DEK`、`LocalAuthentication` **Face ID / Touch ID** 解锁、`PrivateSpaceAutoFill` 系统密码自动填充扩展、**`PrivateSpaceShareExtension` 系统分享「发送」扩展（`com.apple.share-services`，支持从任意 App 将任意文件直接 `PSENC001` 加密发送至互传空间）** 以及基于 `AVAssetResourceLoaderDelegate`（`psenc-stream://`）的 **原生 `AVPlayer` HTTP `206` 边下边解密零落盘流式播放**。
   - **零编译即开即用的 `/ios` 独立移动端入口**：内置双引擎加密层（WebCrypto + Pure-TS Fallback），即使在局域网 HTTP 环境下也可在 iPhone Safari 全功能完成本地端到端加解密。
 - **Web / Android / iOS 实时盲同步、GitHub 自动更新 & CI 自动发版**：
   - 统一单调递增密文游标协议（`GET /api/v1/sync?since_seq=...`）与 **SSE 实时游标广播**（`/api/v1/sync/stream`，仅广播序列号、不含任何密钥或明文）。

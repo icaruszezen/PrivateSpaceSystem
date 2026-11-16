@@ -2,14 +2,14 @@
   "expo": {
     "name": "PSS",
     "slug": "pss-mobile",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "backgroundColor": "#F6F5F0",
     "primaryColor": "#1F4A40",
     "ios": {
       "bundleIdentifier": "io.privatespace.ios",
-      "buildNumber": "500",
+      "buildNumber": "600",
       "supportsTablet": true,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,

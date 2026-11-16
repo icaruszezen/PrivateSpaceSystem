@@ -297,4 +297,28 @@ describe('Android Mobile Client E2EE SDK, Offline Encrypted Queue, Pairing & Cap
     const decryptedBytes = await android.decryptMediaBytes(pinnedPhoto);
     expect(Buffer.compare(Buffer.from(decryptedBytes), Buffer.from(pngBytes))).toBe(0);
   });
+
+  it('registers Android .ShareSendAlias labeled "发送" for arbitrary */* single & multi-file OS sharing', () => {
+    const manifestXml = fs.readFileSync(
+      path.resolve('mobile/android/app/src/main/AndroidManifest.xml'),
+      'utf8',
+    );
+    const stringsXml = fs.readFileSync(
+      path.resolve('mobile/android/app/src/main/res/values/strings.xml'),
+      'utf8',
+    );
+    const shortcutsXml = fs.readFileSync(
+      path.resolve('mobile/android/app/src/main/res/xml/share_shortcuts.xml'),
+      'utf8',
+    );
+
+    expect(stringsXml).toContain('<string name="share_action_send">发送</string>');
+    expect(manifestXml).toContain('android:name=".ShareSendAlias"');
+    expect(manifestXml).toContain('android:label="@string/share_action_send"');
+    expect(manifestXml).toContain('android.intent.action.SEND');
+    expect(manifestXml).toContain('android.intent.action.SEND_MULTIPLE');
+    expect(manifestXml).toContain('android:mimeType="*/*"');
+    expect(manifestXml).toContain('@xml/share_shortcuts');
+    expect(shortcutsXml).toContain('com.privatespace.mobile.ShareSendAlias');
+  });
 });

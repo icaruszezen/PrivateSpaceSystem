@@ -325,6 +325,80 @@ export function sha256Pure(data: Uint8Array): Uint8Array {
   return out;
 }
 
+export class StreamingSha256 {
+  private readonly state = new Int32Array(SHA256_INIT);
+  private readonly W = new Int32Array(64);
+  private readonly buffer = new Uint8Array(64);
+  private bufLen = 0;
+  private totalBytes = 0;
+
+  update(chunk: Uint8Array): this {
+    if (chunk.byteLength === 0) return this;
+    this.totalBytes += chunk.byteLength;
+    let offset = 0;
+
+    if (this.bufLen > 0) {
+      const needed = 64 - this.bufLen;
+      if (chunk.byteLength < needed) {
+        this.buffer.set(chunk, this.bufLen);
+        this.bufLen += chunk.byteLength;
+        return this;
+      }
+      this.buffer.set(chunk.subarray(0, needed), this.bufLen);
+      sha256Compress(this.state, this.buffer, 0, this.W);
+      this.bufLen = 0;
+      offset = needed;
+    }
+
+    const fullEnd = chunk.byteLength - ((chunk.byteLength - offset) % 64);
+    while (offset < fullEnd) {
+      sha256Compress(this.state, chunk, offset, this.W);
+      offset += 64;
+    }
+
+    if (offset < chunk.byteLength) {
+      const rem = chunk.subarray(offset);
+      this.buffer.set(rem, 0);
+      this.bufLen = rem.byteLength;
+    }
+    return this;
+  }
+
+  digest(): Uint8Array {
+    const rem = this.bufLen;
+    const padBlocks = rem + 9 <= 64 ? 64 : 128;
+    const tail = new Uint8Array(padBlocks);
+    if (rem > 0) {
+      tail.set(this.buffer.subarray(0, rem), 0);
+    }
+    tail[rem] = 0x80;
+
+    const bitLenHi = Math.floor(this.totalBytes / 0x20000000);
+    const bitLenLo = (this.totalBytes << 3) >>> 0;
+    const dv = new DataView(tail.buffer);
+    dv.setUint32(padBlocks - 8, bitLenHi, false);
+    dv.setUint32(padBlocks - 4, bitLenLo, false);
+
+    for (let offset = 0; offset < padBlocks; offset += 64) {
+      sha256Compress(this.state, tail, offset, this.W);
+    }
+
+    const out = new Uint8Array(32);
+    const outDv = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) {
+      outDv.setInt32(i * 4, this.state[i], false);
+    }
+    this.W.fill(0);
+    this.buffer.fill(0);
+    return out;
+  }
+
+  digestHex(): string {
+    return bytesToHex(this.digest());
+  }
+}
+
+
 export function hmacSha256Pure(key: Uint8Array, message: Uint8Array): Uint8Array {
   const normalizedKey = key.byteLength > 64 ? sha256Pure(key) : key;
   const ipad = new Uint8Array(64);

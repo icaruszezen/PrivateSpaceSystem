@@ -11,6 +11,7 @@ public final class EncryptedLocalVaultStore: @unchecked Sendable {
 
     public let snapshotFileURL: URL
     public let autoFillFileURL: URL
+    public let shareSessionFileURL: URL
     private let secretStore: SecretStoreProtocol
     private let lock = NSLock()
 
@@ -38,6 +39,7 @@ public final class EncryptedLocalVaultStore: @unchecked Sendable {
         try? FileManager.default.createDirectory(at: resolvedBaseDir, withIntermediateDirectories: true)
         self.snapshotFileURL = resolvedBaseDir.appendingPathComponent("vault_snapshot.pscache")
         self.autoFillFileURL = resolvedBaseDir.appendingPathComponent("autofill_credentials.psautofill")
+        self.shareSessionFileURL = resolvedBaseDir.appendingPathComponent("share_session.psshare")
     }
 
     // MARK: - Snapshot Persistence
@@ -116,12 +118,60 @@ public final class EncryptedLocalVaultStore: @unchecked Sendable {
         return matched.isEmpty ? all : matched
     }
 
+    // MARK: - iOS System Share Extension Session Bridge (`share_session.psshare`)
+
+    public func saveShareExtensionSession(_ record: ShareExtensionSessionRecord) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let masterKey = try secretStore.loadOrCreateLocalCacheKey()
+        let plaintext = try JSONEncoder().encode(record)
+        let sealed = try sealContainer(
+            plaintext: plaintext,
+            masterKey: masterKey,
+            hkdfInfo: "privatespace:ios-share-ext:v1",
+            aad: "privatespace:ios-cache:share-session:v1"
+        )
+        try writeProtectedFile(sealed, to: shareSessionFileURL)
+    }
+
+    public func loadShareExtensionSession() throws -> ShareExtensionSessionRecord? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard FileManager.default.fileExists(atPath: shareSessionFileURL.path) else {
+            return nil
+        }
+        let raw = try Data(contentsOf: shareSessionFileURL)
+        let masterKey = try secretStore.loadOrCreateLocalCacheKey()
+        let plaintext = try openContainer(
+            container: raw,
+            masterKey: masterKey,
+            hkdfInfo: "privatespace:ios-share-ext:v1",
+            aad: "privatespace:ios-cache:share-session:v1"
+        )
+        return try JSONDecoder().decode(ShareExtensionSessionRecord.self, from: plaintext)
+    }
+
+    public func clearShareExtensionSession() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: shareSessionFileURL.path),
+           let size = attrs[.size] as? Int,
+           size > 0 {
+            let zeros = Data(repeating: 0, count: size)
+            try? zeros.write(to: shareSessionFileURL, options: .atomic)
+        }
+        try? FileManager.default.removeItem(at: shareSessionFileURL)
+    }
+
     public func encryptedDiskFootprintBytes() -> Int {
         lock.lock()
         defer { lock.unlock() }
 
         var total = 0
-        for url in [snapshotFileURL, autoFillFileURL] {
+        for url in [snapshotFileURL, autoFillFileURL, shareSessionFileURL] {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                let size = attrs[.size] as? Int {
                 total += size
@@ -130,12 +180,12 @@ public final class EncryptedLocalVaultStore: @unchecked Sendable {
         return total
     }
 
-    /// Overwrites local `.pscache` & `.psautofill` files with zeros before unlinking (file shredding).
+    /// Overwrites local `.pscache`, `.psautofill` & `.psshare` files with zeros before unlinking (file shredding).
     public func shredLocalCache() {
         lock.lock()
         defer { lock.unlock() }
 
-        for url in [snapshotFileURL, autoFillFileURL] {
+        for url in [snapshotFileURL, autoFillFileURL, shareSessionFileURL] {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                let size = attrs[.size] as? Int,
                size > 0 {

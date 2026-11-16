@@ -680,6 +680,8 @@ public enum VaultE2EECrypto {
         let mainMeta = record.transferBlobs?.main
         let thumbMeta = record.transferBlobs?.thumbnail
         let plainSize = payload.plainSize > 0 ? payload.plainSize : (mainMeta?.plainSize ?? 0)
+        let resolvedSourceVia = payload.sourceVia
+            ?? (payload.tags.contains("system-share") ? .systemShare : nil)
         return TransferItem(
             id: record.id,
             itemType: .transfer,
@@ -688,6 +690,7 @@ public enum VaultE2EECrypto {
             senderSessionId: payload.senderSessionId,
             senderDeviceName: payload.senderDeviceName.isEmpty ? "已授权终端" : payload.senderDeviceName,
             senderPlatform: payload.senderPlatform,
+            sourceVia: resolvedSourceVia,
             originalFilename: payload.originalFilename,
             mimeType: payload.mimeType,
             fileCategory: payload.fileCategory,

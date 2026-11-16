@@ -8,6 +8,22 @@
   "orientation": "portrait",
   "background_color": "#F6F5F0",
   "theme_color": "#1F4A40",
+  "share_target": {
+    "action": "/ios?share_target=send",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "files",
+          "accept": ["*/*"]
+        }
+      ]
+    }
+  },
   "icons": [
     {
       "src": "/pss-icon.svg",

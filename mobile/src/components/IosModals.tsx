@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
   Image,
   Modal,
   ScrollView,
@@ -33,6 +34,7 @@ import {
   IosStreamingVideoSurface,
   IosTotpRing,
 } from '../iosNativeBridge';
+import type { NativeSharedInboundBatch } from '../nativeBridge';
 import {
   parseMobilePasswordCsv,
   PASSWORD_IMPORT_BATCH_SIZE,
@@ -2393,4 +2395,228 @@ export function IosAppUpdateModal(props: {
     </Modal>
   );
 }
+
+export function IosShareSendModal(props: {
+  batch: NativeSharedInboundBatch | null;
+  deviceName: string;
+  sending: boolean;
+  fileProgressMap: Record<string, number>;
+  errorMessage: string | null;
+  theme: IosThemeTokens;
+  onCancel: () => void;
+  onConfirmSend: (opts: { note: string }) => void;
+}): React.JSX.Element | null {
+  const [note, setNote] = useState('');
+
+  useEffect(() => {
+    if (!props.batch) {
+      setNote('');
+      return;
+    }
+    const parts = [props.batch.subject?.trim(), props.batch.sharedText?.trim()].filter(Boolean);
+    setNote(parts.join('\n'));
+  }, [props.batch?.batchId]);
+
+  if (!props.batch || props.batch.files.length === 0) {
+    return null;
+  }
+
+  const totalBytes = props.batch.files.reduce((acc, f) => acc + Math.max(0, f.size), 0);
+
+  return (
+    <Modal visible animationType="slide" transparent onRequestClose={props.onCancel}>
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: 'rgba(12, 16, 15, 0.56)',
+          justifyContent: 'flex-end',
+        }}
+      >
+        <View
+          style={{
+            backgroundColor: props.theme.bgPage,
+            borderTopLeftRadius: 22,
+            borderTopRightRadius: 22,
+            maxHeight: '86%',
+            borderTopWidth: 1,
+            borderColor: props.theme.border,
+          }}
+        >
+          <SheetHeader
+            title="发送"
+            leftLabel="取消"
+            rightLabel={props.sending ? '发送中...' : '发送'}
+            rightDisabled={props.sending}
+            onLeft={() => {
+              if (!props.sending) props.onCancel();
+            }}
+            onRight={() => props.onConfirmSend({ note: note.trim() })}
+            theme={props.theme}
+          />
+
+          <ScrollView contentContainerStyle={{ padding: 16, gap: 14 }}>
+            <View
+              style={{
+                backgroundColor: props.theme.accentSoft,
+                borderRadius: 14,
+                padding: 12,
+                gap: 4,
+              }}
+            >
+              <Text style={{ fontSize: 13, fontWeight: '700', color: props.theme.accent }}>
+                发送至多端互传空间 · 系统分享直传
+              </Text>
+              <Text style={{ fontSize: 11, color: props.theme.textSecondary, lineHeight: 1.45 }}>
+                共 {props.batch.files.length} 个文件（{formatMobileBytes(totalBytes)}）· 发送自{' '}
+                {props.deviceName} · 本机执行 PSENC001 AES-256-GCM 零知识加密
+              </Text>
+            </View>
+
+            <View style={{ gap: 8 }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textSecondary }}>
+                待发送文件 ({props.batch.files.length})
+              </Text>
+              {props.batch.files.map((f) => {
+                const progress = props.fileProgressMap[f.fileId];
+                const pct =
+                  typeof progress === 'number'
+                    ? Math.min(100, Math.max(0, Math.round(progress * 100)))
+                    : null;
+                return (
+                  <View
+                    key={f.fileId}
+                    style={{
+                      backgroundColor: props.theme.bgCard,
+                      borderRadius: 12,
+                      padding: 11,
+                      borderWidth: 1,
+                      borderColor: props.theme.border,
+                      gap: 6,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flexDirection: 'row',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          flex: 1,
+                          fontSize: 13,
+                          fontWeight: '600',
+                          color: props.theme.textPrimary,
+                        }}
+                        numberOfLines={1}
+                      >
+                        {f.name}
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          fontWeight: '600',
+                          color: props.theme.accent,
+                        }}
+                      >
+                        {pct !== null ? `${pct}%` : formatMobileBytes(f.size)}
+                      </Text>
+                    </View>
+                    <Text
+                      style={{ fontSize: 11, color: props.theme.textSecondary }}
+                      numberOfLines={1}
+                    >
+                      {f.mimeType || 'application/octet-stream'} · {formatMobileBytes(f.size)}
+                    </Text>
+                    {pct !== null && (
+                      <View
+                        style={{
+                          height: 4,
+                          borderRadius: 2,
+                          backgroundColor: props.theme.bgSubtle,
+                          overflow: 'hidden',
+                        }}
+                      >
+                        <View
+                          style={{
+                            height: 4,
+                            width: `${pct}%`,
+                            backgroundColor: props.theme.accent,
+                          }}
+                        />
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+
+            <View style={{ gap: 6 }}>
+              <Text style={{ fontSize: 12, fontWeight: '700', color: props.theme.textSecondary }}>
+                加密附言（可选）
+              </Text>
+              <TextInput
+                value={note}
+                onChangeText={(next) => {
+                  if (!props.sending) setNote(next);
+                }}
+                multiline
+                placeholder="输入附言说明，将随密文信封同步至其他终端..."
+                placeholderTextColor={props.theme.textTertiary}
+                style={{
+                  minHeight: 68,
+                  backgroundColor: props.theme.bgCard,
+                  borderRadius: 12,
+                  borderWidth: 1,
+                  borderColor: props.theme.border,
+                  paddingHorizontal: 12,
+                  paddingVertical: 10,
+                  fontSize: 13,
+                  color: props.theme.textPrimary,
+                }}
+              />
+            </View>
+
+            {props.errorMessage && (
+              <View
+                style={{
+                  backgroundColor: 'rgba(181, 61, 56, 0.12)',
+                  borderRadius: 10,
+                  padding: 10,
+                }}
+              >
+                <Text style={{ fontSize: 12, color: props.theme.danger, fontWeight: '600' }}>
+                  {props.errorMessage}
+                </Text>
+              </View>
+            )}
+
+            <TouchableOpacity
+              onPress={() => props.onConfirmSend({ note: note.trim() })}
+              disabled={props.sending}
+              style={{
+                backgroundColor: props.theme.accent,
+                paddingVertical: 13,
+                borderRadius: 13,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                opacity: props.sending ? 0.72 : 1,
+              }}
+              testID="ios-share-send-confirm-btn"
+            >
+              {props.sending && <ActivityIndicator size="small" color="#FFFFFF" />}
+              <Text style={{ fontSize: 15, fontWeight: '700', color: '#FFFFFF' }}>
+                {props.sending ? '正在加密发送...' : '发送'}
+              </Text>
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 

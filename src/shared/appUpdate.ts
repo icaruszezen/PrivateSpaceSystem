@@ -9,8 +9,8 @@ import type {
 
 export const DEFAULT_GITHUB_REPO = 'icaruszezen/PrivateSpaceSystem';
 export const DEFAULT_GITHUB_API_BASE = 'https://api.github.com';
-export const CURRENT_APP_VERSION = '0.5.0';
-export const CURRENT_APP_BUILD = 500;
+export const CURRENT_APP_VERSION = '0.6.0';
+export const CURRENT_APP_BUILD = 600;
 export const DEFAULT_ANDROID_APP_ID = 'com.privatespace.mobile';
 export const DEFAULT_IOS_BUNDLE_ID = 'io.privatespace.ios';
 

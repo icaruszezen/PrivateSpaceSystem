@@ -1,6 +1,17 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import { CURRENT_APP_BUILD, CURRENT_APP_VERSION, DEFAULT_ANDROID_APP_ID } from '@shared/appUpdate';
-import { bytesToHex, sha256 } from '@shared/cryptoPrimitives';
+import {
+  base64ToBytes as sharedBase64ToBytes,
+  bytesToBase64 as sharedBytesToBase64,
+  bytesToHex,
+  randomUuid,
+  sha256,
+} from '@shared/cryptoPrimitives';
+import {
+  inferMimeTypeFromFilename,
+  sanitizeTransferFilename,
+  type TransferFileCategory,
+} from '@shared/transferFiles';
 
 export interface NativeDeviceMetadata {
   isNativeAndroid: boolean;
@@ -19,6 +30,24 @@ export interface SharedInboundPayload {
   mimeType: string;
   subject?: string;
   text?: string;
+}
+
+export interface NativeSharedInboundFile {
+  fileId: string;
+  name: string;
+  mimeType: string;
+  category?: TransferFileCategory;
+  size: number;
+  sha256Hex: string;
+}
+
+export interface NativeSharedInboundBatch {
+  batchId: string;
+  files: NativeSharedInboundFile[];
+  sharedText?: string | null;
+  subject?: string | null;
+  actionLabel?: string;
+  receivedAt: string;
 }
 
 export interface ApkDownloadProgressEvent {
@@ -63,6 +92,19 @@ interface PrivateSpaceNativePluginContract {
   }): Promise<{ ok: boolean; sensitiveMasked: boolean }>;
   triggerHaptic(options: { style: 'light' | 'success' | 'warning' }): Promise<void>;
   consumePendingShare(): Promise<{ shared: SharedInboundPayload | null }>;
+  getPendingSharedFiles(): Promise<{ batch: NativeSharedInboundBatch | null }>;
+  readSharedFileChunk(options: {
+    fileId: string;
+    offset: number;
+    length: number;
+  }): Promise<{ chunkBase64: string; bytesRead: number; eof: boolean }>;
+  discardSharedFiles(options?: { batchId?: string }): Promise<{ discardedCount: number }>;
+  exportOrShareFile(options: {
+    filename: string;
+    mimeType: string;
+    base64Data: string;
+    mode?: 'share' | 'open';
+  }): Promise<{ ok: boolean }>;
   openUnknownSourcesSettings(): Promise<{ canInstallPackages: boolean }>;
   installPendingApk(): Promise<{
     status: 'installing' | 'permission_required';
@@ -82,6 +124,10 @@ interface PrivateSpaceNativePluginContract {
   addListener(
     eventName: 'shareReceived',
     listenerFunc: (payload: SharedInboundPayload) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'sharedFilesReceived',
+    listenerFunc: (payload: NativeSharedInboundBatch) => void,
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'updateDownloadProgress',
@@ -104,20 +150,11 @@ function isNativeAndroidRuntime(): boolean {
 }
 
 function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
+  return sharedBytesToBase64(bytes);
 }
 
 function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
-  }
-  return out;
+  return sharedBase64ToBytes(b64);
 }
 
 async function getOrCreateWebCryptoKey(): Promise<CryptoKey | null> {
@@ -198,11 +235,24 @@ let webClipboardTimer: number | null = null;
 let lastCopiedSecret: string | null = null;
 
 const webUpdateListeners = new Set<(payload: ApkDownloadProgressEvent) => void>();
+const webSharedFilesListeners = new Set<(payload: NativeSharedInboundBatch) => void>();
+const webStagedFilesMap = new Map<string, { batchId: string; blob: Blob }>();
+let pendingWebShareBatch: NativeSharedInboundBatch | null = null;
 
 function emitWebUpdateProgress(payload: ApkDownloadProgressEvent): void {
   for (const listener of webUpdateListeners) {
     try {
       listener(payload);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+function emitWebSharedFiles(batch: NativeSharedInboundBatch): void {
+  for (const listener of webSharedFilesListeners) {
+    try {
+      listener(batch);
     } catch {
       // ignore listener errors
     }
@@ -434,6 +484,223 @@ export const androidBridge = {
     } catch {
       return () => undefined;
     }
+  },
+
+  async getPendingSharedFiles(): Promise<NativeSharedInboundBatch | null> {
+    if (isNativeAndroidRuntime()) {
+      try {
+        const res = await PrivateSpaceNative.getPendingSharedFiles();
+        if (res.batch && res.batch.files?.length > 0) {
+          return res.batch;
+        }
+      } catch {
+        // fall through to web staged batch
+      }
+    }
+    return pendingWebShareBatch;
+  },
+
+  async onSharedFilesReceived(
+    handler: (batch: NativeSharedInboundBatch) => void,
+  ): Promise<() => void> {
+    webSharedFilesListeners.add(handler);
+    let nativeCleanup: (() => void) | null = null;
+
+    if (isNativeAndroidRuntime()) {
+      try {
+        const sub = await PrivateSpaceNative.addListener('sharedFilesReceived', handler);
+        nativeCleanup = () => {
+          void sub.remove();
+        };
+      } catch {
+        nativeCleanup = null;
+      }
+    }
+
+    return () => {
+      webSharedFilesListeners.delete(handler);
+      nativeCleanup?.();
+    };
+  },
+
+  async readSharedFileChunk(
+    fileId: string,
+    offset: number,
+    length: number,
+  ): Promise<Uint8Array> {
+    const webEntry = webStagedFilesMap.get(fileId);
+    if (webEntry) {
+      const clampedStart = Math.max(0, offset);
+      const clampedEnd = Math.min(webEntry.blob.size, clampedStart + Math.max(0, length));
+      if (clampedEnd <= clampedStart) return new Uint8Array(0);
+      return new Uint8Array(await webEntry.blob.slice(clampedStart, clampedEnd).arrayBuffer());
+    }
+
+    if (!isNativeAndroidRuntime()) {
+      throw new Error('未找到待发送的系统分享暂存文件');
+    }
+
+    const res = await PrivateSpaceNative.readSharedFileChunk({
+      fileId,
+      offset: Math.max(0, Math.floor(offset)),
+      length: Math.max(1, Math.floor(length)),
+    });
+    if (!res.chunkBase64 || res.bytesRead <= 0) {
+      return new Uint8Array(0);
+    }
+    return base64ToBytes(res.chunkBase64);
+  },
+
+  async readSharedFileAsFile(file: NativeSharedInboundFile): Promise<File> {
+    const cleanName = sanitizeTransferFilename(file.name);
+    const mimeType = inferMimeTypeFromFilename(cleanName, file.mimeType);
+    const webEntry = webStagedFilesMap.get(file.fileId);
+    if (webEntry) {
+      if (webEntry.blob instanceof File && webEntry.blob.name === cleanName) {
+        return webEntry.blob;
+      }
+      return new File([webEntry.blob], cleanName, { type: mimeType });
+    }
+
+    const parts: BlobPart[] = [];
+    const chunkLen = 512 * 1024;
+    let offset = 0;
+    const expectedSize = Math.max(0, Math.floor(file.size || 0));
+    while (offset < expectedSize || (expectedSize === 0 && offset === 0)) {
+      const slice = await this.readSharedFileChunk(file.fileId, offset, chunkLen);
+      if (slice.byteLength === 0) break;
+      const copy = new Uint8Array(slice.byteLength);
+      copy.set(slice);
+      parts.push(copy.buffer);
+      offset += slice.byteLength;
+      if (slice.byteLength < chunkLen) break;
+    }
+    return new File(parts, cleanName, { type: mimeType });
+  },
+
+  async discardSharedFiles(batchId?: string): Promise<number> {
+    let discarded = 0;
+
+    if (!batchId || pendingWebShareBatch?.batchId === batchId) {
+      pendingWebShareBatch = null;
+    }
+    for (const [fid, entry] of webStagedFilesMap.entries()) {
+      if (!batchId || entry.batchId === batchId) {
+        webStagedFilesMap.delete(fid);
+        discarded += 1;
+      }
+    }
+
+    if (isNativeAndroidRuntime()) {
+      try {
+        const res = await PrivateSpaceNative.discardSharedFiles(
+          batchId ? { batchId } : undefined,
+        );
+        discarded += res.discardedCount ?? 0;
+      } catch {
+        // ignore cleanup error
+      }
+    }
+    return discarded;
+  },
+
+  async stageWebSharedFiles(
+    files: Array<File | (Blob & { name?: string })>,
+    meta?: { sharedText?: string | null; subject?: string | null },
+  ): Promise<NativeSharedInboundBatch> {
+    const batchId = randomUuid();
+    const stagedList: NativeSharedInboundFile[] = [];
+
+    for (let idx = 0; idx < files.length; idx += 1) {
+      const blob = files[idx];
+      const rawName =
+        'name' in blob && typeof blob.name === 'string' && blob.name.trim()
+          ? blob.name
+          : `shared_file_${idx + 1}`;
+      const cleanName = sanitizeTransferFilename(rawName);
+      const mimeType = inferMimeTypeFromFilename(cleanName, blob.type);
+      const plainBytes = new Uint8Array(await blob.arrayBuffer());
+      const sha256Hex = bytesToHex(await sha256(plainBytes));
+      const fileId = randomUuid();
+
+      webStagedFilesMap.set(fileId, { batchId, blob });
+      stagedList.push({
+        fileId,
+        name: cleanName,
+        mimeType,
+        size: blob.size,
+        sha256Hex,
+      });
+    }
+
+    const batch: NativeSharedInboundBatch = {
+      batchId,
+      files: stagedList,
+      sharedText: meta?.sharedText ?? null,
+      subject: meta?.subject ?? null,
+      actionLabel: '发送',
+      receivedAt: new Date().toISOString(),
+    };
+    pendingWebShareBatch = batch;
+    emitWebSharedFiles(batch);
+    return batch;
+  },
+
+  async exportOrShareDecryptedFile(params: {
+    filename: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    mode?: 'share' | 'download';
+  }): Promise<'native_shared' | 'web_shared' | 'downloaded'> {
+    const cleanName = sanitizeTransferFilename(params.filename);
+    const mimeType = inferMimeTypeFromFilename(cleanName, params.mimeType);
+
+    if (isNativeAndroidRuntime()) {
+      await PrivateSpaceNative.exportOrShareFile({
+        filename: cleanName,
+        mimeType,
+        base64Data: bytesToBase64(params.bytes),
+        mode: 'share',
+      });
+      return 'native_shared';
+    }
+
+    const copy = new Uint8Array(params.bytes.byteLength);
+    copy.set(params.bytes);
+    const blob = new Blob([copy.buffer], { type: mimeType });
+
+    if (
+      params.mode !== 'download' &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator.share === 'function' &&
+      typeof File !== 'undefined'
+    ) {
+      try {
+        const shareFile = new File([blob], cleanName, { type: mimeType });
+        if (!navigator.canShare || navigator.canShare({ files: [shareFile] })) {
+          await navigator.share({
+            files: [shareFile],
+            title: cleanName,
+          });
+          return 'web_shared';
+        }
+      } catch {
+        // fall back to browser download if user cancels or browser disallows programmatic share
+      }
+    }
+
+    if (typeof document !== 'undefined') {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = cleanName;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.setTimeout(() => URL.revokeObjectURL(url), 15_000);
+    }
+    return 'downloaded';
   },
 
   async onUpdateDownloadProgress(
@@ -707,3 +974,29 @@ export const quickLockManager = {
     await androidBridge.secureRemove(KEYSTORE_SESSION_KEY);
   },
 };
+
+declare global {
+  interface Window {
+    __pssSimulateSystemShare?: (
+      files: Array<{ name: string; mimeType?: string; content: string | Uint8Array }>,
+      meta?: { sharedText?: string | null; subject?: string | null },
+    ) => Promise<NativeSharedInboundBatch>;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.__pssSimulateSystemShare = async (items, meta) => {
+    const fileObjs = items.map((item) => {
+      const rawBytes =
+        typeof item.content === 'string'
+          ? new TextEncoder().encode(item.content)
+          : item.content;
+      const copy = new Uint8Array(rawBytes.byteLength);
+      copy.set(rawBytes);
+      const mime = inferMimeTypeFromFilename(item.name, item.mimeType);
+      return new File([copy.buffer], item.name, { type: mime });
+    });
+    return androidBridge.stageWebSharedFiles(fileObjs, meta);
+  };
+}
+

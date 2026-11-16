@@ -1,6 +1,6 @@
 {
   "name": "private-space-system",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "description": "Self-hosted Zero-Knowledge End-to-End Encrypted (E2EE v2) private space for notes, passwords, images, and streaming videos across Web, Android, and iOS",
   "type": "module",

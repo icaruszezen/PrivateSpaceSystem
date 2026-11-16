@@ -53,6 +53,7 @@ import { MobilePasswordsTab } from './src/components/MobilePasswordsTab';
 import { MobilePhotosTab } from './src/components/MobilePhotosTab';
 import { MobilePinLockScreen } from './src/components/MobilePinLockScreen';
 import { MobileSecurityTab } from './src/components/MobileSecurityTab';
+import { MobileShareSendSheet } from './src/components/MobileShareSendSheet';
 import { MobileTransferTab } from './src/components/MobileTransferTab';
 import { MobileUpdateModal } from './src/components/MobileUpdateModal';
 import { MobileVideosTab } from './src/components/MobileVideosTab';
@@ -60,6 +61,7 @@ import {
   androidBridge,
   quickLockManager,
   type NativeDeviceMetadata,
+  type NativeSharedInboundBatch,
   type StoredQuickLockMeta,
 } from './src/nativeBridge';
 import {
@@ -161,6 +163,10 @@ export default function PrivateSpaceMobileApp() {
     title?: string;
     content: string;
   } | null>(null);
+  const [pendingShareBatch, setPendingShareBatch] = useState<NativeSharedInboundBatch | null>(null);
+  const [shareSending, setShareSending] = useState(false);
+  const [shareProgressMap, setShareProgressMap] = useState<Record<string, number>>({});
+  const [shareError, setShareError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
   const syncSeqRef = useRef(0);
@@ -403,17 +409,42 @@ export default function PrivateSpaceMobileApp() {
       }
     };
 
+    let removeFilesListener: (() => void) | null = null;
+    const handleSharedFiles = (batch: NativeSharedInboundBatch) => {
+      if (!batch || !batch.files || batch.files.length === 0) return;
+      setPendingShareBatch(batch);
+      setShareError(null);
+      setShareProgressMap({});
+      setIsCoverActive(false);
+      if (stage === 'unlocked') {
+        setActiveTab('transfers');
+      }
+    };
+
     void androidBridge.consumePendingShare().then((pending) => {
       if (pending) handleShare(pending);
     });
     void androidBridge.onShareReceived(handleShare).then((unsub) => {
       removeListener = unsub;
     });
+    void androidBridge.getPendingSharedFiles().then((batch) => {
+      if (batch && batch.files.length > 0) handleSharedFiles(batch);
+    });
+    void androidBridge.onSharedFilesReceived(handleSharedFiles).then((unsub) => {
+      removeFilesListener = unsub;
+    });
 
     return () => {
       removeListener?.();
+      removeFilesListener?.();
     };
   }, [stage, notify]);
+
+  useEffect(() => {
+    if (stage === 'unlocked' && pendingShareBatch && pendingShareBatch.files.length > 0) {
+      setActiveTab('transfers');
+    }
+  }, [stage, pendingShareBatch]);
 
   // ==================== Vault Handlers ====================
 
@@ -1272,6 +1303,66 @@ export default function PrivateSpaceMobileApp() {
           <span className="m-tab-label">安全</span>
         </button>
       </nav>
+
+      <MobileShareSendSheet
+        batch={pendingShareBatch}
+        deviceName={deviceMeta.deviceName}
+        sending={shareSending}
+        fileProgressMap={shareProgressMap}
+        errorMessage={shareError}
+        onCancel={async () => {
+          const targetBatchId = pendingShareBatch?.batchId;
+          setPendingShareBatch(null);
+          setShareError(null);
+          setShareProgressMap({});
+          await androidBridge.discardSharedFiles(targetBatchId);
+        }}
+        onConfirmSend={async ({ note }) => {
+          if (!pendingShareBatch || pendingShareBatch.files.length === 0) return;
+          setShareSending(true);
+          setShareError(null);
+          const batchToProcess = pendingShareBatch;
+          let autoArchivedCount = 0;
+          try {
+            for (let i = 0; i < batchToProcess.files.length; i += 1) {
+              const staged = batchToProcess.files[i];
+              setShareProgressMap((prev) => ({ ...prev, [staged.fileId]: 0.06 }));
+              const fileObj = await androidBridge.readSharedFileAsFile(staged);
+              const { autoSavedMedia } = await client.sendTransferFile({
+                file: fileObj,
+                filename: staged.name,
+                mimeType: staged.mimeType,
+                text: i === 0 ? note : undefined,
+                sourceVia: 'system-share',
+                tags: ['system-share'],
+                chunkBytes: 512 * 1024,
+                onProgress: (loaded, total) => {
+                  setShareProgressMap((prev) => ({
+                    ...prev,
+                    [staged.fileId]: Math.min(0.98, loaded / Math.max(1, total)),
+                  }));
+                },
+              });
+              if (autoSavedMedia) autoArchivedCount += 1;
+              setShareProgressMap((prev) => ({ ...prev, [staged.fileId]: 1 }));
+            }
+            await refreshSnapshotFromCache();
+            await androidBridge.discardSharedFiles(batchToProcess.batchId);
+            setPendingShareBatch(null);
+            setShareProgressMap({});
+            setActiveTab('transfers');
+            notify(
+              autoArchivedCount > 0
+                ? `已发送 ${batchToProcess.files.length} 个文件至互传空间（${autoArchivedCount} 项自动归档图影库）`
+                : `已加密发送 ${batchToProcess.files.length} 个文件至多端互传空间`,
+            );
+          } catch (err) {
+            setShareError(err instanceof Error ? err.message : '系统分享加密发送失败');
+          } finally {
+            setShareSending(false);
+          }
+        }}
+      />
 
       <MobileUpdateModal
         open={updateModalOpen}

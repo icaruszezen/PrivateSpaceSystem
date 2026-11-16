@@ -4,4 +4,6 @@
     <cache-path name="my_cache_images" path="." />
     <cache-path name="apk_updates" path="updates/" />
     <files-path name="apk_internal_updates" path="updates/" />
+    <cache-path name="inbound_shares" path="inbound_shares/" />
+    <cache-path name="shared_exports" path="exports/" />
 </paths>

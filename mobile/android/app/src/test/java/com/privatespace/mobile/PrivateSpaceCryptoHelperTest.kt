@@ -121,4 +121,42 @@ class PrivateSpaceCryptoHelperTest {
             PrivateSpaceCryptoHelper.sanitizeApkFileName("0.5.0/../evil"),
         )
     }
+
+    @Test
+    fun systemShareHelpersEnforceSendLabelSanitizeNamesAndClassifyArbitraryFiles() {
+        assertEquals("发送", PrivateSpaceCryptoHelper.SHARE_ACTION_LABEL)
+
+        assertEquals(
+            "2026_家庭资产清单.pdf",
+            PrivateSpaceCryptoHelper.sanitizeSharedFileName("  2026_家庭资产清单.pdf  "),
+        )
+        assertEquals(
+            "___etc_passwd",
+            PrivateSpaceCryptoHelper.sanitizeSharedFileName("../etc/passwd"),
+        )
+        assertEquals(
+            "shared_file_2.bin",
+            PrivateSpaceCryptoHelper.sanitizeSharedFileName("   ", fallbackIndex = 2),
+        )
+
+        assertEquals(
+            "application/pdf",
+            PrivateSpaceCryptoHelper.inferMimeTypeFromName("contract.PDF", "*/*"),
+        )
+        assertEquals(
+            "application/zip",
+            PrivateSpaceCryptoHelper.inferMimeTypeFromName("backup.zip", "application/octet-stream"),
+        )
+        assertEquals(
+            "image/heic",
+            PrivateSpaceCryptoHelper.inferMimeTypeFromName("IMG_1024.HEIC", null),
+        )
+
+        assertEquals("document", PrivateSpaceCryptoHelper.classifyTransferFile("report.docx"))
+        assertEquals("archive", PrivateSpaceCryptoHelper.classifyTransferFile("vault-backup.7z"))
+        assertEquals("package", PrivateSpaceCryptoHelper.classifyTransferFile("app-release.apk"))
+        assertEquals("code", PrivateSpaceCryptoHelper.classifyTransferFile("docker-compose.yml"))
+        assertEquals("media", PrivateSpaceCryptoHelper.classifyTransferFile("clip.mp4"))
+        assertEquals("other", PrivateSpaceCryptoHelper.classifyTransferFile("firmware.rom"))
+    }
 }

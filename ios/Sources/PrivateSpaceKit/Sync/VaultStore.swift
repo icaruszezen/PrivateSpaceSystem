@@ -327,6 +327,15 @@ public final class VaultStore {
         try secretStore.writeString(auth.token, forKey: Self.keychainSessionTokenKey)
         if let dek = await apiClient.getMasterDek(), dek.count == 32 {
             try secretStore.writeData(dek, forKey: Self.keychainMasterDekKey)
+            try? localStore.saveShareExtensionSession(
+                ShareExtensionSessionRecord(
+                    serverURL: serverURL,
+                    sessionToken: auth.token,
+                    masterDekBase64: dek.base64EncodedString(),
+                    vaultName: auth.vaultName,
+                    deviceName: apiClient.deviceName
+                )
+            )
         }
         self.vaultName = auth.vaultName
         self.keyFingerprint = auth.keyFingerprint
@@ -356,6 +365,15 @@ public final class VaultStore {
         }
         await apiClient.setSessionToken(savedToken)
         await apiClient.setMasterDek(savedDek)
+        try? localStore.saveShareExtensionSession(
+            ShareExtensionSessionRecord(
+                serverURL: serverURL,
+                sessionToken: savedToken,
+                masterDekBase64: savedDek.base64EncodedString(),
+                vaultName: vaultName,
+                deviceName: apiClient.deviceName
+            )
+        )
         if let cached = try localStore.loadSnapshot() {
             self.snapshot = cached
         }
@@ -420,6 +438,7 @@ public final class VaultStore {
         await apiClient.logout()
         try? secretStore.deleteData(forKey: Self.keychainSessionTokenKey)
         try? secretStore.deleteData(forKey: Self.keychainMasterDekKey)
+        localStore.clearShareExtensionSession()
         localStore.shredLocalCache()
         VolatileMediaMemoryCache.shared.clearAll()
         snapshot = MobileVaultSnapshot()
