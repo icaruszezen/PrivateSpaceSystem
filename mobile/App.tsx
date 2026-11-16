@@ -89,7 +89,7 @@ import {
 } from './src/components/IosModals';
 import { IosTransfersTabView } from './src/components/IosTransfersTabView';
 
-export type MobileTab = 'passwords' | 'transfers' | 'images' | 'videos' | 'notes' | 'sync';
+export type MobileTab = 'transfers' | 'passwords' | 'images' | 'videos' | 'notes' | 'sync';
 
 export interface PrivateSpaceMobileAppProps {
   initialServerUrl?: string;
@@ -362,7 +362,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
   );
   const coverTapTimesRef = useRef<number[]>([]);
 
-  const [activeTab, setActiveTab] = useState<MobileTab>('passwords');
+  const [activeTab, setActiveTab] = useState<MobileTab>('transfers');
   const [snapshot, setSnapshot] = useState<MobileVaultSnapshot | null>(null);
   const [securitySummary, setSecuritySummary] = useState<VaultSecuritySummary | null>(null);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
@@ -730,6 +730,7 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
 
       const { snapshot: next } = await client.syncDelta();
       setSnapshot({ ...next });
+      setActiveTab('transfers');
       setUnlocked(true);
       setBiometricLocked(false);
       setMasterPassword('');
@@ -3879,8 +3880,8 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
       >
         {(
           [
-            ['passwords', '密码库', 'key'],
             ['transfers', '互传', 'transfer'],
+            ['passwords', '密码库', 'key'],
             ['images', '相册', 'photo'],
             ['videos', '影院', 'film'],
             ['notes', '笔记', 'note'],

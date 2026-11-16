@@ -614,8 +614,8 @@ final class PrivateSpaceKitTests: XCTestCase {
             TransferFileClassifier.classify(filename: "backup-vault.zip"),
             .archive
         )
-        XCTAssertEqual(AppUpdateService.fallbackMarketingVersion, "0.6.0")
-        XCTAssertEqual(AppUpdateService.fallbackBuildNumber, 600)
+        XCTAssertEqual(AppUpdateService.fallbackMarketingVersion, "0.6.1")
+        XCTAssertEqual(AppUpdateService.fallbackBuildNumber, 601)
     }
 }
 

@@ -101,7 +101,7 @@ describe('PrivateSpace iOS Native & Standalone Zero-Knowledge Mobile Client Suit
     const healthRes = await app.request('/api/v1/health');
     expect(healthRes.status).toBe(200);
     const health = await healthRes.json();
-    expect(health.version).toBe('0.6.0');
+    expect(health.version).toBe('0.6.1');
     expect(health.encryption.zeroKnowledge).toBe(true);
     expect(health.capabilities).toContain('zero-knowledge-e2ee-v2');
     expect(health.capabilities).toContain('ios-autofill');
@@ -116,7 +116,7 @@ describe('PrivateSpace iOS Native & Standalone Zero-Knowledge Mobile Client Suit
     expect(sharePlist).toContain('<string>发送</string>');
     expect(sharePlist).toContain('<string>com.apple.share-services</string>');
     const projectYml = fs.readFileSync(path.resolve('ios/project.yml'), 'utf8');
-    expect(projectYml).toContain('MARKETING_VERSION: "0.6.0"');
+    expect(projectYml).toContain('MARKETING_VERSION: "0.6.1"');
     expect(projectYml).toContain('PrivateSpaceShareExtension:');
 
     // 3. Verify CFNetwork/Darwin User-Agent auto-detects platform = 'ios' during Zero-Knowledge login

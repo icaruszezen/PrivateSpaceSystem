@@ -1,6 +1,6 @@
 {
   "name": "privatespace-mobile",
-  "version": "0.3.0",
+  "version": "0.6.1",
   "private": true,
   "description": "PrivateSpace Android (Capacitor 6 + Kotlin Keystore/Biometric/FLAG_SECURE) & iOS Multi-Device Encrypted Sync Client",
   "main": "App.tsx",

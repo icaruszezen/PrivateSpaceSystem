@@ -76,7 +76,7 @@ import {
 } from './src/syncClient';
 
 type AppStage = 'booting' | 'auth' | 'pin_locked' | 'unlocked';
-type MobileTabId = 'passwords' | 'transfers' | 'images' | 'videos' | 'notes' | 'security';
+type MobileTabId = 'transfers' | 'passwords' | 'images' | 'videos' | 'notes' | 'security';
 
 const LS_SERVER_URL = 'pss_android_server_url';
 const LS_VAULT_NAME = 'pss_android_vault_name';
@@ -149,7 +149,7 @@ export default function PrivateSpaceMobileApp() {
   const [updateModalOpen, setUpdateModalOpen] = useState(false);
 
   // Unlocked Workspace State
-  const [activeTab, setActiveTab] = useState<MobileTabId>('passwords');
+  const [activeTab, setActiveTab] = useState<MobileTabId>('transfers');
   const [snapshot, setSnapshot] = useState<MobileVaultSnapshot>(createEmptySnapshot);
   const [isOfflineMode, setIsOfflineMode] = useState(false);
   const [sseConnected, setSseConnected] = useState(false);
@@ -901,6 +901,7 @@ export default function PrivateSpaceMobileApp() {
             setStage('auth');
             return;
           }
+          setActiveTab('transfers');
           setStage('unlocked');
           void performDeltaSync(true);
         }}
@@ -945,6 +946,7 @@ export default function PrivateSpaceMobileApp() {
             setHasOfflineCache(true);
             setIsOfflineMode(false);
             await refreshPendingCount();
+            setActiveTab('transfers');
             setStage('unlocked');
           }}
           onEnterOfflineMode={async () => {
@@ -953,6 +955,7 @@ export default function PrivateSpaceMobileApp() {
               setSnapshot(cached);
               setIsOfflineMode(true);
               await refreshPendingCount();
+              setActiveTab('transfers');
               setStage('unlocked');
               notify('已进入本机离线缓存视图');
             }
@@ -1081,20 +1084,6 @@ export default function PrivateSpaceMobileApp() {
 
       {/* Active Tab Content */}
       <main className={`m-viewport ${activeTab === 'transfers' ? 'is-transfer-view' : ''}`}>
-        {activeTab === 'passwords' && (
-          <MobilePasswordsTab
-            passwords={passwordList}
-            onCreatePassword={handleCreatePassword}
-            onUpdatePassword={handleUpdatePassword}
-            onDeletePermanent={handleDeletePasswordPermanent}
-            onEmptyTrash={handleEmptyPasswordTrash}
-            onImportCsv={handleImportCsv}
-            onCopySensitive={handleCopySensitive}
-            onInspectCipher={handleInspectCipher}
-            onNotify={notify}
-          />
-        )}
-
         {activeTab === 'transfers' && (
           <MobileTransferTab
             client={client}
@@ -1110,6 +1099,20 @@ export default function PrivateSpaceMobileApp() {
             onNotify={notify}
             initialSharedText={sharedInboundText}
             onClearSharedText={() => setSharedInboundText(null)}
+          />
+        )}
+
+        {activeTab === 'passwords' && (
+          <MobilePasswordsTab
+            passwords={passwordList}
+            onCreatePassword={handleCreatePassword}
+            onUpdatePassword={handleUpdatePassword}
+            onDeletePermanent={handleDeletePasswordPermanent}
+            onEmptyTrash={handleEmptyPasswordTrash}
+            onImportCsv={handleImportCsv}
+            onCopySensitive={handleCopySensitive}
+            onInspectCipher={handleInspectCipher}
+            onNotify={notify}
           />
         )}
 
@@ -1218,21 +1221,6 @@ export default function PrivateSpaceMobileApp() {
       {/* Bottom 6-Tab Android Navigation Bar */}
       <nav className="m-tabbar" aria-label="主导航栏">
         <button
-          id="m-nav-passwords"
-          type="button"
-          className={`m-tab-btn ${activeTab === 'passwords' ? 'is-active' : ''}`}
-          onClick={() => setActiveTab('passwords')}
-        >
-          <span className="m-tab-pill">
-            <KeyRound size={18} />
-            {activeCounts.passwords > 0 && (
-              <span className="m-tab-badge">{activeCounts.passwords}</span>
-            )}
-          </span>
-          <span className="m-tab-label">密码</span>
-        </button>
-
-        <button
           id="m-nav-transfers"
           type="button"
           className={`m-tab-btn ${activeTab === 'transfers' ? 'is-active' : ''}`}
@@ -1245,6 +1233,21 @@ export default function PrivateSpaceMobileApp() {
             )}
           </span>
           <span className="m-tab-label">互传</span>
+        </button>
+
+        <button
+          id="m-nav-passwords"
+          type="button"
+          className={`m-tab-btn ${activeTab === 'passwords' ? 'is-active' : ''}`}
+          onClick={() => setActiveTab('passwords')}
+        >
+          <span className="m-tab-pill">
+            <KeyRound size={18} />
+            {activeCounts.passwords > 0 && (
+              <span className="m-tab-badge">{activeCounts.passwords}</span>
+            )}
+          </span>
+          <span className="m-tab-label">密码</span>
         </button>
 
         <button

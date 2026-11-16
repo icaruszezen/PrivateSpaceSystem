@@ -264,4 +264,38 @@ describe('Mobile OS System Share ("发送") -> Cross-Device Zero-Knowledge Trans
     expect(rawSqlite.includes(Buffer.from('PSS_APK_BINARY_MARKER_776655', 'utf8'))).toBe(false);
     expect(rawSqlite.includes(Buffer.from(pngMarker, 'utf8'))).toBe(false);
   });
+
+  it('defaults app entry workspace to Transfers instead of Passwords across Android, iOS, and Web clients', () => {
+    const androidAppSrc = fs.readFileSync(path.resolve('mobile/AndroidApp.tsx'), 'utf8');
+    expect(androidAppSrc).toContain("useState<MobileTabId>('transfers')");
+    expect(androidAppSrc).not.toContain("useState<MobileTabId>('passwords')");
+    expect(androidAppSrc.indexOf('id="m-nav-transfers"')).toBeLessThan(
+      androidAppSrc.indexOf('id="m-nav-passwords"'),
+    );
+
+    const iosWebAppSrc = fs.readFileSync(path.resolve('mobile/App.tsx'), 'utf8');
+    expect(iosWebAppSrc).toContain("useState<MobileTab>('transfers')");
+    expect(iosWebAppSrc).not.toContain("useState<MobileTab>('passwords')");
+    expect(iosWebAppSrc.indexOf("['transfers', '互传', 'transfer']")).toBeLessThan(
+      iosWebAppSrc.indexOf("['passwords', '密码库', 'key']"),
+    );
+
+    const iosSwiftShellSrc = fs.readFileSync(
+      path.resolve('ios/App/Views/MainTabShellView.swift'),
+      'utf8',
+    );
+    expect(iosSwiftShellSrc).toContain('selectedTab: PrimaryVaultTab = .transfers');
+    expect(iosSwiftShellSrc.indexOf('TransfersTabView(')).toBeLessThan(
+      iosSwiftShellSrc.indexOf('PasswordsTabView('),
+    );
+
+    const webAppSrc = fs.readFileSync(path.resolve('src/client/App.tsx'), 'utf8');
+    expect(webAppSrc).toContain("useState<WorkspaceSection>('transfers')");
+    expect(webAppSrc).not.toContain("useState<WorkspaceSection>('passwords')");
+
+    const sidebarSrc = fs.readFileSync(path.resolve('src/client/components/Sidebar.tsx'), 'utf8');
+    expect(sidebarSrc.indexOf('id="nav-section-transfers"')).toBeLessThan(
+      sidebarSrc.indexOf('id="nav-section-passwords"'),
+    );
+  });
 });

@@ -52,7 +52,7 @@ export const App: React.FC = () => {
   });
 
   // Core Encrypted Workspace State
-  const [activeSection, setActiveSection] = useState<WorkspaceSection>('passwords');
+  const [activeSection, setActiveSection] = useState<WorkspaceSection>('transfers');
   const [notes, setNotes] = useState<NoteItem[]>([]);
   const [passwords, setPasswords] = useState<PasswordItem[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
@@ -778,6 +778,7 @@ export const App: React.FC = () => {
           setVaultName(name);
           setKeyFingerprint(fp);
           await loadInitialWorkspace();
+          setActiveSection('transfers');
           setPhase('unlocked');
         }}
       />

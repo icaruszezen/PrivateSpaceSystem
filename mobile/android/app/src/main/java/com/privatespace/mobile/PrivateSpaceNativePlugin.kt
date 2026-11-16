@@ -493,7 +493,7 @@ class PrivateSpaceNativePlugin : Plugin() {
         } catch (_: Exception) {
             null
         }
-        val appVersionName = pkgInfo?.versionName ?: "0.6.0"
+        val appVersionName = pkgInfo?.versionName ?: "0.6.1"
         val appVersionCode = if (pkgInfo != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 pkgInfo.longVersionCode.toInt()
@@ -502,7 +502,7 @@ class PrivateSpaceNativePlugin : Plugin() {
                 pkgInfo.versionCode
             }
         } else {
-            600
+            601
         }
         val canInstallPackages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.packageManager.canRequestPackageInstalls()
