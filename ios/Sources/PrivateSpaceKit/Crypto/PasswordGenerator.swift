@@ -384,7 +384,10 @@ public enum PasswordSecurityEngine {
     }
 
     private static func parseCsvRecords(_ rawText: String) -> [[String]] {
-        let cleaned = rawText.hasPrefix("\u{FEFF}") ? String(rawText.dropFirst()) : rawText
+        let withoutBom = rawText.hasPrefix("\u{FEFF}") ? String(rawText.dropFirst()) : rawText
+        let cleaned = withoutBom
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
 
         var rows: [[String]] = []
@@ -414,10 +417,7 @@ public enum PasswordSecurityEngine {
                 } else if ch == "," {
                     currentRow.append(currentCell)
                     currentCell = ""
-                } else if ch == "\r" || ch == "\n" {
-                    if ch == "\r" && i + 1 < chars.count && chars[i + 1] == "\n" {
-                        i += 1
-                    }
+                } else if ch == "\n" || ch.isNewline {
                     currentRow.append(currentCell)
                     currentCell = ""
                     if currentRow.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
