@@ -561,6 +561,7 @@ export function IosPasswordEditorModal(props: {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [url, setUrl] = useState('');
+  const [enableTotp, setEnableTotp] = useState(false);
   const [totpSecret, setTotpSecret] = useState('');
   const [category, setCategory] = useState<PasswordCategory>('login');
   const [notes, setNotes] = useState('');
@@ -574,6 +575,7 @@ export function IosPasswordEditorModal(props: {
       setUsername(props.existing.username);
       setPassword(props.existing.password);
       setUrl(props.existing.url);
+      setEnableTotp(Boolean(props.existing.totpSecret?.trim()));
       setTotpSecret(props.existing.totpSecret);
       setCategory(props.existing.category);
       setNotes(props.existing.notes);
@@ -582,18 +584,21 @@ export function IosPasswordEditorModal(props: {
     } else {
       setTitle('');
       setUsername('');
-      setPassword(props.client.generateStrongPassword({ length: 22 }).password);
+      setPassword('');
       setUrl('');
+      setEnableTotp(false);
       setTotpSecret('');
       setCategory('login');
       setNotes('');
       setTagsText('');
       setCustomFields([]);
     }
-  }, [props.visible, props.existing, props.client]);
+  }, [props.visible, props.existing]);
 
   if (!props.visible) return null;
   const entropy = props.client.evaluateEntropy(password);
+  const liveTotp =
+    enableTotp && totpSecret.trim() ? props.client.computeTotp(totpSecret.trim()) : null;
 
   const inputStyle = {
     backgroundColor: props.theme.bgInput,
@@ -637,7 +642,7 @@ export function IosPasswordEditorModal(props: {
                   username: username.trim(),
                   password,
                   url: url.trim(),
-                  totpSecret: totpSecret.trim(),
+                  totpSecret: enableTotp ? totpSecret.trim() : '',
                   category,
                   notes,
                   tags,
@@ -655,7 +660,7 @@ export function IosPasswordEditorModal(props: {
           <TextInput
             value={title}
             onChangeText={setTitle}
-            placeholder="站点或凭据名称（例如 GitHub / AWS）"
+            placeholder="网站或应用名称（例如 京东商城 / 家庭路由 / GitHub）"
             style={inputStyle}
             testID="pw-title-input"
           />
@@ -663,7 +668,7 @@ export function IosPasswordEditorModal(props: {
             value={username}
             onChangeText={setUsername}
             autoCapitalize="none"
-            placeholder="账号 / 邮箱 / 手机号"
+            placeholder="账号 / 邮箱 / 手机号（选填）"
             style={inputStyle}
             testID="pw-username-input"
           />
@@ -671,7 +676,7 @@ export function IosPasswordEditorModal(props: {
             value={url}
             onChangeText={setUrl}
             autoCapitalize="none"
-            placeholder="关联网址（https://... 用于 iOS 自动填充匹配）"
+            placeholder="关联网址（选填，https://... 用于自动填充匹配）"
             style={inputStyle}
           />
 
@@ -727,7 +732,7 @@ export function IosPasswordEditorModal(props: {
               }}
             >
               <Text style={{ fontSize: 11, fontWeight: '700', color: props.theme.textSecondary }}>
-                口令 ({entropy.label} · {entropy.entropyBits} bits)
+                登录密码{password ? ` (${entropy.label} · ${entropy.entropyBits} bits)` : ''}
               </Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <TouchableOpacity
@@ -755,7 +760,7 @@ export function IosPasswordEditorModal(props: {
               value={password}
               onChangeText={setPassword}
               autoCapitalize="none"
-              placeholder="输入或点击上方生成高熵口令"
+              placeholder="输入现有密码或点击上方生成高强度口令"
               style={{
                 ...inputStyle,
                 fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
@@ -763,16 +768,62 @@ export function IosPasswordEditorModal(props: {
             />
           </View>
 
-          <TextInput
-            value={totpSecret}
-            onChangeText={setTotpSecret}
-            autoCapitalize="none"
-            placeholder="2FA TOTP Base32 密钥或 otpauth://totp/..."
+          <View
             style={{
-              ...inputStyle,
-              fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+              backgroundColor: props.theme.bgCard,
+              padding: 12,
+              borderRadius: 12,
+              gap: 10,
+              borderWidth: 1,
+              borderColor: enableTotp ? props.theme.accent : props.theme.border,
             }}
-          />
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: props.theme.textPrimary }}>
+                  两步验证 (2FA，可选)
+                </Text>
+                <Text style={{ fontSize: 11, color: props.theme.textSecondary, marginTop: 2 }}>
+                  大多数网站仅需密码；支持身份验证器时再按需开启
+                </Text>
+              </View>
+              <Switch value={enableTotp} onValueChange={setEnableTotp} />
+            </View>
+
+            {enableTotp && (
+              <>
+                <TextInput
+                  value={totpSecret}
+                  onChangeText={setTotpSecret}
+                  autoCapitalize="none"
+                  placeholder="Base32 密钥或 otpauth://totp/..."
+                  style={{
+                    ...inputStyle,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  }}
+                />
+                {liveTotp && (
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '700',
+                      color: props.theme.accent,
+                      fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                    }}
+                  >
+                    实时验证码：{liveTotp.formattedCode}（{liveTotp.remainingSeconds}s 刷新）
+                  </Text>
+                )}
+              </>
+            )}
+          </View>
 
           <TextInput
             value={tagsText}

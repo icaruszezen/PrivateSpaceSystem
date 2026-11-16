@@ -19,7 +19,12 @@ import {
   hydrateDecryptedMedia,
   unlockZeroKnowledgeMasterBundle,
 } from '../src/shared/e2ee.js';
-import { generateTotp, parseTotpInput } from '../src/shared/totp.js';
+import {
+  generateTotp,
+  isValidTotpSecret,
+  parseTotpInput,
+  tryGenerateTotp,
+} from '../src/shared/totp.js';
 import {
   auditPasswordVault,
   evaluatePasswordEntropy,
@@ -271,9 +276,73 @@ describe('Passwords, TOTP, Client-Side PSENC001 Chunked Media, Blind HTTP 206 St
     ]);
     expect(audit.weakIds).toContain('pw-weak-1');
     expect(audit.reusedIds).toEqual(expect.arrayContaining(['pw-dup-a', 'pw-dup-b']));
+    expect(audit.totpIds).toEqual(['pw-dup-a']);
+    expect(audit.invalidTotpIds).toEqual([]);
     expect(audit.missingTotpIds).toEqual(expect.arrayContaining(['pw-weak-1', 'pw-dup-b']));
     expect(audit.staleIds).toContain('pw-weak-1');
     expect(audit.healthScore).toBeLessThan(85);
+  });
+
+  it('treats 2FA as strictly optional: strong password-only accounts achieve 100/100 while flagging malformed TOTP secrets', () => {
+    const nowIso = new Date().toISOString();
+    const makeEntry = (overrides: Partial<PasswordItem>): PasswordItem => ({
+      id: 'pw-std-1',
+      itemType: 'password',
+      title: 'Standard Website',
+      username: 'member@example.com',
+      password: generateSecurePassword({ length: 22 }),
+      url: 'https://shop.example.com',
+      totpSecret: '',
+      category: 'login',
+      notes: '',
+      tags: [],
+      customFields: [],
+      history: [],
+      passwordChangedAt: nowIso,
+      isPinned: false,
+      isArchived: false,
+      isTrashed: false,
+      revision: 1,
+      syncSeq: 1,
+      byteSize: 120,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      trashedAt: null,
+      ...overrides,
+    });
+
+    // Vault of normal websites/apps that do NOT support 2FA at all
+    const passwordOnlyAudit = auditPasswordVault([
+      makeEntry({ id: 'pw-jd', title: '京东商城', totpSecret: '' }),
+      makeEntry({ id: 'pw-router', title: 'OpenWrt 软路由', username: '', totpSecret: '' }),
+      makeEntry({ id: 'pw-nas', title: 'TrueNAS 存储', totpSecret: '   ' }),
+    ]);
+
+    expect(passwordOnlyAudit.healthScore).toBe(100);
+    expect(passwordOnlyAudit.totpIds).toEqual([]);
+    expect(passwordOnlyAudit.invalidTotpIds).toEqual([]);
+    expect(passwordOnlyAudit.missingTotpIds).toEqual(['pw-jd', 'pw-router', 'pw-nas']);
+
+    // Helpers handle blank, valid, and broken secrets safely without throwing
+    expect(isValidTotpSecret('')).toBe(false);
+    expect(isValidTotpSecret(null)).toBe(false);
+    expect(isValidTotpSecret('NOT_BASE32_999!')).toBe(false);
+    expect(isValidTotpSecret('JBSWY3DPEHPK3PXP')).toBe(true);
+    expect(tryGenerateTotp('')).toBeNull();
+    expect(tryGenerateTotp('INVALID_SECRET_0189')).toBeNull();
+    expect(tryGenerateTotp('JBSWY3DPEHPK3PXP')?.code).toMatch(/^\d{6}$/);
+
+    // Mixed vault with one valid optional 2FA and one broken 2FA secret
+    const mixedAudit = auditPasswordVault([
+      makeEntry({ id: 'pw-normal', totpSecret: '' }),
+      makeEntry({ id: 'pw-valid-2fa', totpSecret: 'JBSWY3DPEHPK3PXP' }),
+      makeEntry({ id: 'pw-broken-2fa', totpSecret: 'broken-0189-not-base32!' }),
+    ]);
+
+    expect(mixedAudit.totpIds).toEqual(['pw-valid-2fa']);
+    expect(mixedAudit.invalidTotpIds).toEqual(['pw-broken-2fa']);
+    expect(mixedAudit.missingTotpIds).toEqual(['pw-normal']);
+    expect(mixedAudit.healthScore).toBeLessThan(100);
   });
 
   it('validates blind PSENC001 ciphertext storage, streams encrypted ranges in O(1), detects bit tampering, and shreds on delete', async () => {

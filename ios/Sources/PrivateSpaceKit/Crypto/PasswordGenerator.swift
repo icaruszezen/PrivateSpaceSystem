@@ -57,6 +57,8 @@ public struct VaultPasswordAuditReport: Sendable, Equatable {
     public let totalCount: Int
     public let weakIds: [String]
     public let reusedIds: [String]
+    public let totpIds: [String]
+    public let invalidTotpIds: [String]
     public let missingTotpIds: [String]
     public let staleIds: [String]
 }
@@ -264,12 +266,16 @@ public enum PasswordSecurityEngine {
                 totalCount: 0,
                 weakIds: [],
                 reusedIds: [],
+                totpIds: [],
+                invalidTotpIds: [],
                 missingTotpIds: [],
                 staleIds: []
             )
         }
 
         var weakIds: [String] = []
+        var totpIds: [String] = []
+        var invalidTotpIds: [String] = []
         var missingTotpIds: [String] = []
         var staleIds: [String] = []
         var byPassword: [String: [String]] = [:]
@@ -286,8 +292,13 @@ public enum PasswordSecurityEngine {
             if !item.password.isEmpty {
                 byPassword[item.password, default: []].append(item.id)
             }
-            if item.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let rawTotp = item.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawTotp.isEmpty {
                 missingTotpIds.append(item.id)
+            } else if (try? TotpGenerator.parseTotpInput(rawTotp)) != nil {
+                totpIds.append(item.id)
+            } else {
+                invalidTotpIds.append(item.id)
             }
             let tsString = item.passwordChangedAt.isEmpty ? item.updatedAt : item.passwordChangedAt
             if let parsedDate = iso.date(from: tsString) ?? fallbackIso.date(from: tsString),
@@ -302,18 +313,21 @@ public enum PasswordSecurityEngine {
         }
         let reusedIds = active.map(\.id).filter { reusedSet.contains($0) }
 
+        // 2FA is optional: websites/apps without 2FA never incur a health score penalty.
         let total = Double(active.count)
-        let weakPenalty = (Double(weakIds.count) / total) * 45.0
+        let weakPenalty = (Double(weakIds.count) / total) * 55.0
         let reusedPenalty = (Double(reusedIds.count) / total) * 35.0
-        let totpPenalty = (Double(missingTotpIds.count) / total) * 15.0
-        let stalePenalty = (Double(staleIds.count) / total) * 5.0
-        let rawScore = Int((100.0 - weakPenalty - reusedPenalty - totpPenalty - stalePenalty).rounded())
+        let stalePenalty = (Double(staleIds.count) / total) * 10.0
+        let invalidTotpPenalty = (Double(invalidTotpIds.count) / total) * 10.0
+        let rawScore = Int((100.0 - weakPenalty - reusedPenalty - stalePenalty - invalidTotpPenalty).rounded())
 
         return VaultPasswordAuditReport(
             healthScore: max(0, min(100, rawScore)),
             totalCount: active.count,
             weakIds: weakIds,
             reusedIds: reusedIds,
+            totpIds: totpIds,
+            invalidTotpIds: invalidTotpIds,
             missingTotpIds: missingTotpIds,
             staleIds: staleIds
         )

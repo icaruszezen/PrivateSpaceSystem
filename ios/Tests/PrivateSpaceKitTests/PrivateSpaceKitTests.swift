@@ -92,8 +92,24 @@ final class PrivateSpaceKitTests: XCTestCase {
         XCTAssertTrue(audit.weakIds.contains("weak-1"))
         XCTAssertTrue(audit.reusedIds.contains("dup-a"))
         XCTAssertTrue(audit.reusedIds.contains("dup-b"))
+        XCTAssertEqual(audit.totpIds, ["dup-a"])
         XCTAssertTrue(audit.missingTotpIds.contains("weak-1"))
         XCTAssertLessThan(audit.healthScore, 85)
+
+        let passwordOnlyAudit = PasswordSecurityEngine.auditPasswordVault([
+            PasswordItem(
+                id: "std-only",
+                title: "Standard Site",
+                username: "user@example.com",
+                password: PasswordSecurityEngine.generateSecurePassword(),
+                totpSecret: "",
+                passwordChangedAt: nowIso,
+                createdAt: nowIso,
+                updatedAt: nowIso
+            )
+        ])
+        XCTAssertEqual(passwordOnlyAudit.healthScore, 100)
+        XCTAssertTrue(passwordOnlyAudit.totpIds.isEmpty)
 
         let csv = """
         name,url,username,password,totp

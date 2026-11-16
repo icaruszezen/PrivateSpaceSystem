@@ -698,6 +698,136 @@ select {
   opacity: 0.85;
 }
 
+.m-pw-cat-inline {
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--m-bg-subtle);
+  color: var(--m-text-tertiary);
+  flex-shrink: 0;
+}
+
+.m-opt-card {
+  border-radius: 12px;
+  border: 1px solid var(--m-border);
+  background: var(--m-bg-elevated);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+
+.m-opt-card.is-enabled {
+  border-color: var(--m-accent-border);
+}
+
+.m-opt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.m-opt-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.83rem;
+  font-weight: 700;
+  color: var(--m-text);
+}
+
+.m-opt-badge {
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--m-bg-subtle);
+  color: var(--m-text-tertiary);
+}
+
+.m-opt-sub {
+  font-size: 0.72rem;
+  color: var(--m-text-tertiary);
+  margin-top: 2px;
+}
+
+.m-opt-switch {
+  width: 38px;
+  height: 21px;
+  border-radius: 999px;
+  padding: 2px;
+  border: none;
+  background: var(--m-border);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.m-opt-switch.is-on {
+  background: var(--m-accent);
+}
+
+.m-opt-switch-thumb {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #ffffff;
+  transform: translateX(0);
+  transition: transform 140ms ease;
+}
+
+.m-opt-switch.is-on .m-opt-switch-thumb {
+  transform: translateX(17px);
+}
+
+.m-opt-body {
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--m-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m-opt-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--m-accent-soft);
+  color: var(--m-accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.m-opt-err {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--m-amber);
+  font-size: 0.75rem;
+}
+
+.m-opt-disclosure {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--m-text-secondary);
+  cursor: pointer;
+}
+
 /* ==================== Photo & Video Grids ==================== */
 .m-photo-grid {
   display: grid;
