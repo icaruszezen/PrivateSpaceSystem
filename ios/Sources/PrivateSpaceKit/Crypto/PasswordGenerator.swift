@@ -57,6 +57,8 @@ public struct VaultPasswordAuditReport: Sendable, Equatable {
     public let totalCount: Int
     public let weakIds: [String]
     public let reusedIds: [String]
+    public let totpIds: [String]
+    public let invalidTotpIds: [String]
     public let missingTotpIds: [String]
     public let staleIds: [String]
 }
@@ -264,12 +266,16 @@ public enum PasswordSecurityEngine {
                 totalCount: 0,
                 weakIds: [],
                 reusedIds: [],
+                totpIds: [],
+                invalidTotpIds: [],
                 missingTotpIds: [],
                 staleIds: []
             )
         }
 
         var weakIds: [String] = []
+        var totpIds: [String] = []
+        var invalidTotpIds: [String] = []
         var missingTotpIds: [String] = []
         var staleIds: [String] = []
         var byPassword: [String: [String]] = [:]
@@ -286,8 +292,13 @@ public enum PasswordSecurityEngine {
             if !item.password.isEmpty {
                 byPassword[item.password, default: []].append(item.id)
             }
-            if item.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let rawTotp = item.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawTotp.isEmpty {
                 missingTotpIds.append(item.id)
+            } else if (try? TotpGenerator.parseTotpInput(rawTotp)) != nil {
+                totpIds.append(item.id)
+            } else {
+                invalidTotpIds.append(item.id)
             }
             let tsString = item.passwordChangedAt.isEmpty ? item.updatedAt : item.passwordChangedAt
             if let parsedDate = iso.date(from: tsString) ?? fallbackIso.date(from: tsString),
@@ -302,18 +313,21 @@ public enum PasswordSecurityEngine {
         }
         let reusedIds = active.map(\.id).filter { reusedSet.contains($0) }
 
+        // 2FA is optional: websites/apps without 2FA never incur a health score penalty.
         let total = Double(active.count)
-        let weakPenalty = (Double(weakIds.count) / total) * 45.0
+        let weakPenalty = (Double(weakIds.count) / total) * 55.0
         let reusedPenalty = (Double(reusedIds.count) / total) * 35.0
-        let totpPenalty = (Double(missingTotpIds.count) / total) * 15.0
-        let stalePenalty = (Double(staleIds.count) / total) * 5.0
-        let rawScore = Int((100.0 - weakPenalty - reusedPenalty - totpPenalty - stalePenalty).rounded())
+        let stalePenalty = (Double(staleIds.count) / total) * 10.0
+        let invalidTotpPenalty = (Double(invalidTotpIds.count) / total) * 10.0
+        let rawScore = Int((100.0 - weakPenalty - reusedPenalty - stalePenalty - invalidTotpPenalty).rounded())
 
         return VaultPasswordAuditReport(
             healthScore: max(0, min(100, rawScore)),
             totalCount: active.count,
             weakIds: weakIds,
             reusedIds: reusedIds,
+            totpIds: totpIds,
+            invalidTotpIds: invalidTotpIds,
             missingTotpIds: missingTotpIds,
             staleIds: staleIds
         )
@@ -321,14 +335,13 @@ public enum PasswordSecurityEngine {
 
     /// Parses Chrome / Apple Passwords / 1Password / Bitwarden CSV exports into `ImportPasswordEntryInput`.
     public static func parsePasswordCsv(_ csvText: String) -> [ImportPasswordEntryInput] {
-        let lines = csvText
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map(String.init)
-        guard lines.count >= 2 else { return [] }
+        let rows = parseCsvRecords(csvText)
+        guard rows.count >= 2 else { return [] }
 
-        let headers = parseCsvRow(lines[0]).map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let headers = rows[0].map {
+            $0.replacingOccurrences(of: "\u{FEFF}", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
         }
 
         func colIndex(_ candidates: [String]) -> Int? {
@@ -339,25 +352,26 @@ public enum PasswordSecurityEngine {
         let urlIdx = colIndex(["url", "login_uri", "website", "网址"])
         let userIdx = colIndex(["username", "login_username", "user", "account", "用户名", "账号"])
         let passIdx = colIndex(["password", "login_password", "密码"])
-        let totpIdx = colIndex(["totp", "login_totp", "otpauth", "otp"])
+        let totpIdx = colIndex(["totp", "login_totp", "otpauth", "otp", "2fa"])
         let notesIdx = colIndex(["note", "notes", "extra", "备注"])
 
         var entries: [ImportPasswordEntryInput] = []
-        for rowLine in lines.dropFirst() {
-            let cols = parseCsvRow(rowLine)
+        for cols in rows.dropFirst() {
             func val(_ idx: Int?) -> String {
                 guard let idx, idx < cols.count else { return "" }
                 return cols[idx].trimmingCharacters(in: .whitespacesAndNewlines)
             }
             let pw = val(passIdx)
             let url = val(urlIdx)
-            let title = val(titleIdx).isEmpty ? AutoFillCredentialRecord.extractNormalizedDomain(from: url) : val(titleIdx)
-            guard !pw.isEmpty, (!title.isEmpty || !url.isEmpty) else { continue }
+            let username = val(userIdx)
+            let rawTitle = val(titleIdx)
+            let title = rawTitle.isEmpty ? AutoFillCredentialRecord.extractNormalizedDomain(from: url) : rawTitle
+            guard !pw.isEmpty || !title.isEmpty || !username.isEmpty else { continue }
 
             entries.append(
                 ImportPasswordEntryInput(
                     title: title.isEmpty ? "导入凭据" : title,
-                    username: val(userIdx),
+                    username: username,
                     password: pw,
                     url: url,
                     totpSecret: val(totpIdx),
@@ -369,39 +383,58 @@ public enum PasswordSecurityEngine {
         return entries
     }
 
-    private static func parseCsvRow(_ line: String) -> [String] {
-        var result: [String] = []
-        var current = ""
+    private static func parseCsvRecords(_ rawText: String) -> [[String]] {
+        let cleaned = rawText.hasPrefix("\u{FEFF}") ? String(rawText.dropFirst()) : rawText
+        guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+
+        var rows: [[String]] = []
+        var currentRow: [String] = []
+        var currentCell = ""
         var inQuotes = false
-        let chars = Array(line)
+        let chars = Array(cleaned)
         var i = 0
+
         while i < chars.count {
             let ch = chars[i]
             if inQuotes {
                 if ch == "\"" {
                     if i + 1 < chars.count && chars[i + 1] == "\"" {
-                        current.append("\"")
+                        currentCell.append("\"")
                         i += 2
                         continue
                     } else {
                         inQuotes = false
                     }
                 } else {
-                    current.append(ch)
+                    currentCell.append(ch)
                 }
             } else {
                 if ch == "\"" {
                     inQuotes = true
                 } else if ch == "," {
-                    result.append(current)
-                    current = ""
+                    currentRow.append(currentCell)
+                    currentCell = ""
+                } else if ch == "\r" || ch == "\n" {
+                    if ch == "\r" && i + 1 < chars.count && chars[i + 1] == "\n" {
+                        i += 1
+                    }
+                    currentRow.append(currentCell)
+                    currentCell = ""
+                    if currentRow.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                        rows.append(currentRow)
+                    }
+                    currentRow = []
                 } else {
-                    current.append(ch)
+                    currentCell.append(ch)
                 }
             }
             i += 1
         }
-        result.append(current)
-        return result
+
+        currentRow.append(currentCell)
+        if currentRow.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            rows.append(currentRow)
+        }
+        return rows
     }
 }

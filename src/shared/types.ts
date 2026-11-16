@@ -487,6 +487,21 @@ export interface ImportPasswordEntryInput {
   tags?: string[];
 }
 
+export const PASSWORD_IMPORT_BATCH_SIZE = 500;
+
+export interface PasswordImportProgress {
+  phase: 'encrypting' | 'uploading' | 'completed';
+  batchIndex: number;
+  totalBatches: number;
+  processedCount: number;
+  totalCount: number;
+}
+
+export interface PasswordImportOptions {
+  batchSize?: number;
+  onProgress?: (progress: PasswordImportProgress) => void;
+}
+
 // ==================== 3. Decrypted Client Domain: Images & Streaming Videos ====================
 
 export interface MediaDecryptedPayload {

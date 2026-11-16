@@ -84,7 +84,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
       },
       {
         id: 'cmd-sec-passwords',
-        label: '前往私密密码库 (TOTP / 强密码审计)',
+        label: '前往私密密码库 (账号密码 / 强口令审计)',
         sub: '空间切换',
         icon: <KeyRound size={15} />,
         run: () => {

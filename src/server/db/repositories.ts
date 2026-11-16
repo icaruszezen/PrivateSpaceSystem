@@ -637,9 +637,90 @@ export class VaultRepository {
     itemType: 'password',
     inputs: CreateEncryptedItemRequest[],
   ): EncryptedVaultRecordDto[] {
+    const slice = inputs.slice(0, 500);
+    if (slice.length === 0) return [];
+
+    const validated = slice.map((input) => {
+      const id = assertValidUuid(input.id, 'id');
+      const revision = Number(input.revision ?? 1);
+      if (revision !== 1) {
+        throw new CryptoValidationError('新建密文条目的初始 revision 必须为 1');
+      }
+      const encrypted = parseAndValidateCipherEnvelope(input.envelope);
+      return {
+        id,
+        isPinned: input.isPinned ? 1 : 0,
+        revision,
+        encrypted,
+      };
+    });
+
+    const seenIds = new Set<string>();
+    for (const item of validated) {
+      if (seenIds.has(item.id)) {
+        throw new ConflictError('批量导入中包含重复的条目 ID');
+      }
+      seenIds.add(item.id);
+    }
+
+    const now = new Date().toISOString();
     const created: EncryptedVaultRecordDto[] = [];
-    for (const entry of inputs.slice(0, 500)) {
-      created.push(this.createEncryptedItem(itemType, entry));
+    let lastSyncSeq = 0;
+
+    const checkStmt = this.db.prepare(`SELECT id FROM vault_items WHERE id = ?`);
+    const insertStmt = this.db.prepare(
+      `INSERT INTO vault_items (
+        id, item_type, is_pinned, is_archived, is_trashed,
+        revision, sync_seq, cipher_version, item_salt, nonce, auth_tag,
+        ciphertext, byte_size, created_at, updated_at, trashed_at
+      ) VALUES (?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    );
+
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const item of validated) {
+        if (checkStmt.get(item.id)) {
+          throw new ConflictError('条目 ID 已存在');
+        }
+        lastSyncSeq = this.nextSyncSeq();
+        insertStmt.run(
+          item.id,
+          itemType,
+          item.isPinned,
+          item.revision,
+          lastSyncSeq,
+          item.encrypted.cipherVersion,
+          item.encrypted.itemSalt,
+          item.encrypted.nonce,
+          item.encrypted.authTag,
+          item.encrypted.ciphertext,
+          item.encrypted.byteSize,
+          now,
+          now,
+        );
+        created.push({
+          id: item.id,
+          itemType,
+          isPinned: Boolean(item.isPinned),
+          isArchived: false,
+          isTrashed: false,
+          revision: item.revision,
+          syncSeq: lastSyncSeq,
+          byteSize: item.encrypted.byteSize,
+          createdAt: now,
+          updatedAt: now,
+          trashedAt: null,
+          envelope: serializeCipherEnvelope(item.encrypted),
+        });
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+
+    if (lastSyncSeq > 0) {
+      this.emitSync(lastSyncSeq, itemType);
     }
     return created;
   }

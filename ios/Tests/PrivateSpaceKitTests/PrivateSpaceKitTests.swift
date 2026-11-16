@@ -92,18 +92,34 @@ final class PrivateSpaceKitTests: XCTestCase {
         XCTAssertTrue(audit.weakIds.contains("weak-1"))
         XCTAssertTrue(audit.reusedIds.contains("dup-a"))
         XCTAssertTrue(audit.reusedIds.contains("dup-b"))
+        XCTAssertEqual(audit.totpIds, ["dup-a"])
         XCTAssertTrue(audit.missingTotpIds.contains("weak-1"))
         XCTAssertLessThan(audit.healthScore, 85)
 
-        let csv = """
-        name,url,username,password,totp
-        "GitHub Enterprise",https://github.com,dev@privatespace.io,"Ultra#Strong$Pass99",JBSWY3DPEHPK3PXP
-        Cloudflare,https://dash.cloudflare.com,dns@privatespace.io,Cf#Vault$Pass88,
-        """
+        let passwordOnlyAudit = PasswordSecurityEngine.auditPasswordVault([
+            PasswordItem(
+                id: "std-only",
+                title: "Standard Site",
+                username: "user@example.com",
+                password: PasswordSecurityEngine.generateSecurePassword(),
+                totpSecret: "",
+                passwordChangedAt: nowIso,
+                createdAt: nowIso,
+                updatedAt: nowIso
+            )
+        ])
+        XCTAssertEqual(passwordOnlyAudit.healthScore, 100)
+        XCTAssertTrue(passwordOnlyAudit.totpIds.isEmpty)
+
+        let csv = "\u{FEFF}name,url,username,password,totp,note\r\n" +
+            "\"GitHub Enterprise\",https://github.com,dev@privatespace.io,\"Ultra#Strong$Pass99\",JBSWY3DPEHPK3PXP,\"Line 1\nLine 2 \"\"ok\"\"\"\r\n" +
+            ",https://www.cloudflare.com/login,dns@privatespace.io,Cf#Vault$Pass88,,Edge DNS"
         let imported = PasswordSecurityEngine.parsePasswordCsv(csv)
         XCTAssertEqual(imported.count, 2)
         XCTAssertEqual(imported[0].title, "GitHub Enterprise")
         XCTAssertEqual(imported[0].totpSecret, "JBSWY3DPEHPK3PXP")
+        XCTAssertEqual(imported[0].notes, "Line 1\nLine 2 \"ok\"")
+        XCTAssertEqual(imported[1].title, "cloudflare.com")
     }
 
     // MARK: - 3. On-Device CryptoKit AES-256-GCM Zero-Plaintext Cache & AutoFill Domain Matching

@@ -1,8 +1,9 @@
 import { Hono } from 'hono';
-import type {
-  BatchCreateEncryptedItemsRequest,
-  CreateEncryptedItemRequest,
-  UpdateEncryptedItemRequest,
+import {
+  type BatchCreateEncryptedItemsRequest,
+  type CreateEncryptedItemRequest,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  type UpdateEncryptedItemRequest,
 } from '../../shared/types.js';
 import type { EphemeralSessionCrypto } from '../crypto/sessionStore.js';
 import { CryptoValidationError } from '../crypto/vaultCrypto.js';
@@ -79,6 +80,17 @@ export function createPasswordsRoutes(
 
     const body = rawBody as Partial<BatchCreateEncryptedItemsRequest>;
     const inputs = Array.isArray(body.items) ? body.items : [];
+    if (inputs.length > PASSWORD_IMPORT_BATCH_SIZE) {
+      return c.json(
+        {
+          error: {
+            code: 'BATCH_LIMIT_EXCEEDED',
+            message: `单批次最多提交 ${PASSWORD_IMPORT_BATCH_SIZE} 条加密密码，请按每批 ${PASSWORD_IMPORT_BATCH_SIZE} 条自动分批上传`,
+          },
+        },
+        400,
+      );
+    }
 
     try {
       const items = repo.batchCreateEncryptedItems('password', inputs);

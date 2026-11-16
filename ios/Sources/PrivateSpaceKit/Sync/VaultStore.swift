@@ -28,9 +28,10 @@ public enum NoteSortMode: String, CaseIterable, Identifiable, Sendable {
 
 public enum PasswordAuditFilter: String, CaseIterable, Identifiable, Sendable {
     case none = "全部凭据"
+    case has2FA = "含 2FA"
     case weak = "弱口令"
     case reused = "重复密码"
-    case missing2FA = "未启用 2FA"
+    case stale = "久未更换"
     case trash = "回收站"
 
     public var id: String { rawValue }
@@ -736,7 +737,8 @@ public final class VaultStore {
         let audit = passwordAudit
         let weakSet = Set(audit.weakIds)
         let reusedSet = Set(audit.reusedIds)
-        let missing2FASet = Set(audit.missingTotpIds)
+        let staleSet = Set(audit.staleIds)
+        let totpSet = Set(audit.totpIds)
 
         return snapshot.passwords.values
             .filter { item in
@@ -749,9 +751,10 @@ public final class VaultStore {
                     return false
                 }
                 switch auditFilter {
+                case .has2FA where !totpSet.contains(item.id): return false
                 case .weak where !weakSet.contains(item.id): return false
                 case .reused where !reusedSet.contains(item.id): return false
-                case .missing2FA where !missing2FASet.contains(item.id): return false
+                case .stale where !staleSet.contains(item.id): return false
                 default: break
                 }
                 if !q.isEmpty {
@@ -972,7 +975,12 @@ public final class VaultStore {
                 snapshot.lastSyncSeq = max(snapshot.lastSyncSeq, item.syncSeq)
             }
             try? localStore.saveSnapshot(snapshot)
-            showToast("成功导入 \(imported.count) 条加密密码")
+            let batchCount = (imported.count + PrivateSpaceAPIClient.passwordImportBatchSize - 1) / PrivateSpaceAPIClient.passwordImportBatchSize
+            if batchCount > 1 {
+                showToast("已自动分 \(batchCount) 批导入 \(imported.count) 条加密密码")
+            } else {
+                showToast("成功导入 \(imported.count) 条加密密码")
+            }
             return imported.count
         } catch {
             errorBanner = error.localizedDescription

@@ -38,10 +38,20 @@ struct PasswordsTabView: View {
                             FilterChipButton(
                                 title: "全部类型",
                                 icon: "square.grid.2x2",
-                                isSelected: selectedCategory == nil && auditFilter != .trash
+                                isSelected: selectedCategory == nil && auditFilter != .trash && auditFilter != .has2FA
                             ) {
                                 selectedCategory = nil
-                                if auditFilter == .trash { auditFilter = .none }
+                                if auditFilter == .trash || auditFilter == .has2FA { auditFilter = .none }
+                            }
+
+                            if !audit.totpIds.isEmpty || auditFilter == .has2FA {
+                                FilterChipButton(
+                                    title: "含 2FA (\(audit.totpIds.count))",
+                                    icon: "clock.badge.checkmark",
+                                    isSelected: auditFilter == .has2FA
+                                ) {
+                                    auditFilter = (auditFilter == .has2FA) ? .none : .has2FA
+                                }
                             }
 
                             ForEach(PasswordCategory.allCases) { cat in
@@ -69,7 +79,7 @@ struct PasswordsTabView: View {
                         ContentUnavailableView(
                             "暂无匹配的加密凭据",
                             systemImage: "key.slash",
-                            description: Text("点击右上角 + 创建新账号密码，或通过 CSV 批量导入")
+                            description: Text("点击右上角 + 创建网站或应用密码，或通过 CSV 批量导入")
                         )
                         .padding(.vertical, 36)
                     } else {
@@ -92,7 +102,7 @@ struct PasswordsTabView: View {
             }
             .background(MineralPineTheme.pageBackground(for: colorScheme))
             .navigationTitle("密码保险箱")
-            .searchable(text: $searchQuery, prompt: "搜索站点、账号、域名或标签")
+            .searchable(text: $searchQuery, prompt: "搜索网站、账号、域名或标签")
             .refreshable {
                 await store.syncDelta()
             }
@@ -209,12 +219,12 @@ private struct VaultHealthBannerCard: View {
                     activeFilter = (activeFilter == .reused) ? .none : .reused
                 }
                 AuditMetricPill(
-                    title: "缺 2FA",
-                    count: audit.missingTotpIds.count,
-                    active: activeFilter == .missing2FA,
+                    title: "久未更换",
+                    count: audit.staleIds.count,
+                    active: activeFilter == .stale,
                     tint: MineralPineTheme.primaryAccent(for: colorScheme)
                 ) {
-                    activeFilter = (activeFilter == .missing2FA) ? .none : .missing2FA
+                    activeFilter = (activeFilter == .stale) ? .none : .stale
                 }
             }
         }
@@ -483,7 +493,27 @@ struct PasswordDetailSheet: View {
                         }
                     }
 
-                    if !item.totpSecret.isEmpty {
+                    if !item.url.isEmpty {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("关联站点")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(item.url)
+                                    .font(.footnote)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            if let targetURL = URL(string: item.url.contains("://") ? item.url : "https://\(item.url)") {
+                                Link("打开", destination: targetURL)
+                                    .font(.caption.weight(.semibold))
+                            }
+                        }
+                    }
+                }
+
+                if !item.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Section("两步验证（可选配置）") {
                         TimelineView(.periodic(from: .now, by: 1.0)) { context in
                             if let totp = try? TotpGenerator.generateTotp(item.totpSecret, date: context.date) {
                                 HStack {
@@ -505,24 +535,10 @@ struct PasswordDetailSheet: View {
                                     }
                                     .font(.caption.weight(.semibold))
                                 }
-                            }
-                        }
-                    }
-
-                    if !item.url.isEmpty {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("关联站点")
+                            } else {
+                                Text("当前两步验证密钥格式有误，请点击右上角编辑修正或关闭。")
                                     .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(item.url)
-                                    .font(.footnote)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            if let targetURL = URL(string: item.url.contains("://") ? item.url : "https://\(item.url)") {
-                                Link("打开", destination: targetURL)
-                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(MineralPineTheme.amber)
                             }
                         }
                     }
@@ -672,6 +688,7 @@ struct PasswordEditorSheet: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var url: String = ""
+    @State private var enableTotp: Bool = false
     @State private var totpSecret: String = ""
     @State private var category: PasswordCategory = .login
     @State private var notes: String = ""
@@ -683,11 +700,11 @@ struct PasswordEditorSheet: View {
         NavigationStack {
             Form {
                 Section("账号信息") {
-                    TextField("标题（如 GitHub / AWS Root）", text: $title)
-                    TextField("用户名 / 邮箱 / 手机号", text: $username)
+                    TextField("网站或应用名称（如 京东商城 / 家庭路由 / GitHub）", text: $title)
+                    TextField("用户名 / 邮箱 / 手机号（选填）", text: $username)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    TextField("关联网址（用于 iOS 自动填充域名匹配）", text: $url)
+                    TextField("关联网址（选填，用于 iOS 自动填充域名匹配）", text: $url)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
@@ -698,9 +715,9 @@ struct PasswordEditorSheet: View {
                     }
                 }
 
-                Section("高强度口令与两步验证 (2FA)") {
+                Section("登录密码") {
                     HStack {
-                        TextField("密码口令", text: $password)
+                        TextField("输入现有密码或点击右侧生成", text: $password)
                             .font(.system(.body, design: .monospaced))
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -718,14 +735,23 @@ struct PasswordEditorSheet: View {
                             .font(.caption)
                             .foregroundStyle(report.score >= 3 ? MineralPineTheme.accent : MineralPineTheme.amber)
                     }
-
-                    TextField("TOTP Base32 密钥或 otpauth:// 链接", text: $totpSecret)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
                 }
 
-                Section("自定义隐藏字段") {
+                Section {
+                    Toggle("启用两步验证 (2FA，可选)", isOn: $enableTotp)
+                    if enableTotp {
+                        TextField("TOTP Base32 密钥或 otpauth:// 链接", text: $totpSecret)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                } header: {
+                    Text("两步验证（可选项）")
+                } footer: {
+                    Text("大多数网站或应用仅支持常规密码，仅在目标服务支持身份验证器时开启。")
+                }
+
+                Section("自定义隐藏字段（选填）") {
                     ForEach($customFields) { $field in
                         VStack(alignment: .leading, spacing: 6) {
                             TextField("字段名（如 恢复码 / PIN）", text: $field.label)
@@ -747,7 +773,7 @@ struct PasswordEditorSheet: View {
                     }
                 }
 
-                Section("标签与备注") {
+                Section("标签与备注（选填）") {
                     TextField("标签（逗号分隔）", text: $tagsText)
                     TextField("加密备注", text: $notes, axis: .vertical)
                         .lineLimit(3...6)
@@ -774,16 +800,12 @@ struct PasswordEditorSheet: View {
                 )
             }
             .onAppear {
-                guard let existing else {
-                    if password.isEmpty {
-                        password = PasswordSecurityEngine.generateSecurePassword()
-                    }
-                    return
-                }
+                guard let existing else { return }
                 title = existing.title
                 username = existing.username
                 password = existing.password
                 url = existing.url
+                enableTotp = !existing.totpSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 totpSecret = existing.totpSecret
                 category = existing.category
                 notes = existing.notes
@@ -799,6 +821,7 @@ struct PasswordEditorSheet: View {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         let cleanedFields = customFields.filter { !$0.label.isEmpty || !$0.value.isEmpty }
+        let finalTotp = enableTotp ? totpSecret.trimmingCharacters(in: .whitespacesAndNewlines) : ""
 
         Task {
             if let existing {
@@ -809,7 +832,7 @@ struct PasswordEditorSheet: View {
                         username: username,
                         password: password,
                         url: url,
-                        totpSecret: totpSecret,
+                        totpSecret: finalTotp,
                         category: category,
                         notes: notes,
                         tags: tags,
@@ -824,7 +847,7 @@ struct PasswordEditorSheet: View {
                         username: username,
                         password: password,
                         url: url,
-                        totpSecret: totpSecret,
+                        totpSecret: finalTotp,
                         category: category,
                         notes: notes,
                         tags: tags,
@@ -967,24 +990,32 @@ struct PasswordCsvImportSheet: View {
     @Bindable var store: VaultStore
     @Environment(\.dismiss) private var dismiss
     @State private var csvContent: String = ""
+    @State private var isImporting: Bool = false
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("粘贴 Apple 密码 / Chrome / 1Password / Bitwarden CSV") {
                     TextField(
-                        "name,url,username,password,totp\nGitHub,https://github.com,me@dev.io,Secret!123,JBSWY3DPEHPK3PXP",
+                        "name,url,username,password,note\nGitHub,https://github.com,me@dev.io,Secret!123,主研发账号",
                         text: $csvContent,
                         axis: .vertical
                     )
                     .font(.system(.caption, design: .monospaced))
                     .lineLimit(8...16)
+                    .disabled(isImporting)
                 }
                 Section {
                     let previewCount = PasswordSecurityEngine.parsePasswordCsv(csvContent).count
-                    Text("已识别可导入条目：\(previewCount) 条（入库后全量 AES-256-GCM 静态加密）")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    let batchSize = PrivateSpaceAPIClient.passwordImportBatchSize
+                    let batchCount = (previewCount + batchSize - 1) / batchSize
+                    Text(
+                        batchCount > 1
+                            ? "已识别可导入条目：\(previewCount) 条 · 将自动拆分为 \(batchCount) 批（每批最多 \(batchSize) 条）AES-256-GCM 加密上传"
+                            : "已识别可导入条目：\(previewCount) 条（入库后全量 AES-256-GCM 静态加密）"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(batchCount > 1 ? .primary : .secondary)
                 }
             }
             .navigationTitle("CSV 批量导入")
@@ -992,15 +1023,18 @@ struct PasswordCsvImportSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(isImporting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("加密导入") {
+                    Button(isImporting ? "正在分批导入..." : "加密导入") {
                         Task {
+                            isImporting = true
+                            defer { isImporting = false }
                             let count = await store.importPasswordCsv(csvContent)
                             if count > 0 { dismiss() }
                         }
                     }
-                    .disabled(csvContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isImporting || csvContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }

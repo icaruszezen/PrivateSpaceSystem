@@ -19,17 +19,28 @@ import {
   hydrateDecryptedMedia,
   unlockZeroKnowledgeMasterBundle,
 } from '../src/shared/e2ee.js';
-import { generateTotp, parseTotpInput } from '../src/shared/totp.js';
+import {
+  generateTotp,
+  isValidTotpSecret,
+  parseTotpInput,
+  tryGenerateTotp,
+} from '../src/shared/totp.js';
 import {
   auditPasswordVault,
   evaluatePasswordEntropy,
   generateMemorablePassphrase,
   generateSecurePassword,
 } from '../src/shared/passwordGenerator.js';
+import {
+  chunkPasswordImportEntries,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  parsePasswordCsv,
+} from '../src/shared/passwordCsv.js';
 import type {
   EncryptedMediaUploadMetadata,
   EncryptedVaultRecordDto,
   MediaDecryptedPayload,
+  PasswordImportProgress,
   PasswordItem,
 } from '../src/shared/types.js';
 import { PrivateSpaceMobileClient } from '../mobile/src/syncClient.js';
@@ -271,9 +282,73 @@ describe('Passwords, TOTP, Client-Side PSENC001 Chunked Media, Blind HTTP 206 St
     ]);
     expect(audit.weakIds).toContain('pw-weak-1');
     expect(audit.reusedIds).toEqual(expect.arrayContaining(['pw-dup-a', 'pw-dup-b']));
+    expect(audit.totpIds).toEqual(['pw-dup-a']);
+    expect(audit.invalidTotpIds).toEqual([]);
     expect(audit.missingTotpIds).toEqual(expect.arrayContaining(['pw-weak-1', 'pw-dup-b']));
     expect(audit.staleIds).toContain('pw-weak-1');
     expect(audit.healthScore).toBeLessThan(85);
+  });
+
+  it('treats 2FA as strictly optional: strong password-only accounts achieve 100/100 while flagging malformed TOTP secrets', () => {
+    const nowIso = new Date().toISOString();
+    const makeEntry = (overrides: Partial<PasswordItem>): PasswordItem => ({
+      id: 'pw-std-1',
+      itemType: 'password',
+      title: 'Standard Website',
+      username: 'member@example.com',
+      password: generateSecurePassword({ length: 22 }),
+      url: 'https://shop.example.com',
+      totpSecret: '',
+      category: 'login',
+      notes: '',
+      tags: [],
+      customFields: [],
+      history: [],
+      passwordChangedAt: nowIso,
+      isPinned: false,
+      isArchived: false,
+      isTrashed: false,
+      revision: 1,
+      syncSeq: 1,
+      byteSize: 120,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      trashedAt: null,
+      ...overrides,
+    });
+
+    // Vault of normal websites/apps that do NOT support 2FA at all
+    const passwordOnlyAudit = auditPasswordVault([
+      makeEntry({ id: 'pw-jd', title: '京东商城', totpSecret: '' }),
+      makeEntry({ id: 'pw-router', title: 'OpenWrt 软路由', username: '', totpSecret: '' }),
+      makeEntry({ id: 'pw-nas', title: 'TrueNAS 存储', totpSecret: '   ' }),
+    ]);
+
+    expect(passwordOnlyAudit.healthScore).toBe(100);
+    expect(passwordOnlyAudit.totpIds).toEqual([]);
+    expect(passwordOnlyAudit.invalidTotpIds).toEqual([]);
+    expect(passwordOnlyAudit.missingTotpIds).toEqual(['pw-jd', 'pw-router', 'pw-nas']);
+
+    // Helpers handle blank, valid, and broken secrets safely without throwing
+    expect(isValidTotpSecret('')).toBe(false);
+    expect(isValidTotpSecret(null)).toBe(false);
+    expect(isValidTotpSecret('NOT_BASE32_999!')).toBe(false);
+    expect(isValidTotpSecret('JBSWY3DPEHPK3PXP')).toBe(true);
+    expect(tryGenerateTotp('')).toBeNull();
+    expect(tryGenerateTotp('INVALID_SECRET_0189')).toBeNull();
+    expect(tryGenerateTotp('JBSWY3DPEHPK3PXP')?.code).toMatch(/^\d{6}$/);
+
+    // Mixed vault with one valid optional 2FA and one broken 2FA secret
+    const mixedAudit = auditPasswordVault([
+      makeEntry({ id: 'pw-normal', totpSecret: '' }),
+      makeEntry({ id: 'pw-valid-2fa', totpSecret: 'JBSWY3DPEHPK3PXP' }),
+      makeEntry({ id: 'pw-broken-2fa', totpSecret: 'broken-0189-not-base32!' }),
+    ]);
+
+    expect(mixedAudit.totpIds).toEqual(['pw-valid-2fa']);
+    expect(mixedAudit.invalidTotpIds).toEqual(['pw-broken-2fa']);
+    expect(mixedAudit.missingTotpIds).toEqual(['pw-normal']);
+    expect(mixedAudit.healthScore).toBeLessThan(100);
   });
 
   it('validates blind PSENC001 ciphertext storage, streams encrypted ranges in O(1), detects bit tampering, and shreds on delete', async () => {
@@ -465,6 +540,109 @@ describe('Passwords, TOTP, Client-Side PSENC001 Chunked Media, Blind HTTP 206 St
     expect(rawDb).not.toContain('root-admin@corp-vault.internal');
     expect(rawDb).not.toContain('AWS Root Console_SECRET_TITLE');
     expect(rawDb).not.toContain('ImportedGhPassword!42');
+  });
+
+  it('automatically splits >500 Google Chrome CSV passwords into 500-item encrypted batches with BOM & multiline notes support', async () => {
+    const { inst, dbPath } = bootTestApp();
+    const { app } = inst;
+
+    const client = new PrivateSpaceMobileClient({
+      baseUrl: 'http://privatespace.local',
+      platform: 'android',
+      deviceName: 'Chrome CSV Batch Importer',
+      fetchImpl: makeInProcessFetch(app),
+    });
+    const session = await client.setupAdmin({
+      password: 'BatchImportMaster#2026',
+      vaultName: 'ChromeLargeVault',
+    });
+
+    // Build a 1,125-entry Google Chrome CSV export (with UTF-8 BOM + quoted multiline note)
+    const totalRows = 1_125;
+    const csvLines: string[] = ['\uFEFFname,url,username,password,note'];
+    for (let i = 1; i <= totalRows; i++) {
+      if (i === 1) {
+        csvLines.push(
+          `"Google Cloud Prod #1",https://console.cloud.google.com,sre-1@corp.io,"ChromeSecret#0001","Recovery codes:\n1111-2222\nQuote ""escaped"" ok"`,
+        );
+      } else if (i === 501) {
+        // Empty name -> falls back to normalized domain
+        csvLines.push(
+          `,https://www.cloudflare-batch2.com/login,ops-501@corp.io,BatchTwoBoundaryPass#501,Second batch boundary`,
+        );
+      } else {
+        csvLines.push(
+          `Chrome Account #${i},https://service-${i}.example.com,user${i}@example.com,ChromeVaultPass#${i},Imported note ${i}`,
+        );
+      }
+    }
+
+    const parsed = parsePasswordCsv(csvLines.join('\r\n'));
+    expect(parsed).toHaveLength(totalRows);
+    expect(parsed[0].title).toBe('Google Cloud Prod #1');
+    expect(parsed[0].notes).toBe('Recovery codes:\n1111-2222\nQuote "escaped" ok');
+    expect(parsed[500].title).toBe('cloudflare-batch2.com');
+
+    const chunks = chunkPasswordImportEntries(parsed);
+    expect(PASSWORD_IMPORT_BATCH_SIZE).toBe(500);
+    expect(chunks.map((c) => c.length)).toEqual([500, 500, 125]);
+
+    const progressSnapshots: PasswordImportProgress[] = [];
+    const imported = await client.importPasswords(parsed, {
+      onProgress: (prog) => {
+        progressSnapshots.push({ ...prog });
+      },
+    });
+
+    expect(imported).toHaveLength(totalRows);
+    expect(imported[0].password).toBe('ChromeSecret#0001');
+    expect(imported[500].password).toBe('BatchTwoBoundaryPass#501');
+    expect(imported[1124].title).toBe('Chrome Account #1125');
+    expect(imported[1124].password).toBe('ChromeVaultPass#1125');
+
+    // Progress must cover batches 1, 2, 3 and final completed state
+    expect(progressSnapshots.some((p) => p.batchIndex === 1 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots.some((p) => p.batchIndex === 2 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots.some((p) => p.batchIndex === 3 && p.totalBatches === 3)).toBe(true);
+    expect(progressSnapshots[progressSnapshots.length - 1]).toEqual({
+      phase: 'completed',
+      batchIndex: 3,
+      totalBatches: 3,
+      processedCount: totalRows,
+      totalCount: totalRows,
+    });
+
+    // Server must hold all 1,125 encrypted records
+    const listRes = await app.request('/api/v1/passwords', {
+      headers: { Authorization: `Bearer ${session.token}` },
+    });
+    expect(listRes.status).toBe(200);
+    const listJson = (await listRes.json()) as { items: EncryptedVaultRecordDto[] };
+    expect(listJson.items).toHaveLength(totalRows);
+
+    // Direct raw API call exceeding 500 items in a single request must return 400 BATCH_LIMIT_EXCEEDED
+    const oversizedItems = Array.from({ length: 501 }, (_, idx) => ({
+      id: randomUuid(),
+      revision: 1,
+      envelope: listJson.items[idx % listJson.items.length].envelope,
+    }));
+    const oversizedRes = await app.request('/api/v1/passwords/import', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: oversizedItems }),
+    });
+    expect(oversizedRes.status).toBe(400);
+    const oversizedErr = (await oversizedRes.json()) as { error: { code: string } };
+    expect(oversizedErr.error.code).toBe('BATCH_LIMIT_EXCEEDED');
+
+    // Zero plaintext proof on SQLite even for batch #3 (entry #1125)
+    inst.db.exec('PRAGMA wal_checkpoint(FULL);');
+    const rawDb = fs.readFileSync(dbPath).toString('utf8');
+    expect(rawDb).not.toContain('ChromeVaultPass#1125');
+    expect(rawDb).not.toContain('BatchTwoBoundaryPass#501');
   });
 
   it('handles client-encrypted multipart images, resumable PSENC001 MP4 videos, HTTP 206 range decryption, and Android + iOS delta sync', async () => {

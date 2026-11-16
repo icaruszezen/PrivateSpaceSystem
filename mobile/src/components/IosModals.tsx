@@ -33,7 +33,12 @@ import {
   IosStreamingVideoSurface,
   IosTotpRing,
 } from '../iosNativeBridge';
-import { parseMobilePasswordCsv, type PrivateSpaceMobileClient } from '../syncClient';
+import {
+  parseMobilePasswordCsv,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  type PasswordImportProgress,
+  type PrivateSpaceMobileClient,
+} from '../syncClient';
 
 export const PASSWORD_CATEGORIES: Array<{ id: PasswordCategory; label: string }> = [
   { id: 'login', label: '网站登录' },
@@ -561,6 +566,7 @@ export function IosPasswordEditorModal(props: {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [url, setUrl] = useState('');
+  const [enableTotp, setEnableTotp] = useState(false);
   const [totpSecret, setTotpSecret] = useState('');
   const [category, setCategory] = useState<PasswordCategory>('login');
   const [notes, setNotes] = useState('');
@@ -574,6 +580,7 @@ export function IosPasswordEditorModal(props: {
       setUsername(props.existing.username);
       setPassword(props.existing.password);
       setUrl(props.existing.url);
+      setEnableTotp(Boolean(props.existing.totpSecret?.trim()));
       setTotpSecret(props.existing.totpSecret);
       setCategory(props.existing.category);
       setNotes(props.existing.notes);
@@ -582,18 +589,21 @@ export function IosPasswordEditorModal(props: {
     } else {
       setTitle('');
       setUsername('');
-      setPassword(props.client.generateStrongPassword({ length: 22 }).password);
+      setPassword('');
       setUrl('');
+      setEnableTotp(false);
       setTotpSecret('');
       setCategory('login');
       setNotes('');
       setTagsText('');
       setCustomFields([]);
     }
-  }, [props.visible, props.existing, props.client]);
+  }, [props.visible, props.existing]);
 
   if (!props.visible) return null;
   const entropy = props.client.evaluateEntropy(password);
+  const liveTotp =
+    enableTotp && totpSecret.trim() ? props.client.computeTotp(totpSecret.trim()) : null;
 
   const inputStyle = {
     backgroundColor: props.theme.bgInput,
@@ -637,7 +647,7 @@ export function IosPasswordEditorModal(props: {
                   username: username.trim(),
                   password,
                   url: url.trim(),
-                  totpSecret: totpSecret.trim(),
+                  totpSecret: enableTotp ? totpSecret.trim() : '',
                   category,
                   notes,
                   tags,
@@ -655,7 +665,7 @@ export function IosPasswordEditorModal(props: {
           <TextInput
             value={title}
             onChangeText={setTitle}
-            placeholder="站点或凭据名称（例如 GitHub / AWS）"
+            placeholder="网站或应用名称（例如 京东商城 / 家庭路由 / GitHub）"
             style={inputStyle}
             testID="pw-title-input"
           />
@@ -663,7 +673,7 @@ export function IosPasswordEditorModal(props: {
             value={username}
             onChangeText={setUsername}
             autoCapitalize="none"
-            placeholder="账号 / 邮箱 / 手机号"
+            placeholder="账号 / 邮箱 / 手机号（选填）"
             style={inputStyle}
             testID="pw-username-input"
           />
@@ -671,7 +681,7 @@ export function IosPasswordEditorModal(props: {
             value={url}
             onChangeText={setUrl}
             autoCapitalize="none"
-            placeholder="关联网址（https://... 用于 iOS 自动填充匹配）"
+            placeholder="关联网址（选填，https://... 用于自动填充匹配）"
             style={inputStyle}
           />
 
@@ -727,7 +737,7 @@ export function IosPasswordEditorModal(props: {
               }}
             >
               <Text style={{ fontSize: 11, fontWeight: '700', color: props.theme.textSecondary }}>
-                口令 ({entropy.label} · {entropy.entropyBits} bits)
+                登录密码{password ? ` (${entropy.label} · ${entropy.entropyBits} bits)` : ''}
               </Text>
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <TouchableOpacity
@@ -755,7 +765,7 @@ export function IosPasswordEditorModal(props: {
               value={password}
               onChangeText={setPassword}
               autoCapitalize="none"
-              placeholder="输入或点击上方生成高熵口令"
+              placeholder="输入现有密码或点击上方生成高强度口令"
               style={{
                 ...inputStyle,
                 fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
@@ -763,16 +773,62 @@ export function IosPasswordEditorModal(props: {
             />
           </View>
 
-          <TextInput
-            value={totpSecret}
-            onChangeText={setTotpSecret}
-            autoCapitalize="none"
-            placeholder="2FA TOTP Base32 密钥或 otpauth://totp/..."
+          <View
             style={{
-              ...inputStyle,
-              fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+              backgroundColor: props.theme.bgCard,
+              padding: 12,
+              borderRadius: 12,
+              gap: 10,
+              borderWidth: 1,
+              borderColor: enableTotp ? props.theme.accent : props.theme.border,
             }}
-          />
+          >
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 13, fontWeight: '700', color: props.theme.textPrimary }}>
+                  两步验证 (2FA，可选)
+                </Text>
+                <Text style={{ fontSize: 11, color: props.theme.textSecondary, marginTop: 2 }}>
+                  大多数网站仅需密码；支持身份验证器时再按需开启
+                </Text>
+              </View>
+              <Switch value={enableTotp} onValueChange={setEnableTotp} />
+            </View>
+
+            {enableTotp && (
+              <>
+                <TextInput
+                  value={totpSecret}
+                  onChangeText={setTotpSecret}
+                  autoCapitalize="none"
+                  placeholder="Base32 密钥或 otpauth://totp/..."
+                  style={{
+                    ...inputStyle,
+                    fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                  }}
+                />
+                {liveTotp && (
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '700',
+                      color: props.theme.accent,
+                      fontFamily: 'SFMono-Regular, JetBrains Mono, monospace',
+                    }}
+                  >
+                    实时验证码：{liveTotp.formattedCode}（{liveTotp.remainingSeconds}s 刷新）
+                  </Text>
+                )}
+              </>
+            )}
+          </View>
 
           <TextInput
             value={tagsText}
@@ -1047,14 +1103,38 @@ export function IosCsvImportModal(props: {
   visible: boolean;
   theme: IosThemeTokens;
   onClose: () => void;
-  onImport: (csvText: string) => Promise<void>;
+  onImport: (
+    csvText: string,
+    onProgress?: (progress: PasswordImportProgress) => void,
+  ) => Promise<void>;
 }): React.JSX.Element | null {
   const [csv, setCsv] = useState('');
+  const [progress, setProgress] = useState<PasswordImportProgress | null>(null);
   if (!props.visible) return null;
   const parsedCount = parseMobilePasswordCsv(csv).length;
+  const batchCount = Math.ceil(parsedCount / PASSWORD_IMPORT_BATCH_SIZE);
+  const isImporting = Boolean(progress);
+
+  const handleRunImport = async () => {
+    if (!parsedCount || isImporting) return;
+    try {
+      await props.onImport(csv, (prog) => setProgress(prog));
+      setCsv('');
+      props.onClose();
+    } finally {
+      setProgress(null);
+    }
+  };
 
   return (
-    <Modal visible transparent animationType="slide" onRequestClose={props.onClose}>
+    <Modal
+      visible
+      transparent
+      animationType="slide"
+      onRequestClose={() => {
+        if (!isImporting) props.onClose();
+      }}
+    >
       <View
         style={{
           backgroundColor: props.theme.bgPage,
@@ -1068,21 +1148,44 @@ export function IosCsvImportModal(props: {
         <SheetHeader
           title="CSV 密码批量加密导入"
           leftLabel="取消"
-          rightLabel={`导入 (${parsedCount})`}
-          rightDisabled={parsedCount === 0}
-          onLeft={props.onClose}
-          onRight={() => void props.onImport(csv).then(props.onClose)}
+          rightLabel={
+            isImporting
+              ? `第 ${progress?.batchIndex}/${progress?.totalBatches} 批`
+              : batchCount > 1
+                ? `分 ${batchCount} 批导入 (${parsedCount})`
+                : `导入 (${parsedCount})`
+          }
+          rightDisabled={parsedCount === 0 || isImporting}
+          onLeft={() => {
+            if (!isImporting) props.onClose();
+          }}
+          onRight={() => void handleRunImport()}
           theme={props.theme}
         />
         <View style={{ padding: 16, gap: 10 }}>
           <Text style={{ fontSize: 12, color: props.theme.textSecondary }}>
-            兼容 Apple 密码、Chrome、1Password、Bitwarden 导出的 CSV 格式：
+            兼容 Google Chrome、Apple 密码、1Password、Bitwarden CSV 格式（超过{' '}
+            {PASSWORD_IMPORT_BATCH_SIZE} 条自动分批加密上传）：
           </Text>
+          {parsedCount > PASSWORD_IMPORT_BATCH_SIZE && (
+            <Text style={{ fontSize: 12, fontWeight: '600', color: props.theme.accent }}>
+              已识别 {parsedCount} 条记录 · 将自动拆分为 {batchCount} 批（每批最多{' '}
+              {PASSWORD_IMPORT_BATCH_SIZE} 条）顺序加密入库
+            </Text>
+          )}
+          {progress && (
+            <Text style={{ fontSize: 12, color: props.theme.accent }}>
+              正在执行第 {progress.batchIndex} / {progress.totalBatches} 批（已完成{' '}
+              {progress.processedCount} / {progress.totalCount} 条）...
+            </Text>
+          )}
           <TextInput
             value={csv}
-            onChangeText={setCsv}
+            onChangeText={(val) => {
+              if (!isImporting) setCsv(val);
+            }}
             multiline
-            placeholder={'name,url,username,password,totp\nGitHub,https://github.com,me@io.dev,Secret!99,JBSWY3DPEHPK3PXP'}
+            placeholder={'name,url,username,password,note\nGitHub,https://github.com,me@io.dev,Secret!99,主研发账号'}
             style={{
               minHeight: 140,
               backgroundColor: props.theme.bgInput,

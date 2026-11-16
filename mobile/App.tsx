@@ -52,9 +52,11 @@ import {
   InMemoryVaultPersistence,
   loadMobileUpdatePreferences,
   parseMobilePasswordCsv,
+  PASSWORD_IMPORT_BATCH_SIZE,
   PrivateSpaceMobileClient,
   saveMobileUpdatePreferences,
   type MobileVaultSnapshot,
+  type PasswordImportProgress,
 } from './src/syncClient';
 import {
   formatMobileBytes,
@@ -100,7 +102,7 @@ type PasswordHealthFilter =
   | 'totp'
   | 'weak'
   | 'reused'
-  | 'missing2fa'
+  | 'stale'
   | 'trash';
 
 type NoteFilter = 'all' | 'pinned' | 'archived' | 'trash';
@@ -726,16 +728,14 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     [client, activePasswords],
   );
 
-  const twoFactorCount = useMemo(
-    () => activePasswords.filter((p) => Boolean(p.totpSecret)).length,
-    [activePasswords],
-  );
+  const twoFactorCount = vaultHealth.totpIds.length;
 
   const visiblePasswords = useMemo(() => {
     const q = pwQuery.trim().toLowerCase();
     const weakSet = new Set(vaultHealth.weakIds);
     const reusedSet = new Set(vaultHealth.reusedIds);
-    const no2faSet = new Set(vaultHealth.missingTotpIds);
+    const staleSet = new Set(vaultHealth.staleIds);
+    const totpSet = new Set(vaultHealth.totpIds);
 
     return allPasswords.filter((item) => {
       if (pwHealthFilter === 'trash') {
@@ -743,10 +743,10 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
       } else {
         if (item.isTrashed) return false;
         if (pwHealthFilter === 'favorite' && !item.isPinned) return false;
-        if (pwHealthFilter === 'totp' && !item.totpSecret) return false;
+        if (pwHealthFilter === 'totp' && !totpSet.has(item.id)) return false;
         if (pwHealthFilter === 'weak' && !weakSet.has(item.id)) return false;
         if (pwHealthFilter === 'reused' && !reusedSet.has(item.id)) return false;
-        if (pwHealthFilter === 'missing2fa' && !no2faSet.has(item.id)) return false;
+        if (pwHealthFilter === 'stale' && !staleSet.has(item.id)) return false;
       }
       if (pwCategoryFilter !== 'all' && item.category !== pwCategoryFilter) return false;
       if (!q) return true;
@@ -954,12 +954,20 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
     showToast('密文记录已彻底擦除');
   };
 
-  const handleCsvImport = async (csvText: string) => {
+  const handleCsvImport = async (
+    csvText: string,
+    onProgress?: (progress: PasswordImportProgress) => void,
+  ) => {
     const entries = parseMobilePasswordCsv(csvText);
     if (!entries.length) return;
-    const imported = await client.importPasswords(entries);
+    const imported = await client.importPasswords(entries, { onProgress });
     await performSync(true);
-    showToast(`已批量加密导入 ${imported.length} 条凭据`);
+    const batchCount = Math.ceil(imported.length / PASSWORD_IMPORT_BATCH_SIZE);
+    if (batchCount > 1) {
+      showToast(`已自动分 ${batchCount} 批加密导入 ${imported.length} 条凭据`);
+    } else {
+      showToast(`已批量加密导入 ${imported.length} 条凭据`);
+    }
   };
 
   const handlePickAndUploadMedia = async (kind: 'image' | 'video') => {
@@ -1978,7 +1986,8 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                       {vaultHealth.healthScore}
                     </Text>
                     <Text style={{ fontSize: 12, color: theme.textSecondary }}>
-                      / 100 分 · {twoFactorCount}/{vaultHealth.totalCount} 启用 2FA
+                      / 100 分 · 共 {vaultHealth.totalCount} 项凭据
+                      {twoFactorCount > 0 ? `（${twoFactorCount} 项含 2FA）` : ''}
                     </Text>
                   </View>
                 </View>
@@ -2030,11 +2039,15 @@ export default function PrivateSpaceMobileApp(props: PrivateSpaceMobileAppProps 
                   {(
                     [
                       ['all', `全部 (${activePasswords.length})`],
-                      ['totp', `2FA 动态码 (${twoFactorCount})`],
                       ['favorite', '★ 收藏'],
+                      ...(twoFactorCount > 0 || pwHealthFilter === 'totp'
+                        ? ([['totp', `含 2FA (${twoFactorCount})`]] as Array<
+                            [PasswordHealthFilter, string]
+                          >)
+                        : []),
                       ['weak', `弱口令 (${vaultHealth.weakIds.length})`],
                       ['reused', `重复 (${vaultHealth.reusedIds.length})`],
-                      ['missing2fa', `缺 2FA (${vaultHealth.missingTotpIds.length})`],
+                      ['stale', `久未换 (${vaultHealth.staleIds.length})`],
                       ['trash', '回收站'],
                     ] as Array<[PasswordHealthFilter, string]>
                   ).map(([id, label]) => (

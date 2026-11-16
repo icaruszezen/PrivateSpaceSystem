@@ -55,6 +55,11 @@ import {
   resolveUpdateFromGithubReleases,
   type GithubReleaseApiItem,
 } from '@shared/appUpdate';
+import {
+  chunkPasswordImportEntries,
+  PASSWORD_IMPORT_BATCH_SIZE,
+  parsePasswordCsv,
+} from '@shared/passwordCsv';
 import type {
   AppUpdateCheckResponse,
   AuthEnvelopeResponse,
@@ -92,6 +97,8 @@ import type {
   PasswordCustomField,
   PasswordDecryptedPayload,
   PasswordHistoryEntry,
+  PasswordImportOptions,
+  PasswordImportProgress,
   PasswordItem,
   ReleaseManifestDto,
   ServerUpdateConfigResponse,
@@ -635,77 +642,14 @@ export function parsePairingInput(
   }
 }
 
+export { PASSWORD_IMPORT_BATCH_SIZE, chunkPasswordImportEntries };
+export type { PasswordImportOptions, PasswordImportProgress };
+
 /**
  * Parse Chrome / Apple Passwords / 1Password / Bitwarden CSV exports on mobile.
  */
 export function parseMobilePasswordCsv(csvText: string): ImportPasswordEntryInput[] {
-  const lines = csvText
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (lines.length < 2) return [];
-
-  const splitCsvLine = (line: string): string[] => {
-    const cols: string[] = [];
-    let cur = '';
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
-      if (inQuotes) {
-        if (ch === '"') {
-          if (line[i + 1] === '"') {
-            cur += '"';
-            i += 1;
-          } else {
-            inQuotes = false;
-          }
-        } else {
-          cur += ch;
-        }
-      } else if (ch === '"') {
-        inQuotes = true;
-      } else if (ch === ',') {
-        cols.push(cur.trim());
-        cur = '';
-      } else {
-        cur += ch;
-      }
-    }
-    cols.push(cur.trim());
-    return cols;
-  };
-
-  const headers = splitCsvLine(lines[0]).map((h) => h.toLowerCase());
-  const idxOf = (names: string[]) => headers.findIndex((h) => names.includes(h));
-
-  const titleIdx = idxOf(['name', 'title', 'service', '标题', '名称']);
-  const urlIdx = idxOf(['url', 'login_uri', 'website', '网址']);
-  const userIdx = idxOf(['username', 'login_username', 'user', 'account', '用户名', '账号']);
-  const passIdx = idxOf(['password', 'login_password', '密码']);
-  const totpIdx = idxOf(['totp', 'login_totp', 'otpauth', 'otp']);
-  const notesIdx = idxOf(['note', 'notes', 'extra', '备注']);
-
-  const entries: ImportPasswordEntryInput[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cols = splitCsvLine(lines[i]);
-    const get = (idx: number) => (idx >= 0 && idx < cols.length ? cols[idx] : '');
-    const password = get(passIdx);
-    const url = get(urlIdx);
-    const title = get(titleIdx) || url.replace(/^https?:\/\//i, '').split('/')[0] || '导入账号';
-    if (!password) continue;
-
-    entries.push({
-      title,
-      username: get(userIdx),
-      password,
-      url,
-      totpSecret: get(totpIdx),
-      category: 'login',
-      notes: get(notesIdx),
-    });
-  }
-  return entries;
+  return parsePasswordCsv(csvText);
 }
 
 export class MobileApiError extends Error {
@@ -2043,49 +1987,89 @@ export class PrivateSpaceMobileClient {
     return res.purgedCount;
   }
 
-  async importPasswords(entries: ImportPasswordEntryInput[]): Promise<PasswordItem[]> {
+  async importPasswords(
+    entries: ImportPasswordEntryInput[],
+    options?: PasswordImportOptions,
+  ): Promise<PasswordItem[]> {
     const dek = this.requireUnlockedDek();
-    const now = new Date().toISOString();
-    const items: CreateEncryptedItemRequest[] = [];
+    const batches = chunkPasswordImportEntries(entries, options?.batchSize);
+    if (batches.length === 0) return [];
 
-    for (const entry of entries.slice(0, 500)) {
-      if (!entry.title && !entry.password && !entry.username) continue;
-      const id = generateClientUuid();
-      const payload: PasswordDecryptedPayload = {
-        title: (entry.title || entry.url || '导入凭据').trim().slice(0, 120),
-        username: (entry.username || '').trim().slice(0, 240),
-        password: entry.password || '',
-        url: (entry.url || '').trim().slice(0, 500),
-        totpSecret: (entry.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
-        category: entry.category || 'login',
-        notes: (entry.notes || '').slice(0, 10_000),
-        tags: normalizeTags(entry.tags ?? []),
-        customFields: [],
-        history: [],
-        passwordChangedAt: now,
-      };
-      const envelope = await encryptItemPayload(dek, id, 'password', 1, payload);
-      items.push({ id, revision: 1, envelope });
+    const totalBatches = batches.length;
+    const totalCount = batches.reduce((sum, batch) => sum + batch.length, 0);
+    const allImported: PasswordItem[] = [];
+
+    for (let bIdx = 0; bIdx < totalBatches; bIdx++) {
+      const batch = batches[bIdx];
+      const batchIndex = bIdx + 1;
+
+      options?.onProgress?.({
+        phase: 'encrypting',
+        batchIndex,
+        totalBatches,
+        processedCount: allImported.length,
+        totalCount,
+      });
+
+      const now = new Date().toISOString();
+      const items: CreateEncryptedItemRequest[] = [];
+      for (const entry of batch) {
+        const id = generateClientUuid();
+        const payload: PasswordDecryptedPayload = {
+          title: (entry.title || entry.url || '导入凭据').trim().slice(0, 120),
+          username: (entry.username || '').trim().slice(0, 240),
+          password: entry.password || '',
+          url: (entry.url || '').trim().slice(0, 500),
+          totpSecret: (entry.totpSecret || '').replace(/\s+/g, '').toUpperCase().slice(0, 160),
+          category: entry.category || 'login',
+          notes: (entry.notes || '').slice(0, 10_000),
+          tags: normalizeTags(entry.tags ?? []),
+          customFields: [],
+          history: [],
+          passwordChangedAt: now,
+        };
+        const envelope = await encryptItemPayload(dek, id, 'password', 1, payload);
+        items.push({ id, revision: 1, envelope });
+      }
+
+      options?.onProgress?.({
+        phase: 'uploading',
+        batchIndex,
+        totalBatches,
+        processedCount: allImported.length,
+        totalCount,
+      });
+
+      const res = await this.requestJson<{ items: EncryptedVaultRecordDto[]; count: number }>(
+        '/api/v1/passwords/import',
+        {
+          method: 'POST',
+          body: JSON.stringify({ items }),
+        },
+      );
+
+      const batchImported = await Promise.all(
+        res.items.map((rec) => hydrateDecryptedPassword(dek, rec)),
+      );
+      allImported.push(...batchImported);
+
+      await this.upsertSnapshotItem((snap) => {
+        for (const pw of batchImported) {
+          snap.passwords[pw.id] = pw;
+          snap.lastSyncSeq = Math.max(snap.lastSyncSeq, pw.syncSeq);
+        }
+      });
     }
 
-    const res = await this.requestJson<{ items: EncryptedVaultRecordDto[]; count: number }>(
-      '/api/v1/passwords/import',
-      {
-        method: 'POST',
-        body: JSON.stringify({ items }),
-      },
-    );
-
-    const imported = await Promise.all(
-      res.items.map((rec) => hydrateDecryptedPassword(dek, rec)),
-    );
-    await this.upsertSnapshotItem((snap) => {
-      for (const pw of imported) {
-        snap.passwords[pw.id] = pw;
-        snap.lastSyncSeq = Math.max(snap.lastSyncSeq, pw.syncSeq);
-      }
+    options?.onProgress?.({
+      phase: 'completed',
+      batchIndex: totalBatches,
+      totalBatches,
+      processedCount: allImported.length,
+      totalCount,
     });
-    return imported;
+
+    return allImported;
   }
 
   computeTotp(secretOrUri: string, timestampMs = Date.now()): TotpTokenSnapshot | null {

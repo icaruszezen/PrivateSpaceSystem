@@ -477,45 +477,79 @@ public actor PrivateSpaceAPIClient {
         return try VaultE2EECrypto.hydrateDecryptedPassword(dek: dek, record: res.item)
     }
 
-    public func importPasswords(_ entries: [ImportPasswordEntryInput]) async throws -> [PasswordItem] {
-        let dek = try requireUnlockedDek()
-        let nowIso = ISO8601DateFormatter().string(from: Date())
-        var encryptedItems: [CreateEncryptedItemRequest] = []
-        encryptedItems.reserveCapacity(entries.count)
+    public static let passwordImportBatchSize = 500
 
-        for entry in entries {
-            let id = UUID().uuidString.lowercased()
-            let payload = PasswordDecryptedPayload(
-                title: entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "导入账号" : entry.title.trimmingCharacters(in: .whitespacesAndNewlines),
-                username: (entry.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                password: entry.password,
-                url: (entry.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                totpSecret: (entry.totpSecret ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-                category: entry.category ?? .login,
-                notes: entry.notes ?? "",
-                tags: VaultE2EECrypto.normalizeTags(entry.tags ?? []),
-                customFields: [],
-                history: [],
-                passwordChangedAt: nowIso
-            )
-            let envelope = try VaultE2EECrypto.encryptItemPayload(
-                dek: dek,
-                itemId: id,
-                itemType: .password,
-                revision: 1,
-                payload: payload
-            )
-            encryptedItems.append(CreateEncryptedItemRequest(id: id, isPinned: false, revision: 1, envelope: envelope))
+    public func importPasswords(
+        _ entries: [ImportPasswordEntryInput],
+        batchSize: Int = PrivateSpaceAPIClient.passwordImportBatchSize,
+        onProgress: (@Sendable (_ batchIndex: Int, _ totalBatches: Int, _ processedCount: Int, _ totalCount: Int) -> Void)? = nil
+    ) async throws -> [PasswordItem] {
+        let dek = try requireUnlockedDek()
+        let validEntries = entries.filter {
+            !$0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+            !$0.password.isEmpty ||
+            !($0.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        guard !validEntries.isEmpty else { return [] }
+
+        let effectiveBatchSize = min(max(1, batchSize), Self.passwordImportBatchSize)
+        let totalCount = validEntries.count
+        let totalBatches = (totalCount + effectiveBatchSize - 1) / effectiveBatchSize
 
         struct Resp: Decodable { let items: [EncryptedVaultRecordDto]; let count: Int }
-        let body = try JSONEncoder().encode(BatchCreateEncryptedItemsRequest(items: encryptedItems))
-        let res: Resp = try await performJSON(
-            path: "/api/v1/passwords/import",
-            method: "POST",
-            bodyData: body
-        )
-        return try res.items.map { try VaultE2EECrypto.hydrateDecryptedPassword(dek: dek, record: $0) }
+        var allImported: [PasswordItem] = []
+        allImported.reserveCapacity(totalCount)
+
+        for bIdx in 0..<totalBatches {
+            let start = bIdx * effectiveBatchSize
+            let end = min(start + effectiveBatchSize, totalCount)
+            let batchSlice = validEntries[start..<end]
+            let batchIndex = bIdx + 1
+
+            onProgress?(batchIndex, totalBatches, allImported.count, totalCount)
+
+            let nowIso = ISO8601DateFormatter().string(from: Date())
+            var encryptedItems: [CreateEncryptedItemRequest] = []
+            encryptedItems.reserveCapacity(batchSlice.count)
+
+            for entry in batchSlice {
+                let id = UUID().uuidString.lowercased()
+                let trimmedTitle = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let payload = PasswordDecryptedPayload(
+                    title: trimmedTitle.isEmpty ? "导入账号" : trimmedTitle,
+                    username: (entry.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    password: entry.password,
+                    url: (entry.url ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    totpSecret: (entry.totpSecret ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                    category: entry.category ?? .login,
+                    notes: entry.notes ?? "",
+                    tags: VaultE2EECrypto.normalizeTags(entry.tags ?? []),
+                    customFields: [],
+                    history: [],
+                    passwordChangedAt: nowIso
+                )
+                let envelope = try VaultE2EECrypto.encryptItemPayload(
+                    dek: dek,
+                    itemId: id,
+                    itemType: .password,
+                    revision: 1,
+                    payload: payload
+                )
+                encryptedItems.append(CreateEncryptedItemRequest(id: id, isPinned: false, revision: 1, envelope: envelope))
+            }
+
+            let body = try JSONEncoder().encode(BatchCreateEncryptedItemsRequest(items: encryptedItems))
+            let res: Resp = try await performJSON(
+                path: "/api/v1/passwords/import",
+                method: "POST",
+                bodyData: body
+            )
+            let hydratedBatch = try res.items.map { try VaultE2EECrypto.hydrateDecryptedPassword(dek: dek, record: $0) }
+            allImported.append(contentsOf: hydratedBatch)
+        }
+
+        onProgress?(totalBatches, totalBatches, allImported.count, totalCount)
+        return allImported
     }
 
     public func updatePassword(id: String, patch: UpdatePasswordRequest) async throws -> PasswordItem {
